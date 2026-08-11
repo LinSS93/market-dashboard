@@ -32,23 +32,23 @@ Market Dashboard 是一个帮助个人投资者整理信息、跟踪自选股并
 
 ## 演示截图
 
-下列截图使用完全虚构的演示数据，只用于说明界面与工作流程，不代表真实行情、投资观点或预期收益。
-
-### 股票监控
-
-![股票监控界面（演示数据）](docs/images/stock-monitoring.png)
+下列均为公开版实际页面截图，所有个股、ETF 和研究档案均为虚构的 `Demo*` 样本，只用于说明功能与工作流程，不代表真实行情、投资观点或预期收益。
 
 ### 首页
 
 ![Market Dashboard 首页](docs/images/home-local-first.png)
 
-### 机会雷达研究档案
+### 股票监控
 
-![机会雷达研究档案](docs/images/radar-archive.png)
+![股票监控界面（虚构演示数据）](docs/images/stock-monitoring.png)
 
-### 机会雷达候选池
+### 杠杆 ETF 追踪
 
-![机会雷达候选池](docs/images/radar-candidate-pool.png)
+![杠杆 ETF 追踪界面（虚构演示数据）](docs/images/leveraged-etf-tracking.png)
+
+### 机会雷达
+
+![机会雷达候选池（虚构演示数据）](docs/images/radar-candidate-pool.png)
 
 ## 如何开始
 
