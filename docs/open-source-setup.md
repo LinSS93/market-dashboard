@@ -2,7 +2,7 @@
 
 Install the Node version declared in `.nvmrc`, run `npm ci`, then run `npm run check:all`. Start locally with `npm start` and create the first administrator in the browser.
 
-If your package manager blocks native install scripts and reports a missing `better-sqlite3` binding, review and approve only that dependency under your local policy, then run `npm rebuild better-sqlite3`. Do not disable script security globally or use an unreviewed install hook.
+The public `package.json` approves install scripts only for `better-sqlite3`, which supplies the local SQLite native binding; its concrete version is pinned in `package-lock.json`. The included `.npmrc` makes any other unapproved lifecycle script fail. Review dependency, lockfile, and approval changes together; do not relax script security globally.
 
 The runtime configuration file is ignored by Git and environment variables take precedence. `npm start` sets `MARKET_DASHBOARD_BACKGROUND_ENABLED=0`, so it never starts recurring data collection, LLM work, alerts, automatic backups, or background analysis. To opt in after reviewing providers and costs, set `MARKET_DASHBOARD_BACKGROUND_ENABLED=1` in your shell before `npm start`; then enable only the individual producer flags you need.
 

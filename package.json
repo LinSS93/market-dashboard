@@ -30,5 +30,8 @@
     "pdf-parse": "^2.4.5"
   },
   "description": "Local-first market research dashboard. Research support only; not investment advice or automated trading.",
-  "license": "MIT"
+  "license": "MIT",
+  "allowScripts": {
+    "better-sqlite3": true
+  }
 }
