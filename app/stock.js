@@ -1790,7 +1790,7 @@ function renderGrid(raw, ana, ext){
     const earningsTag = earningsTagFor(s, mkt);
     tr.innerHTML =
       '<td><div class="name-cell"><button type="button" class="drag-handle" title="拖动排序" aria-label="拖动 '+esc(s)+' 排序">⋮⋮</button><div class="name-text"><span class="stock-name">'+esc((st && st.name) || w.label || s)+'</span><span class="stock-code">'+esc(s)+' <span class="mkt-badge mkt-'+mkt+'">'+mktTag(mkt)+'</span>'+earningsTag+'</span></div></div></td>'+
-      '<td>'+price+extInline+'</td>'+ 
+      '<td>'+price+extInline+'</td>'+
       '<td class="'+chgCls+'">'+chg+'</td>'+
       extCell +
       '<td>'+(sig ? '<span class="badge '+sigClass(sig)+'" title="'+esc((eff.swing ? eff.swing.summary : (eff.reliability && eff.reliability.summary ? eff.reliability.summary : ''))+(sigSub?'；'+sigSub:''))+'">'+esc(sigLabel)+'</span>' : '<span class="muted">—</span>')+'</td>'+
