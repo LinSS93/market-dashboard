@@ -34,6 +34,10 @@ Market Dashboard 是一个帮助个人投资者整理信息、跟踪自选股并
 
 下列截图使用完全虚构的演示数据，只用于说明界面与工作流程，不代表真实行情、投资观点或预期收益。
 
+### 股票监控
+
+![股票监控界面（演示数据）](docs/images/stock-monitoring.png)
+
 ### 首页
 
 ![Market Dashboard 首页](docs/images/home-local-first.png)
