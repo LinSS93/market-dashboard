@@ -33,9 +33,19 @@ Open http://127.0.0.1:8080. The first visit creates a local administrator. The s
 The images below use four entirely fictional companies created by `npm run demo:seed`. They illustrate research workflow only, not live market data, investment ideas, or expected returns.
 下列图片仅使用 `npm run demo:seed` 创建的四家完全虚构公司；它们只演示研究流程，不包含真实行情、投资观点或收益预期。
 
+### Local-first home / 本地优先首页
+
+![Market Dashboard local-first home](docs/images/home-local-first.png)
+
+### Radar research archive / 机会雷达研究档案
+
+![Radar research archive with fictional demo data](docs/images/radar-archive.png)
+
+### Radar candidate pool / 机会候选池
+
 ![Radar candidate pool with fictional demo data](docs/images/radar-candidate-pool.png)
 
-*Radar candidate pool / 机会候选池：按研究优先级分组；分数不是收益预测。*
+*The candidate pool groups research priority; its score is not a return forecast. / 候选池按研究优先级分组；分数不是收益预测。*
 
 ## Optional data and research producers / 可选数据与研究生产器
 
