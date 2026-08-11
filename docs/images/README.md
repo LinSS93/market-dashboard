@@ -8,3 +8,9 @@ Use this directory only for images that are safe to publish. Screenshots are opt
 - Crop browser chrome and remove notifications before capture. / 截图前裁掉浏览器边框并清除通知。
 - Add a short caption that says the image uses demo data. / 为每张图片添加“使用演示数据”的简短说明。
 - Run `npm run verify:public:strict` after adding an image. / 添加图片后运行 `npm run verify:public:strict`。
+
+## Included demo images / 已附带演示图片
+
+- `radar-candidate-pool.png`: fictional Radar candidate pool. / 虚构数据的机会候选池。
+- `radar-archive.png`: fictional Radar research archive. / 虚构数据的研究档案库。
+- `home-local-first.png`: public local-first home page. / 公开版的本地优先首页。

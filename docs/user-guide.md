@@ -63,3 +63,18 @@ Read [local setup and safe defaults](open-source-setup.md) and [data-source resp
 
 Screenshots for a public release must use fabricated or explicitly redistributable demo data only. See [the screenshot policy](images/README.md) before contributing an image.
 公开发布所用截图必须仅使用虚构或明确允许再分发的演示数据。提交图片前，请阅读[截图规范](images/README.md)。
+
+The following views use only the four fictional companies created by `npm run demo:seed`.
+下列界面仅使用 `npm run demo:seed` 创建的四家完全虚构公司。
+
+### Candidate pool / 机会候选池
+
+![Radar candidate pool with fictional demo data](images/radar-candidate-pool.png)
+
+### Research archive / 研究档案库
+
+![Radar research archive with fictional demo data](images/radar-archive.png)
+
+### Local-first home / 本地优先首页
+
+![Market Dashboard local-first home](images/home-local-first.png)

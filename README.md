@@ -25,6 +25,15 @@ npm start
 Open http://127.0.0.1:8080. The first visit creates a local administrator. The server binds to loopback by default; do not expose port 8080 directly to the public Internet. The public `npm start` command keeps every network-backed background job off.
 访问 http://127.0.0.1:8080；首次访问会创建本地管理员。服务默认只绑定回环地址，请勿直接将 8080 端口暴露到公网。公开版的 `npm start` 默认关闭所有需要联网的后台任务。
 
+## Demo preview / 演示预览
+
+The images below use four entirely fictional companies created by `npm run demo:seed`. They illustrate research workflow only, not live market data, investment ideas, or expected returns.
+下列图片仅使用 `npm run demo:seed` 创建的四家完全虚构公司；它们只演示研究流程，不包含真实行情、投资观点或收益预期。
+
+![Radar candidate pool with fictional demo data](docs/images/radar-candidate-pool.png)
+
+*Radar candidate pool / 机会候选池：按研究优先级分组；分数不是收益预测。*
+
 ## Optional data and research producers / 可选数据与研究生产器
 
 All Radar producers are **off** by default. To opt in locally, copy `config/market-dashboard.runtime.env.example` to `config/market-dashboard.runtime.env` and read [the setup guide](docs/open-source-setup.md). Provider credentials are local-only: never commit credentials, collected market data, or provider responses.
