@@ -25,6 +25,9 @@ npm start
 Open http://127.0.0.1:8080. The first visit creates a local administrator. The server binds to loopback by default; do not expose port 8080 directly to the public Internet. The public `npm start` command keeps every network-backed background job off.
 访问 http://127.0.0.1:8080；首次访问会创建本地管理员。服务默认只绑定回环地址，请勿直接将 8080 端口暴露到公网。公开版的 `npm start` 默认关闭所有需要联网的后台任务。
 
+**Windows ZIP / Windows 便捷包：** download the Windows ZIP from the latest Release, extract it, then double-click `Start-Market-Dashboard.cmd`. See [Windows quick start](docs/windows-quick-start.md).
+**Windows ZIP / Windows 便捷包：** 从最新 Release 下载 Windows ZIP，解压后双击 `Start-Market-Dashboard.cmd`。详见 [Windows 快速使用](docs/windows-quick-start.md)。
+
 ## Demo preview / 演示预览
 
 The images below use four entirely fictional companies created by `npm run demo:seed`. They illustrate research workflow only, not live market data, investment ideas, or expected returns.

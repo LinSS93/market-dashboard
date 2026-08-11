@@ -8,6 +8,9 @@ Market Dashboard is a local research tool. It does not place orders, synchronize
 Start the public release with `npm start`, then open http://127.0.0.1:8080. Create the first local administrator when prompted. The public release starts with no personal data and with all network-backed background producers disabled.
 使用 `npm start` 启动公开版，再打开 http://127.0.0.1:8080；按提示创建首个本地管理员。公开版不附带个人数据，且默认关闭所有需要联网的后台生产器。
 
+Windows users can instead download the convenient ZIP and double-click `Start-Market-Dashboard.cmd`. See [Windows quick start](windows-quick-start.md).
+Windows 用户也可下载便捷 ZIP，双击 `Start-Market-Dashboard.cmd`。详见 [Windows 快速使用](windows-quick-start.md)。
+
 ## Optional fictional demo / 可选虚构演示
 
 For a fresh, disposable local installation, you can seed four fictional companies to explore the Radar interface. This script refuses to run when it detects user data, never contacts a provider, and does not create a recommendation.
