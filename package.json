@@ -26,7 +26,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",
-    "csv-parse": "^6.2.1",
+    "csv-parse": "^7.0.2",
     "pdf-parse": "^2.4.5"
   },
   "description": "Local-first market research dashboard. Research support only; not investment advice or automated trading.",
