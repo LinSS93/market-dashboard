@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Market Dashboard · 市场决策看板</title>
+<link rel="stylesheet" href="shared.css">
+<link rel="stylesheet" href="workspace-theme.css">
+<link rel="stylesheet" href="land.css">
+</head>
+<body class="workspace-app land-workspace">
+<header>
+  <h1><a href="/">Market Dashboard</a></h1>
+  <nav>
+    <a href="/stock">股票监控</a>
+    <a href="/tracker">杠杆 ETF 追踪</a>
+    <a href="/radar-v2">机会雷达</a>
+    <a href="/lab">实验室</a>
+    <a href="/control">控制中心</a>
+  </nav>
+  <div class="workspace-header-status">
+    <span class="land-version">本地优先 · 单进程 · 数据落盘</span>
+  </div>
+</header>
+
+<main class="land-main">
+  <!-- Hero -->
+  <section class="land-hero">
+    <div class="land-hero-copy">
+      <p class="land-eyebrow">MARKET DECISION DASHBOARD</p>
+      <h2 class="land-title">一站式多市场<br>决策看板</h2>
+      <p class="land-sub">股票监控 · 杠杆 ETF 追踪 · 机会雷达，统一信号引擎驱动，纯 Node 标准库单进程运行，行情与决策数据全部落盘在本地。</p>
+      <div class="land-hero-cta">
+        <a class="btn land-btn-primary" href="/stock">进入股票监控 →</a>
+        <a class="btn land-btn-ghost" href="/radar-v2">浏览机会雷达</a>
+      </div>
+      <ul class="land-hero-tags">
+        <li>No 外部后端</li>
+        <li>US / HK / KR / CN</li>
+        <li>数据本地落盘</li>
+        <li>MCP 只读接口</li>
+      </ul>
+    </div>
+    <div class="land-hero-visual">
+      <img src="assets/land-hero.jpg" alt="市场数据看板抽象示意" loading="eager">
+    </div>
+  </section>
+
+  <!-- 能力亮点 -->
+  <section class="land-section">
+    <h3 class="land-section-title">为什么值得关注</h3>
+    <div class="land-features">
+      <div class="land-feature">
+        <div class="land-feature-ic land-feature-ic-blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div>
+        <h4>统一信号引擎</h4>
+        <p>股票与 ETF 共用一套动作档位与信号引擎，回测、审计、漂移报告闭环，每次算法改动都有版本号可追溯。</p>
+      </div>
+      <div class="land-feature">
+        <div class="land-feature-ic land-feature-ic-green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22h14a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v3"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><circle cx="11" cy="14" r="2"/><path d="M12.5 15.5 15 18"/></svg></div>
+        <h4>LLM 语义证据</h4>
+        <p>机会雷达对接官方公告与新闻，由大模型抽取结构化语义证据进入评分，而非简单关键词加权。</p>
+      </div>
+      <div class="land-feature">
+        <div class="land-feature-ic land-feature-ic-amber"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></div>
+        <h4>多市场覆盖</h4>
+        <p>美股、港股、韩股、A 股统一日历与行情适配，跨市场基准指数参照，支持盘前盘后风险覆盖。</p>
+      </div>
+      <div class="land-feature">
+        <div class="land-feature-ic land-feature-ic-red"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5"/><path d="M9 7V2"/><path d="M15 7V2"/><path d="M6 13V8h12v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4Z"/></svg></div>
+        <h4>AI Agent 可读</h4>
+        <p>内置 MCP 只读接口，AI 代理可直接读取看板数据用于进一步分析，接口仅暴露查询能力，安全可控。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 看板入口 -->
+  <section class="land-section">
+    <h3 class="land-section-title">四个看板</h3>
+    <div class="land-boards">
+      <a class="land-board" href="/stock">
+        <div class="land-board-head">
+          <span class="land-board-name">股票监控</span>
+          <span class="land-board-arrow">→</span>
+        </div>
+        <p>自选股 / 持仓、日 K 与波段信号、决策卡、期权异动、空头情绪、价格提醒。</p>
+        <span class="land-board-route">/stock</span>
+      </a>
+      <a class="land-board" href="/tracker">
+        <div class="land-board-head">
+          <span class="land-board-name">杠杆 ETF 追踪</span>
+          <span class="land-board-arrow">→</span>
+        </div>
+        <p>配对追踪、跨币种 NAV 核算、溢价 / 折价信号、分位数与直方图审计。</p>
+        <span class="land-board-route">/tracker</span>
+      </a>
+      <a class="land-board" href="/radar-v2">
+        <div class="land-board-head">
+          <span class="land-board-name">机会雷达</span>
+          <span class="land-board-arrow">→</span>
+        </div>
+        <p>全市场批量快照 → 流动性 / 技术 / 证据评分 → 研究优先级候选池与档案。</p>
+        <span class="land-board-route">/radar-v2</span>
+      </a>
+      <a class="land-board" href="/control">
+        <div class="land-board-head">
+          <span class="land-board-name">控制中心</span>
+          <span class="land-board-arrow">→</span>
+        </div>
+        <p>信号提醒开关、飞书 Webhook、雷达调度、数据源状态与执行审计。</p>
+        <span class="land-board-route">/control</span>
+      </a>
+    </div>
+  </section>
+
+  <!-- 底部 -->
+  <footer class="land-footer">
+    <p>Market Dashboard —— 个人工具，不构成任何投资建议。</p>
+    <p class="land-footer-meta">纯 Node 标准库 + SQLite · 运行于 Node.js 26 · 采用 ~MIT~ License（待定）</p>
+  </footer>
+</main>
+</body>
+</html>

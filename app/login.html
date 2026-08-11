@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 · Market Dashboard</title>
+  <link rel="stylesheet" href="login.css">
+</head>
+<body>
+  <main class="login-card">
+    <p class="eyebrow">MARKET DASHBOARD</p>
+    <h1>登录看板</h1>
+    <p id="loginHint">使用管理员账号登录。</p>
+    <form id="loginForm">
+      <label>账号<input id="username" name="username" autocomplete="username" required value="admin"></label>
+      <label>密码<input id="password" name="password" type="password" autocomplete="current-password" required></label>
+      <label class="remember-row"><input id="remember" name="remember" type="checkbox">记住我（30 天内免登录）</label>
+      <button type="submit">登录</button>
+    </form>
+    <p id="loginError" role="alert"></p>
+    <p class="recovery">忘记密码：请在部署服务器上执行 <code>npm run admin:reset</code>。系统不提供网页或邮箱重置。</p>
+  </main>
+  <script src="login.js"></script>
+</body>
+</html>

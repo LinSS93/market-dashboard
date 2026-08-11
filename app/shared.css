@@ -1,0 +1,354 @@
+/* 旧 --xxx 变量已迁移到 workspace-theme.css 的 --ws-xxx + 别名兼容层。
+   所有颜色/圆角/阴影的单一真相源在 workspace-theme.css .workspace-app 作用域内。
+   本文件保留布局与组件样式，不再定义变量。 */
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+}
+
+header {
+  min-height: 54px;
+  box-shadow: 0 1px 0 rgba(255,255,255,.06) inset, 0 1px 6px rgba(0,0,0,.12);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.wrap {
+  width: min(1920px, calc(100vw - 24px));
+  margin-top: 12px;
+}
+
+/* toolbar 视觉样式（min-height/padding/gap/margin/background/border/radius）
+   统一由 workspace-theme.css .workspace-app .toolbar 定义，此处不再覆盖。
+   仅保留 flex-wrap 用于工具栏内容换行。 */
+.toolbar {
+  flex-wrap: wrap;
+}
+
+/* 控件高度统一由 workspace-theme.css --ws-control 令牌管理（32px）。
+   #addForm input/select 在表单上下文中需要 --ws-control-lg（36px）。 */
+#addForm input,
+#addForm select {
+  min-height: var(--ws-control-lg);
+}
+
+/* .card / .list-card 已收拢到 workspace-theme.css（P1 风格统一第 5 步） */
+.modal-box {
+  border-radius: var(--ws-radius);
+  box-shadow: var(--ws-shadow-sm);
+}
+
+.main-layout {
+  gap: 16px;
+}
+
+.list-panel {
+  flex-basis: 58%;
+}
+
+.detail-panel {
+  flex-basis: 42%;
+  scrollbar-gutter: stable;
+  container-type: inline-size;
+  container-name: stock-detail;
+}
+
+.list-card {
+  max-height: calc(100vh - 112px);
+}
+
+.list-card .card-inner {
+  overflow: auto;
+}
+
+.stock-grid-table {
+  min-width: 1040px;
+}
+
+.list-card th,
+.list-card td {
+  padding: 7px 7px;
+  font-size: 13px;
+  line-height: 1.35;
+  vertical-align: middle;
+}
+
+.list-card th {
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+/* .badge 已收拢到 workspace-theme.css（P1 风格统一第 4 步） */
+
+.ind,
+.vp,
+small {
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+
+.detail {
+  padding: 16px;
+}
+
+.detail h2 {
+  font-size: 18px;
+}
+
+.stats {
+  gap: 18px;
+}
+
+.stat {
+  min-width: 96px;
+}
+
+.stat .v {
+  font-size: 23px;
+  line-height: 1.15;
+}
+
+.banner,
+.riskbox,
+.reasons,
+.posrow {
+  border-radius: var(--radius);
+}
+
+.posrow {
+  flex-wrap: wrap;
+}
+
+.posrow .fld {
+  display: flex;
+  flex: 0 1 140px;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.posrow input {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--ws-line-strong);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.chart {
+  height: 220px;
+}
+
+.detail-note {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: var(--ws-surface);
+  border: 1px solid var(--ws-line);
+  border-radius: 6px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.detail-note.soft {
+  background: var(--ws-surface-alt);
+}
+
+.detail-note.compact {
+  margin-top: 0;
+  margin-bottom: 8px;
+}
+
+.detail-note .note-title {
+  font-weight: 700;
+}
+
+.detail-note .note-row {
+  color: var(--muted);
+}
+
+.chks label {
+  min-height: 28px;
+}
+
+@media (min-width: 1500px) {
+  .list-panel { flex-basis: 60%; }
+  .detail-panel { flex-basis: 40%; }
+  .list-card th,
+  .list-card td { font-size: 13.5px; }
+}
+
+@media (max-width: 1200px) {
+  .list-panel {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+  }
+  .list-card .card-inner {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+}
+
+@container stock-detail (max-width: 620px) {
+  .option-flow-head { display:none; }
+  .option-flow-list { border:0; }
+  .option-flow-row {
+    grid-template-columns:repeat(3, minmax(0, 1fr));
+    gap:10px 16px;
+    margin-bottom:7px;
+    padding:10px 11px;
+    border:1px solid var(--ws-line);
+    border-radius:6px;
+    background:var(--ws-surface);
+  }
+  .option-cell,
+  .option-cell.align-right { text-align:left; }
+  .option-cell::before {
+    content:attr(data-label);
+    display:block;
+    margin-bottom:2px;
+    color:var(--ws-muted-soft);
+    font-size:10.5px;
+    font-weight:600;
+  }
+}
+
+@container stock-detail (max-width: 440px) {
+  .option-flow-row { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+}
+
+@container stock-detail (max-width: 300px) {
+  .option-flow-row { grid-template-columns:1fr; }
+}
+
+/* === 顶部全局大盘指数条（跨看板共享） === */
+.global-index-bar {
+  display:flex; align-items:stretch; gap:0; padding:0;
+  background:var(--ws-surface); border-bottom:1px solid var(--ws-line);
+  overflow-x:auto; scrollbar-width:thin;
+  position: sticky;
+  top: 52px;
+  z-index: 99;
+}
+.global-index-bar::-webkit-scrollbar { height:3px; }
+.global-index-bar::-webkit-scrollbar-thumb { background:var(--ws-line-strong); border-radius:2px; }
+.global-index-bar:empty { display:none; }
+.idx-item {
+  display:flex; flex-direction:column; justify-content:center;
+  gap:2px; padding:6px 14px; min-width:96px;
+  border-right:1px solid var(--ws-line); white-space:nowrap;
+  font-variant-numeric:tabular-nums; line-height:1.2;
+}
+.idx-item:last-child { border-right:none; }
+.idx-row { display:flex; align-items:baseline; gap:6px; }
+.idx-label { font-size:11px; color:var(--ws-muted-soft); font-weight:600; letter-spacing:0.02em; }
+.idx-pct { font-size:11px; font-weight:700; min-width:42px; }
+.idx-item.idx-up .idx-pct { color:var(--ws-green); }
+.idx-item.idx-dn .idx-pct { color:var(--ws-red); }
+.idx-item.idx-flat .idx-pct { color:var(--ws-muted); }
+.idx-price { font-size:13px; color:var(--ws-ink); font-weight:700; }
+.idx-item.idx-up .idx-price { color:var(--ws-green); }
+.idx-item.idx-dn .idx-price { color:var(--ws-red); }
+.idx-spark { margin-top:2px; opacity:0.9; flex:0 1 auto; min-width:0; max-width:60px; overflow:hidden; }
+.idx-spark svg { width:100%; height:auto; display:block; }
+
+/* === 共享双区布局：PC 双区独立滚动 + 手机 master-detail 切换 ===
+   适用于 stock / tracker / radar 等左侧列表 + 右侧详情的看板。
+   用法：在 .main-layout 上加 .split-layout，.list-panel 上加 .split-list，
+   .detail-panel 上加 .split-detail。 */
+
+.split-layout {
+  --split-top-offset: 155px;
+  display: flex;
+  gap: 14px;
+  align-items: stretch;
+  height: calc(100vh - var(--split-top-offset));
+}
+
+.split-list {
+  flex: 0 0 52%;
+  min-width: 0;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.split-detail {
+  flex: 1 1 48%;
+  min-width: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* 列表卡片填满列表区高度，内部表格滚动 */
+.split-list .list-card {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.split-list .list-card .card-inner {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* 返回按钮：仅手机端可见 */
+.back-btn {
+  display: none;
+}
+
+/* 手机端 master-detail 切换：列表全屏，点击后详情滑入全屏 */
+@media (max-width: 760px) {
+  .split-layout {
+    --split-top-offset: 165px;
+    position: relative;
+    overflow: hidden;
+  }
+  .split-list {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%;
+    height: 100%;
+    flex-basis: 100%;
+    z-index: 10;
+  }
+  .split-detail {
+    position: absolute;
+    top: 0; left: 100%;
+    width: 100%;
+    height: 100%;
+    flex-basis: 100%;
+    z-index: 20;
+    transition: transform 0.3s ease;
+  }
+  .split-detail.active {
+    transform: translateX(-100%);
+  }
+  .back-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: transparent;
+    border: none;
+    color: var(--ws-muted, #6b7280);
+    font-size: 13px;
+    cursor: pointer;
+    padding: 6px 10px;
+    border-radius: 4px;
+  }
+  .back-btn:hover {
+    background: var(--ws-surface-soft, #f5f7fa);
+  }
+}

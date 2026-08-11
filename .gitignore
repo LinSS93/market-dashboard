@@ -1,0 +1,15 @@
+node_modules/
+data/
+logs/
+backups/
+outputs/
+.secrets/
+.env
+.env.*
+!*.example
+*.db
+*.db-wal
+*.db-shm
+*.log
+config/market-dashboard.runtime.env
+.deploy-info.json

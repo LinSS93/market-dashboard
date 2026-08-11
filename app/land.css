@@ -1,0 +1,266 @@
+/* Market Dashboard 落地页样式。
+   复用 workspace-theme.css 的 --ws-* 设计令牌，与五个看板保持视觉统一。
+   布局：Hero 首屏 → 能力亮点 → 看板入口 → 底部。
+   间距对齐 8pt 网格：8/16/24/32/40/48。 */
+
+.land-workspace {
+  background: var(--ws-canvas);
+  color: var(--ws-ink);
+}
+
+/* 顶栏版本说明 */
+.land-workspace .land-version {
+  color: var(--ws-muted-soft);
+  font-size: var(--ws-font-sm);
+  white-space: nowrap;
+}
+
+.land-main {
+  width: min(1200px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 0 0 64px;
+}
+
+/* ===== Hero ===== */
+.land-hero {
+  display: grid;
+  grid-template-columns: 1.05fr 0.95fr;
+  gap: 48px;
+  align-items: center;
+  padding: 64px 0 48px;
+}
+
+.land-hero-copy {
+  min-width: 0;
+}
+
+.land-eyebrow {
+  margin: 0 0 16px;
+  color: var(--ws-blue);
+  font-size: var(--ws-font-xs);
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.land-title {
+  margin: 0 0 16px;
+  font-size: clamp(30px, 4.5vw, 46px);
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  color: var(--ws-ink);
+}
+
+.land-sub {
+  margin: 0 0 32px;
+  max-width: 520px;
+  color: var(--ws-muted);
+  font-size: var(--ws-font-lg);
+  line-height: 1.7;
+}
+
+.land-hero-cta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 32px;
+}
+
+/* 落地页按钮高度与看板统一（32px），padding 加宽以匹配 hero 尺度 */
+.land-btn-primary {
+  min-height: 40px;
+  padding: 0 24px;
+  background: var(--ws-blue);
+  color: #fff;
+  font-size: var(--ws-font-md);
+  font-weight: 600;
+}
+.land-btn-primary:hover { background: var(--ws-blue-hover); }
+
+.land-btn-ghost {
+  min-height: 40px;
+  padding: 0 24px;
+  background: var(--ws-surface);
+  border: 1px solid var(--ws-line-strong);
+  color: var(--ws-ink-soft);
+  font-size: var(--ws-font-md);
+  font-weight: 600;
+}
+.land-btn-ghost:hover { background: var(--ws-surface-soft); border-color: var(--ws-blue); color: var(--ws-blue); }
+
+.land-hero-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+.land-hero-tags li {
+  padding: 6px 12px;
+  border: 1px solid var(--ws-line);
+  border-radius: var(--ws-radius-sm);
+  background: var(--ws-surface);
+  color: var(--ws-muted);
+  font-size: var(--ws-font-xs);
+  font-weight: 600;
+}
+
+.land-hero-visual {
+  min-width: 0;
+}
+.land-hero-visual img {
+  width: 100%;
+  height: auto;
+  display: block;
+  border-radius: var(--ws-radius-lg);
+  border: 1px solid var(--ws-line);
+  box-shadow: var(--ws-shadow-md);
+}
+
+/* ===== 通用 section ===== */
+.land-section {
+  padding: 48px 0 8px;
+}
+
+.land-section-title {
+  margin: 0 0 24px;
+  font-size: var(--ws-font-2xl);
+  font-weight: 700;
+  color: var(--ws-ink);
+}
+
+/* ===== 能力亮点 ===== */
+.land-features {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.land-feature {
+  padding: 24px;
+  border: 1px solid var(--ws-line);
+  border-radius: var(--ws-radius);
+  background: var(--ws-surface);
+  box-shadow: var(--ws-shadow-sm);
+}
+
+.land-feature-ic {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  margin-bottom: 16px;
+  border-radius: var(--ws-radius-sm);
+}
+.land-feature-ic svg {
+  width: 20px;
+  height: 20px;
+}
+.land-feature-ic-blue { background: var(--ws-blue-soft); color: var(--ws-blue); }
+.land-feature-ic-green { background: var(--ws-green-soft); color: var(--ws-green); }
+.land-feature-ic-amber { background: var(--ws-amber-soft); color: var(--ws-amber); }
+.land-feature-ic-red { background: var(--ws-red-soft); color: var(--ws-red); }
+
+.land-feature h4 {
+  margin: 0 0 8px;
+  font-size: var(--ws-font-lg);
+  font-weight: 700;
+  color: var(--ws-ink);
+}
+
+.land-feature p {
+  margin: 0;
+  color: var(--ws-muted);
+  font-size: var(--ws-font-sm);
+  line-height: 1.65;
+}
+
+/* ===== 看板入口 ===== */
+.land-boards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.land-board {
+  display: block;
+  padding: 24px;
+  border: 1px solid var(--ws-line);
+  border-radius: var(--ws-radius);
+  background: var(--ws-surface);
+  box-shadow: var(--ws-shadow-sm);
+  text-decoration: none;
+  transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+.land-board:hover {
+  border-color: var(--ws-blue);
+  box-shadow: var(--ws-shadow-md);
+  transform: translateY(-2px);
+}
+
+.land-board-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.land-board-name {
+  font-size: var(--ws-font-xl);
+  font-weight: 700;
+  color: var(--ws-ink);
+}
+
+.land-board-arrow {
+  color: var(--ws-muted-soft);
+  font-size: var(--ws-font-xl);
+  font-weight: 700;
+}
+.land-board:hover .land-board-arrow { color: var(--ws-blue); }
+
+.land-board p {
+  margin: 0 0 16px;
+  color: var(--ws-muted);
+  font-size: var(--ws-font-sm);
+  line-height: 1.65;
+}
+
+.land-board-route {
+  color: var(--ws-muted-soft);
+  font-size: var(--ws-font-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* ===== 底部 ===== */
+.land-footer {
+  margin-top: 48px;
+  padding: 24px 0 0;
+  border-top: 1px solid var(--ws-line);
+  color: var(--ws-muted-soft);
+  font-size: var(--ws-font-sm);
+  line-height: 1.7;
+}
+.land-footer p { margin: 0; }
+.land-footer-meta { margin-top: 8px; font-size: var(--ws-font-xs); }
+
+/* ===== 响应式（复用项目断点：1400 / 900 / 760） ===== */
+@media (max-width: 900px) {
+  .land-features { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .land-hero { grid-template-columns: 1fr; gap: 32px; padding-top: 48px; }
+  .land-hero-visual { order: -1; }
+}
+
+@media (max-width: 760px) {
+  .land-main { width: calc(100% - 24px); }
+  .land-hero { padding-top: 32px; }
+  .land-title { font-size: 30px; }
+  .land-features { grid-template-columns: 1fr; }
+  .land-boards { grid-template-columns: 1fr; }
+  .land-workspace .land-version { display: none; }
+}

@@ -1,0 +1,37 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { AdminAuthStore, clearSessionCookie, sessionCookie } from '../auth.mjs';
+
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'market-dashboard-auth-'));
+const authFile = path.join(root, 'admin-auth.json');
+let now = 1_700_000_000_000;
+const store = new AdminAuthStore({ filePath: authFile, now: () => now });
+
+assert.equal(store.getStatus().configured, false, 'fresh auth store must require setup');
+assert.throws(() => store.resetPassword({ username: 'admin', password: 'short' }), /12/, 'short password is rejected');
+assert.throws(() => store.createInitialAdmin({ username: 'admin', password: 'short' }), /12/, 'short bootstrap password is rejected');
+const bootstrap = store.createInitialAdmin({ username: 'Owner', password: 'correct horse battery staple', ip: '127.0.0.1' });
+assert.equal(bootstrap.ok, true, 'initial administrator can be created once');
+assert.equal(store.getStatus().username, 'owner', 'bootstrap normalizes username');
+assert.equal(store.createInitialAdmin({ username: 'other', password: 'another correct password' }).code, 'already_configured', 'bootstrap never overwrites an existing credential');
+assert.equal(store.authenticate({ headers: { cookie: `market_dashboard_session=${bootstrap.token}` } }).username, 'owner', 'bootstrap issues a session');
+store.resetPassword({ username: 'Owner', password: 'correct horse battery staple' });
+assert.equal(store.getStatus().username, 'owner', 'username is normalized');
+assert.equal(store.login({ username: 'owner', password: 'wrong', ip: '127.0.0.1' }).ok, false, 'wrong password is rejected');
+const login = store.login({ username: 'OWNER', password: 'correct horse battery staple', ip: '127.0.0.1' });
+assert.equal(login.ok, true, 'valid credentials issue a session');
+assert.equal(store.authenticate({ headers: { cookie: `market_dashboard_session=${login.token}` } }).username, 'owner', 'session authenticates');
+store.resetPassword({ username: 'owner', password: 'new correct horse battery staple' });
+assert.equal(store.authenticate({ headers: { cookie: `market_dashboard_session=${login.token}` } }), null, 'password reset invalidates old sessions');
+for (let i = 0; i < 5; i += 1) store.login({ username: 'owner', password: 'wrong', ip: '192.0.2.1' });
+assert.equal(store.login({ username: 'owner', password: 'new correct horse battery staple', ip: '192.0.2.1' }).code, 'rate_limited', 'failed logins are throttled');
+now += 16 * 60 * 1000;
+assert.equal(store.login({ username: 'owner', password: 'new correct horse battery staple', ip: '192.0.2.1' }).ok, true, 'throttle expires after its window');
+assert.match(sessionCookie('token', { headers: {} }), /HttpOnly; SameSite=Strict/, 'local HTTP cookie keeps HttpOnly and SameSite');
+assert.doesNotMatch(sessionCookie('token', { headers: {} }), /Secure/, 'local HTTP cookie is usable without HTTPS');
+assert.match(sessionCookie('token', { headers: { 'x-forwarded-proto': 'https' } }), /Secure/, 'HTTPS reverse proxy cookie is secure');
+assert.match(clearSessionCookie({ headers: { 'x-forwarded-proto': 'https' } }), /Max-Age=0/, 'logout clears the session cookie');
+fs.rmSync(root, { recursive: true, force: true });
+console.log('[OK] admin authentication checks passed.');

@@ -1,0 +1,15 @@
+# Local setup and safe defaults
+
+Install the Node version declared in `.nvmrc`, run `npm ci`, then run `npm run check:all`. Start locally with `npm start` and create the first administrator in the browser.
+
+If your package manager blocks native install scripts and reports a missing `better-sqlite3` binding, review and approve only that dependency under your local policy, then run `npm rebuild better-sqlite3`. Do not disable script security globally or use an unreviewed install hook.
+
+The runtime configuration file is ignored by Git and environment variables take precedence. `npm start` sets `MARKET_DASHBOARD_BACKGROUND_ENABLED=0`, so it never starts recurring data collection, LLM work, alerts, automatic backups, or background analysis. To opt in after reviewing providers and costs, set `MARKET_DASHBOARD_BACKGROUND_ENABLED=1` in your shell before `npm start`; then enable only the individual producer flags you need.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `RADAR_V2_SCANNER_ENABLED` | off | Starts the all-market scan scheduler. |
+| `RADAR_V2_DOSSIER_ENABLED` | off | Produces official-event dossiers and runs their evaluator. |
+| `RADAR_V2_TREND_ENABLED` | off | Enables trend shadow research for explicit markets. |
+| `RADAR_V2_FUNDAMENTAL_ENABLED` | off | Enables fundamental-change research for explicit markets. |
+| `RADAR_V2_THESIS_ENABLED` | off | Enables limited LLM preliminary-research generation. |

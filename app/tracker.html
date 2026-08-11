@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>杠杆 ETF 决策看板</title>
+<script src="vendor/echarts.min.js"></script>
+<link rel="stylesheet" href="tracker.css">
+<link rel="stylesheet" href="shared.css">
+<link rel="stylesheet" href="workspace-theme.css">
+</head>
+<body class="workspace-app tracker-workspace">
+<header>
+  <h1><a href="/">Market Dashboard</a></h1>
+  <nav>
+    <a href="/stock">股票监控</a>
+    <a href="/tracker" class="ac">杠杆 ETF 追踪</a>
+    <a href="/radar-v2">机会雷达</a>
+    <a href="/lab">实验室</a>
+    <a href="/control">控制中心</a>
+  </nav>
+  <div class="header-status-area workspace-header-status">
+    <span class="hint" id="status">连接中…</span>
+    <span id="mktStatus" class="market-strip"></span>
+  </div>
+</header>
+
+<div id="globalIndexBar" class="global-index-bar" aria-label="全球大盘指数"></div>
+
+<div class="wrap">
+  <div class="toolbar">
+    <div class="market-filter-buttons" id="mktFilter" role="group" aria-label="市场筛选">
+      <button class="active" data-mkt="HK" onclick="toggleMarket('HK')">港股</button>
+      <button class="active" data-mkt="KR" onclick="toggleMarket('KR')">韩股</button>
+      <button class="active" data-mkt="US" onclick="toggleMarket('US')">美股</button>
+      <button class="active" onclick="selectAllMarkets()">全选</button>
+    </div>
+    <span class="toolbar-spacer"></span>
+    <button class="btn ghost" onclick="openCompareModal()">对比</button>
+    <button class="btn" onclick="toggleAdd()">+ 添加</button>
+    <input type="hidden" id="sortSel" value="auto">
+  </div>
+
+  <div id="addForm" class="card">
+    <div class="fld">ETF 代码<input id="f_etf" placeholder="如 07709"></div>
+    <div class="fld">ETF 市场<select id="f_emkt"><option>HK</option><option>KR</option><option>US</option></select></div>
+    <div class="fld">正股代码<input id="f_und" placeholder="如 000660（可空）"></div>
+    <div class="fld">正股市场<select id="f_umkt"><option value="">无</option><option>KR</option><option>US</option><option>HK</option></select></div>
+    <div class="fld">汇率对<input id="f_fx" placeholder="自动推断（KR→fx_skrwhkd）"></div>
+    <div class="fld">杠杆倍率<input id="f_lev" type="number" value="2" step="0.5" style="width:70px"></div>
+    <div class="fld">年化产品成本 %<input id="f_cost" type="number" min="0" step="0.01" placeholder="可留空" style="width:100px"></div>
+    <div class="fld">标签<input id="f_label" placeholder="如 海力士2x"></div>
+    <button class="btn" id="saveBtn" onclick="addPair(this)">保存</button>
+    <button class="btn ghost" onclick="toggleAdd()">取消</button>
+  </div>
+
+  <div class="main-layout split-layout">
+    <!-- 左：追踪列表（可滚动） -->
+    <div class="list-panel split-list">
+      <div class="list-card">
+        <div class="list-tools">
+          <input id="watchSearch" type="search" placeholder="搜索代码或名称" oninput="trackerReSort()" aria-label="搜索 ETF 或正股">
+          <select id="signalFilter" onchange="trackerReSort()" aria-label="按动作筛选">
+            <option value="all">全部动作</option><option value="entry">试仓 / 加仓</option><option value="hold">持有</option><option value="observe">观察</option><option value="risk">减仓 / 清仓 / 回避</option>
+          </select>
+          <span id="watchCount" class="list-count">0/0</span>
+        </div>
+        <div class="card-inner">
+        <table class="tracker-grid-table">
+          <colgroup><col style="width:22%"><col style="width:10%"><col style="width:10%"><col style="width:13%"><col style="width:13%"><col style="width:13%"><col style="width:15%"><col style="width:4%"></colgroup>
+          <thead><tr><th style="padding-left:36px"><button class="sort-header" type="button" id="sortCode" onclick="cycleTrackerSort('code')">ETF / 正股 <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th><button class="sort-header" type="button" id="sortPrice" onclick="cycleTrackerSort('price')">现价 <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th><button class="sort-header" type="button" id="sortPrem" onclick="cycleTrackerSort('prem')">溢价 <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th>信号</th><th>量价</th><th><button class="sort-header" type="button" id="sortPnl" onclick="cycleTrackerSort('pnl')">持仓 / 盈亏 <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th data-col="sentiment">期权 / 空头</th><th></th></tr></thead>
+          <tbody id="gridBody"></tbody>
+        </table>
+        <div id="empty" class="hint" style="padding:14px 0;display:none">还没有追踪项。点击「+ 添加追踪」加入一对 ETF 与正股。</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 右：详情面板（固定可见） -->
+    <div class="detail-panel split-detail">
+
+  <div id="detail" class="detail card">
+    <div class="detail-head">
+      <button class="back-btn" type="button" onclick="hideDetailPanel()">← 返回列表</button>
+      <!-- 三段式常驻标题栏：不论切到哪个 tab 都可见 -->
+      <div id="d_head_idle" class="head-idle">
+        <h2>— 选择追踪对查看详情 —</h2>
+        <div class="head-sub">点击左侧列表中的追踪对查看 NAV、溢价与图表</div>
+      </div>
+      <div id="d_head_main" class="head-main" style="display:none">
+        <!-- 第一行：ETF 名称 + 代码 + 市场标 + 决策徽章 -->
+        <div class="head-row head-row-name">
+          <div class="head-name-block">
+            <span class="head-name" id="d_h_name">—</span>
+            <span class="head-code" id="d_h_code">—</span>
+            <span class="mkt-badge" id="d_h_mkt"></span>
+          </div>
+          <span class="badge b-null" id="d_h_action">—</span>
+        </div>
+        <!-- 第二行：ETF 现价 + 溢价% + 决策摘要 banner -->
+        <div class="head-row head-row-meta">
+          <div class="head-price-block">
+            <span class="head-price" id="d_h_price">—</span>
+            <span class="head-chg" id="d_h_prem">—</span>
+          </div>
+          <div class="head-banner" id="d_banner">信号计算中…</div>
+        </div>
+      </div>
+    </div>
+    <div class="detail-tabs" role="tablist" aria-label="ETF 详情">
+      <button class="detail-tab active" data-tab="decision" onclick="switchTrackerTab('decision',this)">决策</button>
+      <button class="detail-tab" data-tab="position" onclick="switchTrackerTab('position',this)">持仓</button>
+    </div>
+    <!-- 决策 tab：4 段决策链路（参照股票监控看板） -->
+    <section class="detail-tab-panel active" data-panel="decision">
+      <!-- 段 1：决策结论 —— 决策卡（分组键值表 + 数字高亮） -->
+      <div id="d_decision" class="decision-card"></div>
+      <!-- 段 2：关键价位条 + 溢价走势图 -->
+      <div id="d_keylevels" class="key-levels">
+        <div class="kl-item"><div class="kl-k">ETF 现价</div><div class="kl-v" id="d_price">—</div></div>
+        <div class="kl-item"><div class="kl-k" id="d_nav_k">理论 NAV</div><div class="kl-v" id="d_nav">—</div></div>
+        <div class="kl-item"><div class="kl-k">溢价率</div><div class="kl-v" id="d_prem">—</div></div>
+        <div class="kl-item"><div class="kl-k">正股现价</div><div class="kl-v" id="d_und">—</div></div>
+      </div>
+      <div class="charts">
+        <div id="chPrem" class="chart"></div>
+      </div>
+      <!-- 段 3：决策依据 —— 4 个子模块（按"决策推理 → 正股详情 → 数据可信度 → 市场情绪"逻辑链路） -->
+      <details class="fold" open><summary>决策依据</summary><div class="fold-content">
+        <div id="d_underlying_signal" class="underlying-signal-card"></div>
+        <div id="d_layers" class="tracker-decision-layers"></div>
+        <div id="d_diagnosis"></div>
+        <div id="d_sentiment_cross"></div>
+      </div></details>
+      <!-- 段 4：历史复盘 —— 整合原"研究"tab 的 3 个 fold，默认折叠 -->
+      <details class="fold" ontoggle="onHistoryFoldToggle(this)"><summary>历史复盘<span class="muted" style="margin-left:8px;font-weight:normal">· 仅供回看，不影响决策</span></summary><div class="fold-content">
+        <div class="research-intro">溢价率分布用于判断买点 / 卖点，信号 / 提醒记录仅供回看，不会反向影响正式决策。</div>
+        <details class="fold sub-fold"><summary>溢价率历史分布<span class="muted" style="margin-left:8px;font-weight:normal">· 最近 30 天</span></summary><div class="fold-content">
+          <div id="d_premium_dist" class="premium-dist-box"><div class="hint">加载中…</div></div>
+        </div></details>
+        <details class="fold sub-fold"><summary>近期信号生命周期<span class="muted" style="margin-left:8px;font-weight:normal">· 最近 40 条</span></summary><div class="fold-content">
+          <div id="d_signal_audit" class="signal-alert-audit"><div class="hint">正在积累信号记录</div></div>
+        </div></details>
+        <details class="fold sub-fold"><summary>已发送提醒<span class="muted" style="margin-left:8px;font-weight:normal">· 最近 40 条</span></summary><div class="fold-content">
+          <div id="d_alert_audit" class="signal-alert-audit"><div class="hint">暂无提醒记录</div></div>
+        </div></details>
+      </div></details>
+    </section>
+    <!-- 持仓 tab：4 张汇总卡 + 操作事件 lot 管理（与股票监控看板对齐） -->
+    <section class="detail-tab-panel" data-panel="position">
+      <!-- 顶部 4 张汇总卡（参考股票监控 pos-card 样式） -->
+      <div class="position-summary-cards" id="d_pos_cards">
+        <div class="pos-card"><div class="pos-k">持仓股数</div><div class="pos-v" id="pos_card_shares">—</div></div>
+        <div class="pos-card"><div class="pos-k">成本价 <span id="p_cost_ccy">HKD</span></div><div class="pos-v" id="pos_card_cost">—</div></div>
+        <div class="pos-card"><div class="pos-k">浮盈 / 浮亏</div><div class="pos-v" id="pos_card_pl">—</div></div>
+        <div class="pos-card"><div class="pos-k">市值</div><div class="pos-v" id="pos_card_mv">—</div></div>
+      </div>
+      <!-- ETF 特有字段已精简：产品年化成本% 不再让用户配置（默认 0，NAV 不扣减） -->
+      <input id="p_product_cost" type="hidden" value="">
+      <!-- 隐藏承载容器：原 p_shares/p_cost/p_pl 仍由 JS 引用，保留以避免报错 -->
+      <div style="display:none">
+        <input id="p_shares" type="number" value="0">
+        <input id="p_cost" type="number" value="0">
+        <div id="p_pl">—</div>
+      </div>
+      <!-- 操作事件 fold：与股票监控看板表单一致（事件类型/股数/单价/费用/日期/备注） -->
+      <details class="fold" open><summary>操作事件</summary><div class="fold-content">
+        <div class="research-intro">持仓状态（股数 / 成本价）由下方操作事件流水推算，上方汇总卡自动更新。股票监控看板录入的事件也会合并显示。</div>
+        <div class="trade-form" id="d_trade_form">
+          <div class="fld">事件类型
+            <select id="lot_side">
+              <option value="BUY">买入</option>
+              <option value="SELL">卖出</option>
+            </select>
+          </div>
+          <div class="fld">股数 <input id="lot_shares" type="number" min="0" step="1" placeholder="0"></div>
+          <div class="fld">单价 <input id="lot_price" type="number" min="0" step="0.01" placeholder="0.00"></div>
+          <div class="fld">费用 <input id="lot_fee" type="number" min="0" step="0.01" placeholder="0.00"></div>
+          <div class="fld">日期 <input id="lot_date" type="date"></div>
+          <div class="fld">备注 <input id="lot_tag" type="text" maxlength="100" placeholder="可选"></div>
+          <button class="btn primary" type="button" onclick="addLot()">记录事件</button>
+        </div>
+        <div class="trade-history" id="d_lots"><div class="detail-note soft compact">暂无操作事件。</div></div>
+      </div></details>
+      <!-- 个人历史校准详情卡已删除（参考股票看板，后端降级逻辑保留） -->
+      <div id="d_personal" style="display:none"></div>
+    </section>
+  </div>
+  </div>
+  </div>
+</div>
+
+<div id="alertModal" class="modal">
+  <div class="modal-box alert-center-box">
+    <span class="closeX" onclick="closeAlertModal()">×</span>
+    <h2>本机浏览器通知</h2>
+    <p class="alert-center-lead">这里只管理当前浏览器的桌面通知权限。ETF 动作档位、Webhook 与通知文案统一在控制中心设置。</p>
+    <div class="alert-channel">
+      <div class="alert-channel-head"><span class="alert-channel-title">浏览器桌面通知</span><label class="switch"><input type="checkbox" id="browserChk" onchange="onBrowserToggle()"><span class="slider"></span></label></div>
+      <div id="browserStatusText" class="alert-channel-state off">读取权限中…</div>
+      <button id="browserGrantBtn" class="alert-inline-btn" type="button" onclick="enableNotify()">授权浏览器</button>
+    </div>
+    <p class="hint" style="margin-top:14px;line-height:1.6">浏览器提醒仅在本页保持打开时生效。<a href="/control#notification-settings">前往控制中心管理正式通知设置</a></p>
+  </div>
+</div>
+
+<!-- 跨标的对比面板（P1-9）：多选 ETF 叠加 premium 曲线 -->
+<div id="compareModal" class="modal">
+  <div class="modal-box compare-box">
+    <span class="closeX" onclick="closeCompareModal()">×</span>
+    <h2>跨标的对比</h2>
+    <p class="alert-center-lead">多选 ETF（最多 8 个）叠加显示溢价率曲线，便于横向比较折价/溢价机会。</p>
+    <div class="sec">
+      <div class="sec-t">选择标的 <span id="cmpCount" class="cmp-count">0</span> / 8</div>
+      <div id="cmpPicker" class="cmp-picker"></div>
+    </div>
+    <div class="sec row">
+      <div class="cmp-time-row">
+        <label class="cmp-time-lbl">时间窗口：</label>
+        <select id="cmpWindow">
+          <option value="60">最近 60 分钟</option>
+          <option value="120" selected>最近 120 分钟</option>
+          <option value="240">最近 240 分钟</option>
+          <option value="480">最近 8 小时</option>
+          <option value="1440">最近 24 小时</option>
+        </select>
+        <button class="btn" type="button" onclick="drawCompare()">绘制对比</button>
+        <button class="btn ghost" type="button" onclick="clearCompare()">清空选择</button>
+      </div>
+    </div>
+    <div id="cmpChart" class="cmp-chart"></div>
+    <div id="cmpHint" class="hint">选择标的后点击「绘制对比」</div>
+  </div>
+</div>
+
+<script src="action-taxonomy.cjs"></script>
+<script src="market-thresholds.cjs"></script>
+<script src="dashboard-shared.js"></script>
+<script src="data-health-ui.js"></script>
+<script src="sortable-list.js"></script>
+<script src="notification-center.js"></script>
+<script src="tracker.js"></script>
+</body>
+</html>

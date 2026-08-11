@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>实验室 · Market Dashboard</title>
+<link rel="stylesheet" href="shared.css">
+<link rel="stylesheet" href="workspace-theme.css">
+<link rel="stylesheet" href="scenario-research.css">
+<script src="scenario-research.js" defer></script>
+</head>
+<body class="workspace-app scenario-research-app">
+<header>
+  <h1><a href="/">Market Dashboard</a></h1>
+  <nav>
+    <a href="/stock">股票监控</a>
+    <a href="/tracker">杠杆 ETF 追踪</a>
+    <a href="/radar-v2">机会雷达</a>
+    <a href="/lab" class="ac">实验室</a>
+    <a href="/control">控制中心</a>
+  </nav>
+  <div class="header-status-area workspace-header-status">
+    <span class="conn-indicator" id="researchConn" title="实验数据连接状态"></span>
+    <span class="hint" id="researchStatus">加载实验室账本…</span>
+  </div>
+</header>
+
+<main class="research-wrap">
+  <section class="research-hero">
+    <div>
+      <span class="research-kicker">Laboratory · V1d</span>
+      <h2>实验室账本</h2>
+      <p>记录盘后冻结的条件、后续路径与模型效果评估。成熟前不显示胜率；所有统计仅用于实验与复盘，不改变正式交易动作。</p>
+    </div>
+    <button id="researchRefresh" class="btn" type="button">刷新数据</button>
+  </section>
+
+  <section class="research-filters card" aria-label="实验室筛选">
+    <label>市场
+      <select id="researchMarket"><option value="">全部市场</option><option value="US">美股</option><option value="HK">港股</option><option value="CN">A 股</option><option value="KR">韩股</option></select>
+    </label>
+    <label>情景类型
+      <select id="researchKind"><option value="">全部情景</option><option value="waiting_confirmation">等待确认</option><option value="active_long">持有/进场</option><option value="risk_rebuild">风险重建</option></select>
+    </label>
+    <label>决策状态
+      <select id="researchState"><option value="">全部状态</option><option value="WATCH">观察</option><option value="PROBE">试仓</option><option value="ADD">加仓</option><option value="HOLD">持有</option><option value="TRIM">减仓</option><option value="EXIT">清仓</option><option value="AVOID">回避</option></select>
+    </label>
+    <span id="researchFilterMeta" class="muted"></span>
+  </section>
+
+  <section class="research-summary" aria-label="实验室摘要">
+    <article class="research-stat"><span>冻结观察</span><strong id="rsTotal">—</strong><small>只计真实线上实验</small></article>
+    <article class="research-stat"><span>已成熟</span><strong id="rsMature">—</strong><small>可复盘，仍非预测概率</small></article>
+    <article class="research-stat"><span>待结算</span><strong id="rsPending">—</strong><small>后续日 K 尚不足</small></article>
+    <article class="research-stat"><span>采集健康</span><strong id="rsCoverage">—</strong><small id="rsCoverageNote">按市场/交易日检查</small></article>
+    <article class="research-stat"><span>模型评估</span><strong id="rsDrift">—</strong><small id="rsDriftNote">基于真实冻结样本</small></article>
+  </section>
+
+  <section class="research-grid">
+    <article class="research-panel card research-panel-wide">
+      <div class="research-panel-head"><div><span class="research-kicker">Collection Health</span><h3>实验采集覆盖</h3></div><span id="coverageMeta" class="muted"></span></div>
+      <div id="coverageRows" class="research-empty">读取采集运行记录…</div>
+    </article>
+
+    <article id="researchDriftPanel" class="research-panel card research-panel-wide">
+      <div class="research-panel-head"><div><span class="research-kicker">Model Evaluation</span><h3>信号效果与漂移</h3></div><span id="driftMeta" class="muted">读取冻结样本评估…</span></div>
+      <div id="driftRows" class="research-empty">读取模型评估…</div>
+      <p class="research-note">正式漂移只比较当前引擎的真实冻结样本。冷启动观察和历史重放参考均不构成有效性结论，不会自动调参、改写正式信号或改变仓位。</p>
+    </article>
+
+    <article class="research-panel card research-panel-wide">
+      <div class="research-panel-head"><div><span class="research-kicker">Cohorts</span><h3>成熟路径分组</h3></div><span class="muted">不按小样本排名</span></div>
+      <div class="research-scroll"><table class="research-table"><thead><tr><th>市场</th><th>情景</th><th>状态</th><th>观察</th><th>成熟 / 待结算</th><th>已记录结局</th><th>最近交易日</th></tr></thead><tbody id="cohortRows"></tbody></table></div>
+      <p class="research-note">统计显示的是已冻结条件之后的事实；相邻交易日与同一股票的记录可能高度相关，因此不能把行数当成独立预测次数。</p>
+    </article>
+
+    <article class="research-panel card">
+      <div class="research-panel-head"><div><span class="research-kicker">Timeline</span><h3>每日积累</h3></div></div>
+      <div id="dailyRows" class="timeline-list"></div>
+    </article>
+
+    <article class="research-panel card">
+      <div class="research-panel-head"><div><span class="research-kicker">Recent</span><h3>最近冻结</h3></div></div>
+      <div class="research-scroll"><table class="research-table compact"><thead><tr><th>日期</th><th>标的</th><th>情景</th><th>当前结算</th></tr></thead><tbody id="recentRows"></tbody></table></div>
+    </article>
+  </section>
+
+  <section class="research-method card">
+    <span class="research-kicker">Method Boundary</span>
+    <h3>实验边界</h3>
+    <ul id="methodRows"><li>读取方法说明中…</li></ul>
+  </section>
+</main>
+</body>
+</html>

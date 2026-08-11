@@ -1,0 +1,34 @@
+{
+  "name": "market-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=26.3.0 <27"
+  },
+  "scripts": {
+    "start": "node scripts/start-local.mjs",
+    "demo:seed": "node scripts/seed-demo-data.mjs",
+    "demo:clear": "node scripts/seed-demo-data.mjs --clear",
+    "admin:reset": "node scripts/reset-admin-password.mjs",
+    "precheck": "node --check radar_v2_runtime_defaults.mjs && node --check radar_v2_runtime_config.mjs && node --check radar_v2_financial_timing.mjs && node --check radar_v2_financial_store.mjs && node --check radar_v2_fundamental_producer.mjs && node --check scripts/sync-radar-v2-financials.mjs && node --check scripts/produce-radar-v2-fundamentals.mjs && node scripts/radar_v2-financial-store-test.mjs && node scripts/radar_v2-fundamental-producer-test.mjs && node --check scripts/seed-demo-data.mjs",
+    "check:runtime": "node --check server.mjs && node --check server_route_handlers.mjs && node --check mcp_server.mjs && node --check auth.mjs && node --check stock_engine.mjs && node --check stock_backtest.mjs && node --check grouping.mjs && node --check earnings_calendar.mjs && node --check llm_news.mjs && node --check tracker_signal.mjs && node --check market_adapter.mjs && node --check news_ingest.mjs && node --check background_tasks.mjs && node --check app/control.js && node --check app/stock.js && node --check app/tracker.js && node --check app/radar-v2.js && node --input-type=module --check < app/scenario-research.js && node --check scripts/reconcile-signal-outcomes.mjs && node scripts/algorithm-contract-check.mjs && node scripts/stock-execution-parity-check.mjs && node scripts/decision-risk-contract-check.mjs && node scripts/swing-decision-check.mjs && node scripts/signal-drift-check.mjs && node scripts/architecture-boundary-check.mjs && node scripts/tracker-signal-check.mjs && node scripts/alert-behavior-check.mjs",
+    "check:auth": "node --check auth.mjs && node scripts/auth-check.mjs",
+    "check:ledger": "node --check stock_engine.mjs && node --check tracker_engine.mjs && node scripts/trade-ledger-check.mjs",
+    "check:radar-v2": "node --check radar_v2_runtime_config.mjs && node scripts/radar_v2-universe-test.mjs && node scripts/radar_v2-indicators-test.mjs && node scripts/radar_v2-trend-state-machine-test.mjs && node scripts/radar_v2-trend-producer-test.mjs && node scripts/radar_v2-dossier-outcomes-test.mjs && node scripts/radar_v2-dossier-enrichment-test.mjs && node scripts/radar_v2-dossier-evaluator-test.mjs && node scripts/backtest-v2-trend-test.mjs && node scripts/radar-v2-loadguard-test.mjs && node scripts/radar_v2-feedback-test.mjs && node scripts/radar_v2-thesis-producer-test.mjs && node scripts/radar_v2-history-backfill-test.mjs && node scripts/radar_v2-historical-validation-test.mjs && node scripts/radar_v2-e2e-test.mjs && node scripts/radar_v2-event-facts-producer-test.mjs && node scripts/radar_v2-legacy-event-normalization-test.mjs && node scripts/radar_v2-current-model-test.mjs && node scripts/radar_v2-queue-api-test.mjs",
+    "check": "npm run check:runtime && npm run check:auth && npm run check:ledger && npm run check:radar-v2",
+    "check:scenarios": "node --check scenario_outcome_contract.mjs && node --check scenario_backtest.mjs && node scripts/scenario-replay-check.mjs",
+    "check:scenario-shadow": "node --check scenario_shadow_ledger.mjs && node scripts/scenario-shadow-ledger-check.mjs",
+    "check:scenario-baseline": "node --check scenario_baseline.mjs && node scripts/scenario-baseline-check.mjs",
+    "verify:public": "node scripts/verify-open-source-release.mjs",
+    "verify:public:strict": "node scripts/verify-open-source-release.mjs --strict",
+    "check:all": "npm run check && npm run check:scenarios && npm run check:scenario-shadow && npm run check:scenario-baseline && npm run verify:public"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "csv-parse": "^6.2.1",
+    "pdf-parse": "^2.4.5"
+  },
+  "description": "Local-first market research dashboard. Research support only; not investment advice or automated trading.",
+  "license": "MIT"
+}
