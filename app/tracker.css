@@ -20,7 +20,9 @@
   .list-card th, .list-card td { padding:7px 8px; border-bottom:1px solid var(--ws-line); font-size:13px; white-space: nowrap; text-overflow:ellipsis; }
   .list-card th { font-size:var(--ws-font-xs); color:var(--ws-muted-soft); font-weight:700; position:sticky; top:0; background:var(--ws-surface); z-index:2; box-shadow:0 1px 0 var(--ws-line); }
   /* .list-card tbody tr.sel 已收拢到 workspace-theme.css（P1 风格统一第 7 步） */
-  /* toolbar 视觉样式统一由 workspace-theme.css 定义 */
+  /* 与股票监控一致：筛选组居左，操作按钮由 spacer 推至右侧。
+     此页原先仅有视觉样式，缺少 flex 布局，导致按钮在桌面端掉到筛选器下方。 */
+  .toolbar { display:flex; align-items:center; gap:8px; }
   /* .btn 视觉样式（background/color/font-weight/padding/border-radius）由 workspace-theme.css 统一接管 */
   .btn.delbtn { width:24px; height:24px; padding:0; display:inline-flex; align-items:center; justify-content:center; background:transparent; color:var(--ws-muted-soft); border-radius:var(--ws-radius-sm); line-height:1; min-width:auto; transition:background .15s, color .15s; }
   .btn.delbtn:hover { background:#fdecec; color:var(--ws-red); }
