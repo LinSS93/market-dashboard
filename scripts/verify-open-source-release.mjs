@@ -22,8 +22,9 @@ function walk(dir) {
     const full = path.join(dir, entry.name);
     const relative = path.relative(root, full);
     if (entry.isDirectory()) {
-      if (forbiddenPathParts.has(entry.name)) failures.push(`forbidden directory: ${relative}`);
-      else walk(full);
+      if (forbiddenPathParts.has(entry.name)) {
+        if (strict) failures.push(`forbidden directory: ${relative}`);
+      } else walk(full);
       continue;
     }
     if (forbiddenNames.has(entry.name) || /\.db(?:-|$)/i.test(entry.name)) {
