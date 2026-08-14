@@ -1,9 +1,9 @@
 // 技术指标与统计工具函数（P2-1 从 stock_engine.mjs 抽出）
 // 全部为纯函数，不依赖 db / 不依赖外部状态，可独立测试。
-// B2 收敛：rsiSMA 合并为 rsiAt 的语义糖；rsiWilder 已删除（死代码）。
-// 历史行号：emaSeries@1228 smaArr@1238 rsiSMA@1242 bollinger@1265
+// RSI 使用 Wilder/RMA 递推口径，并提供 6 / 12 / 24 三个显式周期。
+// 历史行号：emaSeries@1228 smaArr@1238 rsiWilder@1242 bollinger@1265
 // atr14@1272 pct@1280 fmtPct@1281 stdArr@2369 _tTestPValue@2378 _normalCdf@2398
-// intradayEmaSeries@806 rsiAt@811 addWeekdays@3782 binomialUpperTail@1747 edgeGrade@1758
+// intradayEmaSeries@806 rsiWilderAt@811 addWeekdays@3782 binomialUpperTail@1747 edgeGrade@1758
 
 // ----- 移动平均 / EMA -----
 // B2 文档：emaSeries 与 intradayEmaSeries 有意分开，不合并。
@@ -51,23 +51,47 @@ export function intradayEmaSeries(values, period) {
 }
 
 // ----- RSI -----
-// B2 收敛：rsiSMA 与 rsiAt 算法完全相同（SMA-based，国内券商标准），
-// rsiSMA(closes,p) ≡ rsiAt(closes, closes.length-1, p)。rsiSMA 保留为语义糖，
-// 供日线分析调用（只需最后一个 RSI 值）；rsiAt 供盘中滚动计算（逐 bar RSI 序列）。
-// 已删除 rsiWilder（Wilder 平滑 RSI）——全代码库无调用，属死代码。
+// 统一使用 Wilder/RMA 递推口径，并固定提供 6 / 12 / 24 三个周期：
+// RSI6 用于敏捷观察，RSI12 用于正式日线投票，RSI24 用于慢速趋势确认。
+export const RSI_PERIODS = Object.freeze({
+  fast: 6,
+  decision: 12,
+  slow: 24,
+});
 
-// 指定 index 处的 SMA-based RSI（在 index-period+1..index 窗口内计算涨跌幅简单平均）
-export function rsiAt(values, index, period = 14) {
-  if (index < period) return null;
-  let gain = 0, loss = 0;
-  for (let i=index-period+1;i<=index;i++) { const d=values[i]-values[i-1]; if(d>0)gain+=d; else loss-=d; }
-  if (!loss) return 100;
-  return 100 - 100/(1 + gain/loss);
+// Wilder/RMA RSI: seed with the first period's average gains/losses, then
+// recursively smooth every later bar. This avoids silently substituting a
+// simple rolling average for the broker-compatible RSI definition.
+export function rsiWilderAt(values, index, period) {
+  if (!Array.isArray(values) || !Number.isInteger(index) || !Number.isInteger(period) || period < 1 || index < period) return null;
+  let avgGain = 0, avgLoss = 0;
+  for (let i = 1; i <= period; i++) {
+    const previous = values[i - 1], current = values[i];
+    if (!Number.isFinite(previous) || !Number.isFinite(current)) return null;
+    const delta = current - previous;
+    if (delta > 0) avgGain += delta;
+    else avgLoss -= delta;
+  }
+  avgGain /= period;
+  avgLoss /= period;
+
+  for (let i = period + 1; i <= index; i++) {
+    const previous = values[i - 1], current = values[i];
+    if (!Number.isFinite(previous) || !Number.isFinite(current)) return null;
+    const delta = current - previous;
+    const gain = delta > 0 ? delta : 0;
+    const loss = delta < 0 ? -delta : 0;
+    avgGain = (avgGain * (period - 1) + gain) / period;
+    avgLoss = (avgLoss * (period - 1) + loss) / period;
+  }
+
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - 100 / (1 + rs);
 }
 
-// 最近一根 bar 的 SMA-based RSI（rsiAt 的语义糖，日线分析专用）
-export function rsiSMA(closes, p = 6) {
-  return rsiAt(closes, closes.length - 1, p);
+export function rsiWilder(closes, period) {
+  return rsiWilderAt(closes, (closes?.length || 0) - 1, period);
 }
 
 // ----- 布林带 / ATR -----

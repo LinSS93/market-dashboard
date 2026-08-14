@@ -8,10 +8,11 @@ function check(condition, message) {
   if (!condition) failures.push(message);
 }
 
-check(SIGNAL_ENGINE_VERSION === 'stock-signal-v2026.07.28-scoring-v2.0.0-multiplicative-directional-gate',
-  'execution-accounting correction does not create a new scoring-engine cohort');
-check(COMPATIBLE_SIGNAL_ENGINE_VERSIONS.includes('stock-signal-v2026.08.11-scoring-v2.0.1-execution-parity'),
-  'short-lived execution-parity deployment remains readable during outcome reconciliation');
+check(SIGNAL_ENGINE_VERSION === 'stock-signal-v2026.08.14-scoring-v2.1.0-rsi12-wilder',
+  'broker-compatible RSI12 starts the intended new scoring-engine cohort');
+check(COMPATIBLE_SIGNAL_ENGINE_VERSIONS.length === 1
+  && COMPATIBLE_SIGNAL_ENGINE_VERSIONS[0] === SIGNAL_ENGINE_VERSION,
+  'the new RSI12 cohort does not blend prior simple-RSI14 outcomes into live reporting');
 
 // Percent units must be unambiguous at the source.  The policy simulator may
 // normalise for historical compatibility, but UI and production decisions must

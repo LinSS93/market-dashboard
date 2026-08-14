@@ -22,9 +22,10 @@ import { convertAccountSizeFromCny, getMarketCurrency, getFxStatus } from "./fx_
 import { computeCompositeScore, scoreToState, SCORING_ENGINE_VERSION } from "./signal_scoring.mjs";
 import { OUTCOME_CONTRACT_VERSION, calculateForwardOutcomes } from "./outcome_contract.mjs";
 import { computeStructureLevels } from "./structure_levels.mjs";
+import { computeSignalProfileBundle, FORMAL_SIGNAL_PROFILE_ID, STOCK_SIGNAL_PROFILE_SCHEMA_VERSION, getSignalProfile, getSignalProfileCatalog } from "./stock_signal_profiles.mjs";
 // P2-1：技术指标与统计工具函数拆到 indicators.mjs（纯函数，无 db 依赖）
 import {
-  emaSeries, smaArr, intradayEmaSeries, rsiSMA, rsiAt,
+  emaSeries, smaArr, intradayEmaSeries, rsiWilder, RSI_PERIODS,
   bollinger, atr14, stdArr, tTestPValue as _tTestPValue, normalCdf as _normalCdf,
   binomialUpperTail, edgeGrade, pct, fmtPct, addWeekdays, macdHistogramPair,
 } from "./indicators.mjs";
@@ -322,6 +323,54 @@ db.exec(`
     PRIMARY KEY (signal_id, horizon)
   );
   CREATE INDEX IF NOT EXISTS idx_stock_shadow_signal ON stock_signal_shadow_outcomes(signal_id);
+  -- Parallel personality research. These rows never participate in the formal
+  -- signal log, reliability, drift report, or position-state mapping.
+  CREATE TABLE IF NOT EXISTS stock_signal_profile_shadows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    as_of_date TEXT NOT NULL,
+    observed_at INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    market TEXT NOT NULL,
+    price REAL,
+    profile_id TEXT NOT NULL,
+    profile_version TEXT NOT NULL,
+    profile_role TEXT NOT NULL,
+    raw_signal TEXT NOT NULL,
+    status TEXT NOT NULL,
+    direction INTEGER NOT NULL,
+    score REAL,
+    confirmed INTEGER NOT NULL DEFAULT 0,
+    payload TEXT NOT NULL,
+    sample_origin TEXT NOT NULL DEFAULT 'live_profile_shadow',
+    engine_version TEXT NOT NULL,
+    first_observed_at INTEGER,
+    first_payload TEXT,
+    state_signature TEXT,
+    UNIQUE(as_of_date, symbol, market, profile_id, profile_version)
+  );
+  CREATE INDEX IF NOT EXISTS idx_stock_profile_shadow_scope
+    ON stock_signal_profile_shadows(profile_id, profile_version, market, as_of_date);
+  CREATE TABLE IF NOT EXISTS stock_signal_profile_shadow_outcomes (
+    profile_shadow_id INTEGER NOT NULL,
+    horizon INTEGER NOT NULL,
+    entry_date TEXT NOT NULL,
+    exit_date TEXT NOT NULL,
+    entry_price REAL NOT NULL,
+    exit_price REAL NOT NULL,
+    direction INTEGER NOT NULL,
+    gross_return_pct REAL NOT NULL,
+    directional_return_pct REAL NOT NULL,
+    benchmark_return_pct REAL,
+    excess_return_pct REAL,
+    mfe_pct REAL,
+    mae_pct REAL,
+    evaluated_at INTEGER NOT NULL,
+    outcome_contract_version TEXT NOT NULL,
+    entry_price_source TEXT,
+    PRIMARY KEY(profile_shadow_id, horizon)
+  );
+  CREATE INDEX IF NOT EXISTS idx_stock_profile_shadow_outcome
+    ON stock_signal_profile_shadow_outcomes(profile_shadow_id, horizon);
   CREATE TABLE IF NOT EXISTS stock_signal_outcome_archive (
     signal_id INTEGER NOT NULL,
     horizon INTEGER NOT NULL,
@@ -453,6 +502,8 @@ try { db.prepare("ALTER TABLE stock_signal_outcomes ADD COLUMN cost_pct REAL").r
 try { db.prepare("ALTER TABLE stock_signal_outcomes ADD COLUMN net_directional_return_pct REAL").run(); } catch {}
 try { db.prepare("ALTER TABLE stock_signal_outcomes ADD COLUMN outcome_contract_version TEXT").run(); } catch {}
 try { db.prepare("ALTER TABLE stock_signal_outcomes ADD COLUMN entry_price_source TEXT").run(); } catch {}
+try { db.prepare("ALTER TABLE stock_signal_profile_shadows ADD COLUMN price REAL").run(); } catch {}
+try { db.prepare("ALTER TABLE stock_signal_profile_shadows ADD COLUMN state_signature TEXT").run(); } catch {}
 try { db.prepare("ALTER TABLE stock_signal_shadow_outcomes ADD COLUMN outcome_contract_version TEXT").run(); } catch {}
 try { db.prepare("ALTER TABLE stock_signal_shadow_outcomes ADD COLUMN entry_price_source TEXT").run(); } catch {}
 try { db.prepare("ALTER TABLE signal_execution_journal ADD COLUMN actual_date TEXT").run(); } catch {}
@@ -516,9 +567,26 @@ const insertSignalLog = db.prepare(`INSERT INTO stock_signal_log(date,ts,symbol,
   risk=COALESCE(stock_signal_log.risk, excluded.risk),
   score=COALESCE(stock_signal_log.score, excluded.score),
   confidence=COALESCE(stock_signal_log.confidence, excluded.confidence),
-  quality=COALESCE(stock_signal_log.quality, excluded.quality),
-  payload=COALESCE(stock_signal_log.payload, excluded.payload),
-  engine_version=COALESCE(stock_signal_log.engine_version, excluded.engine_version)`);
+    quality=COALESCE(stock_signal_log.quality, excluded.quality),
+    payload=COALESCE(stock_signal_log.payload, excluded.payload),
+    engine_version=COALESCE(stock_signal_log.engine_version, excluded.engine_version)`);
+const insertProfileShadow = db.prepare(`INSERT INTO stock_signal_profile_shadows(
+  as_of_date,observed_at,symbol,market,price,profile_id,profile_version,profile_role,raw_signal,status,direction,score,confirmed,payload,sample_origin,engine_version,first_observed_at,first_payload,state_signature
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  ON CONFLICT DO NOTHING`);
+const insertProfileShadowOutcome = db.prepare(`INSERT INTO stock_signal_profile_shadow_outcomes(
+  profile_shadow_id,horizon,entry_date,exit_date,entry_price,exit_price,direction,gross_return_pct,directional_return_pct,benchmark_return_pct,excess_return_pct,mfe_pct,mae_pct,evaluated_at,outcome_contract_version,entry_price_source
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  ON CONFLICT(profile_shadow_id,horizon) DO UPDATE SET
+    entry_date=excluded.entry_date,exit_date=excluded.exit_date,entry_price=excluded.entry_price,exit_price=excluded.exit_price,
+    direction=excluded.direction,gross_return_pct=excluded.gross_return_pct,directional_return_pct=excluded.directional_return_pct,
+    benchmark_return_pct=excluded.benchmark_return_pct,excess_return_pct=excluded.excess_return_pct,
+    mfe_pct=excluded.mfe_pct,mae_pct=excluded.mae_pct,evaluated_at=excluded.evaluated_at,
+    outcome_contract_version=excluded.outcome_contract_version,entry_price_source=excluded.entry_price_source`);
+const getLatestProfileShadowState = db.prepare(`SELECT state_signature,raw_signal,status,direction,confirmed
+  FROM stock_signal_profile_shadows
+  WHERE symbol=? AND market=? AND profile_id=? AND profile_version=?
+  ORDER BY as_of_date DESC,id DESC LIMIT 1`);
 const insertSignalOutcome = db.prepare(`INSERT INTO stock_signal_outcomes(signal_id,horizon,entry_date,exit_date,entry_price,exit_price,direction,gross_return_pct,directional_return_pct,quantity,cost_pct,net_directional_return_pct,mfe_pct,mae_pct,evaluated_at,outcome_contract_version,entry_price_source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   ON CONFLICT(signal_id,horizon) DO UPDATE SET
     entry_date=excluded.entry_date,exit_date=excluded.exit_date,entry_price=excluded.entry_price,exit_price=excluded.exit_price,
@@ -820,7 +888,7 @@ async function warmWatchlistSymbol(symbol, market) {
   return { quote:quote ? { price:quote.price ?? null, source:quote.source || null, providerTime:quote.providerTime || null } : null, quoteError, kline:klineResult };
 }
 
-// P2-1: intradayEmaSeries / rsiAt 已移至 indicators.mjs
+// P2-1: intradayEmaSeries / rsiWilder 已移至 indicators.mjs
 
 let _pollTimer = null;
 async function poll() {
@@ -927,18 +995,11 @@ function tradingTimeFraction(market) {
 
 
 // ── Day-level signal engine (daily k-line, weighted indicators) ──
-// The scoring engine remains v2.0.0: no scoring weights, thresholds, or entry
-// eligibility rules changed. Execution evidence has its own version in
-// outcome_contract.mjs, so correcting next-close to next-open does not reset
-// the frozen decision cohort.
-const SIGNAL_ENGINE_VERSION = "stock-signal-v2026.07.28-scoring-v2.0.0-multiplicative-directional-gate";
-// A short-lived deployment used this label while the execution correction was
-// first introduced. Its score formula is identical, so include it only when
-// reading/recalculating frozen outcomes; new signals use SIGNAL_ENGINE_VERSION.
-const COMPATIBLE_SIGNAL_ENGINE_VERSIONS = Object.freeze([
-  SIGNAL_ENGINE_VERSION,
-  "stock-signal-v2026.08.11-scoring-v2.0.1-execution-parity",
-]);
+// RSI12 now uses the broker-compatible Wilder/RMA calculation. This changes a
+// decision input and therefore starts a new frozen-signal cohort; do not blend
+// outcomes from the prior simple-RSI engine into this version's reports.
+const SIGNAL_ENGINE_VERSION = "stock-signal-v2026.08.14-scoring-v2.1.0-rsi12-wilder";
+const COMPATIBLE_SIGNAL_ENGINE_VERSIONS = Object.freeze([SIGNAL_ENGINE_VERSION]);
 const LEGACY_OUTCOME_CONTRACT_VERSION = "legacy-next-close-unversioned-v1";
 // D3: 信号算法版本切换。v1=原9项加权投票；v2=6项市场状态感知投票。
 // 只有活跃版本的投票函数被调用，避免计算资源浪费。
@@ -957,7 +1018,7 @@ db.prepare("UPDATE stock_signal_log SET engine_version=? WHERE engine_version IS
   .run(SIGNAL_ENGINE_VERSION, '%"engineVersion":"' + SIGNAL_ENGINE_VERSION + '"%');
 db.prepare("UPDATE stock_signal_log SET engine_version='legacy-live' WHERE engine_version IS NULL OR engine_version='' ").run();
 
-// P2-1: emaSeries / smaArr / rsiSMA / rsiAt / bollinger / atr14 / pct / fmtPct
+// P2-1: emaSeries / smaArr / rsiWilder / bollinger / atr14 / pct / fmtPct
 // 已移至 indicators.mjs（纯函数，无 db 依赖）
 
 function buildDataQuality(sym, mkt, rows, volR, atr, referenceDate = null) {
@@ -993,24 +1054,32 @@ function relativeStrengthForRows(rows, market, benchmark = null) {
     available: false,
     benchmark: { symbol: bench.symbol, market: bench.market, label: bench.label, rows: bench.rows || 0 }
   };
-  let stock60 = null, bench60 = null, rel60 = null;
-  if (rows.length >= 61) {
-    const start60 = rows[rows.length - 61];
-    if (start60?.close) {
-      stock60 = (end.close / start60.close - 1) * 100;
-      bench60 = benchmarkReturnPct(bench, start60.date, end.date);
-      if (bench60 != null) rel60 = stock60 - bench60;
-    }
+  const byWindow = {};
+  for (const days of [10, 20, 60, 120]) {
+    if (rows.length < days + 1) continue;
+    const start = rows[rows.length - days - 1];
+    if (!start?.close) continue;
+    const stockReturn = (end.close / start.close - 1) * 100;
+    const benchmarkReturn = benchmarkReturnPct(bench, start.date, end.date);
+    if (benchmarkReturn == null) continue;
+    byWindow[String(days)] = {
+      stock: +stockReturn.toFixed(2),
+      benchmark: +benchmarkReturn.toFixed(2),
+      relative: +(stockReturn - benchmarkReturn).toFixed(2),
+    };
   }
+  const rel20Row = byWindow['20'];
+  const rel60Row = byWindow['60'];
   return {
     available: true,
     benchmark: { symbol: bench.symbol, market: bench.market, label: bench.label, rows: bench.rows || 0 },
-    stock20: +stock20.toFixed(2),
-    bench20: +bench20.toFixed(2),
-    rel20: +(stock20 - bench20).toFixed(2),
-    stock60: stock60 != null ? +stock60.toFixed(2) : null,
-    bench60: bench60 != null ? +bench60.toFixed(2) : null,
-    rel60: rel60 != null ? +rel60.toFixed(2) : null,
+    stock20: rel20Row?.stock ?? +stock20.toFixed(2),
+    bench20: rel20Row?.benchmark ?? +bench20.toFixed(2),
+    rel20: rel20Row?.relative ?? +(stock20 - bench20).toFixed(2),
+    stock60: rel60Row?.stock ?? null,
+    bench60: rel60Row?.benchmark ?? null,
+    rel60: rel60Row?.relative ?? null,
+    byWindow,
   };
 }
 
@@ -1178,7 +1247,7 @@ function computeLongTermTrend(ctx) {
 
 function buildTradePlan(ctx) {
   const {
-    cur, sma20, sma50, sma200, sma20Dist, roc, rsi, rsi14, macdHist,
+    cur, sma20, sma50, sma200, sma20Dist, roc, rsi, macdHist,
     boll, volR, atr, score, signal, stopLoss, takeProfit, dataQuality, relativeStrength, marketRegime
   } = ctx;
   const atrPct = (atr != null && cur > 0) ? atr / cur * 100 : null;
@@ -1364,7 +1433,7 @@ function computeVolPriceCorrelation(closes, vols) {
 // D3: V1 投票算法 —— 原 9 项加权投票，从 computeDailyAnalysis 提取为独立纯函数。
 //   行为与提取前完全一致，确保 SIGNAL_ALGO_VERSION=v1 时无任何变化。
 function computeVotesV1(ctx) {
-  const { rsi, rsi14, macdHist, prevHist, sma50, sma200, sma20Dist, boll, volR, roc, relativeStrength, cur, closes, n } = ctx;
+  const { rsi, macdHist, prevHist, sma50, sma200, sma20Dist, boll, volR, roc, relativeStrength, cur, closes, n } = ctx;
   const votes = []; const reasons = [];
   const push = (key, vote, weight, text) => { votes.push({ key, vote, weight }); reasons.push({ key, vote, weight, text }); };
   // 1) RSI(6)
@@ -1435,10 +1504,10 @@ function computeVotesV1(ctx) {
 }
 
 // D3: V2 投票算法 —— 6 项独立维度 + 市场状态感知阈值。
-//   维度：RSI(14) / MACD柱 / 价vs MA50 / 布林%B / 量价相关性 / 相对强弱
+//   维度：RSI(12) / MACD柱 / 价vs MA50 / 布林%B / 量价相关性 / 相对强弱
 //   市场状态映射：uptrend|extended→bull, risk_off|downtrend→bear, 其余→range
 function computeVotesV2(ctx) {
-  const { rsi14, macdHist, prevHist, sma50, sma20Dist, boll, roc, relativeStrength, marketRegime, volPriceCorr, cur, closes, n } = ctx;
+  const { rsi12, macdHist, prevHist, sma50, sma20Dist, boll, roc, relativeStrength, marketRegime, volPriceCorr, cur, closes, n } = ctx;
   // 市场状态映射
   const regimeKey = marketRegime?.key || 'range';
   const state = (regimeKey === 'uptrend' || regimeKey === 'extended') ? 'bull'
@@ -1446,19 +1515,19 @@ function computeVotesV2(ctx) {
   const stateLabel = state === 'bull' ? '多头' : state === 'bear' ? '空头' : '震荡';
   const votes = []; const reasons = [];
   const push = (key, vote, weight, text) => { votes.push({ key, vote, weight }); reasons.push({ key, vote, weight, text }); };
-  // 1) RSI(14) —— 市场状态感知超买超卖阈值
-  { let v = 0, txt = "RSI14 中性";
-    if (rsi14 != null) {
+  // 1) RSI(12) —— 市场状态感知超买超卖阈值
+  { let v = 0, txt = "RSI12 中性";
+    if (rsi12 != null) {
       const os = state === 'bull' ? 35 : state === 'bear' ? 20 : 30;    // 超卖线
       const osSoft = state === 'bull' ? 45 : state === 'bear' ? 30 : 40;
       const ob = state === 'bull' ? 80 : state === 'bear' ? 65 : 70;    // 超买线
       const obSoft = state === 'bull' ? 70 : state === 'bear' ? 55 : 60;
-      if (rsi14 < os) { v = 1; txt = "RSI14 " + rsi14.toFixed(0) + " 超卖(" + stateLabel + ")"; }
-      else if (rsi14 < osSoft) { v = 0.5; txt = "RSI14 " + rsi14.toFixed(0) + " 偏超卖(" + stateLabel + ")"; }
-      else if (rsi14 > ob) { v = -1; txt = "RSI14 " + rsi14.toFixed(0) + " 超买(" + stateLabel + ")"; }
-      else if (rsi14 > obSoft) { v = -0.5; txt = "RSI14 " + rsi14.toFixed(0) + " 偏超买(" + stateLabel + ")"; }
-      else txt = "RSI14 " + rsi14.toFixed(0) + " 中性(" + stateLabel + ")";
-    } push("rsi14", v, 1.0, txt); }
+      if (rsi12 < os) { v = 1; txt = "RSI12 " + rsi12.toFixed(1) + " 超卖(" + stateLabel + ")"; }
+      else if (rsi12 < osSoft) { v = 0.5; txt = "RSI12 " + rsi12.toFixed(1) + " 偏超卖(" + stateLabel + ")"; }
+      else if (rsi12 > ob) { v = -1; txt = "RSI12 " + rsi12.toFixed(1) + " 超买(" + stateLabel + ")"; }
+      else if (rsi12 > obSoft) { v = -0.5; txt = "RSI12 " + rsi12.toFixed(1) + " 偏超买(" + stateLabel + ")"; }
+      else txt = "RSI12 " + rsi12.toFixed(1) + " 中性(" + stateLabel + ")";
+    } push("rsi12", v, 1.0, txt); }
   // 2) MACD histogram —— 方向+动能，市场状态影响强度判定
   { let v = 0, txt = "MACD 中性";
     if (macdHist != null) {
@@ -1569,7 +1638,7 @@ function computeVotes(ctx) {
 //     referenceDate        — 传给 buildDataQuality 的基准日；回测用历史日期，实时用今天
 //   返回完整字段（votes/reasons/indObj/longTermTrend 等可能为空），入口函数按需裁剪。
 function computeDailyAnalysis(sym, mkt, rows, options = {}) {
-  const { benchmark = null, intradayVolAdjust = false, includeLongTermTrend = false, referenceDate = null } = options;
+  const { benchmark = null, intradayVolAdjust = false, includeLongTermTrend = false, includeProfileAnalyses = false, referenceDate = null } = options;
   const closes = rows.map(r => r.close), highs = rows.map(r => r.high), lows = rows.map(r => r.low), vols = rows.map(r => r.volume || 0);
   const n = closes.length;
   const cur = closes[n - 1];
@@ -1585,8 +1654,11 @@ function computeDailyAnalysis(sym, mkt, rows, options = {}) {
   const { current: macdHist, previous: previousMacdHist } = macdHistogramPair(macdVals, sigVals);
   // 指标尚未完成初始化时不伪造前一柱；投票层会自然保持中性。
   const prevHist = previousMacdHist ?? macdHist;
-  const rsi = rsiSMA(closes, 6);       // 主 RSI：SMA(6)，与券商 RSI6 对齐，对暴跌敏感
-  const rsi14 = rsiSMA(closes, 14);    // 参考 RSI：SMA(14)，平滑趋势
+  const rsi6 = rsiWilder(closes, RSI_PERIODS.fast);
+  const rsi12 = rsiWilder(closes, RSI_PERIODS.decision);
+  const rsi24 = rsiWilder(closes, RSI_PERIODS.slow);
+  // rsi 保持为 RSI6 的兼容别名；新调用请使用明确的 rsi6/rsi12/rsi24。
+  const rsi = rsi6;
   const longTermTrend = includeLongTermTrend ? computeLongTermTrend({ cur, closes, sma200, sma120 }) : null;
   const boll = bollinger(closes, 20, 2);
   // 量比：今日成交量 / 20日均量。intradayVolAdjust=true 时按已过交易时间折算，避免部分日成交量被低估。
@@ -1625,7 +1697,7 @@ function computeDailyAnalysis(sym, mkt, rows, options = {}) {
   // V2 专用：量价相关性（V1 不计算，避免资源浪费）
   const volPriceCorr = SIGNAL_ALGO_VERSION === 'v2' ? computeVolPriceCorrelation(closes, vols) : null;
   const voteResult = computeVotes({
-    rsi, rsi14, macdHist, prevHist, sma50, sma200, sma20Dist, boll, volR, roc,
+    rsi, rsi12, macdHist, prevHist, sma50, sma200, sma20Dist, boll, volR, roc,
     relativeStrength, marketRegime, volPriceCorr, cur, closes, n,
   });
   const { votes, reasons, indObj, score, confidence, signal } = voteResult;
@@ -1637,21 +1709,48 @@ function computeDailyAnalysis(sym, mkt, rows, options = {}) {
   }
   const dataQuality = buildDataQuality(sym, mkt, rows, volR, atr, referenceDate);
   const tradePlan = buildTradePlan({
-    cur, sma20, sma50, sma200, sma20Dist, roc, rsi, rsi14, macdHist,
+    cur, sma20, sma50, sma200, sma20Dist, roc, rsi, macdHist,
     boll, volR, atr, score, signal, stopLoss, takeProfit, dataQuality, relativeStrength, marketRegime
   });
+  // Profile research is opt-in so historical backtests retain their current
+  // production contract. Live daily analysis calculates all profile views.
+  let signalProfiles = null;
+  if (includeProfileAnalyses) {
+    try {
+      signalProfiles = computeSignalProfileBundle({
+        closes,
+        volumes: vols,
+        relativeStrength,
+        formalAnalysis: { score, signal, votes },
+      });
+    } catch (error) {
+      // Research-only profiles must never turn a healthy formal analysis into a
+      // missing-data decision. The next refresh may retry the isolated bundle.
+      signalProfiles = {
+        schemaVersion: STOCK_SIGNAL_PROFILE_SCHEMA_VERSION,
+        requestedProfileId: FORMAL_SIGNAL_PROFILE_ID,
+        effectiveProfileId: FORMAL_SIGNAL_PROFILE_ID,
+        selectorEnabled: false,
+        actionPolicy: 'balanced_only',
+        profiles: {},
+        error: 'profile_research_unavailable',
+      };
+      console.error(`[signal-profiles] ${sym} ${error.message}`);
+    }
+  }
 
   return {
     engineVersion: SIGNAL_ENGINE_VERSION,
     algoVersion: SIGNAL_ALGO_VERSION, // D3: v1|v2，便于前端审计 tab 区分
     symbol: sym, market: mkt, dataPoints: n, currentPrice: cur, asOfDate: rows[n - 1]?.date || null,
-    rsi, rsi14, macd, macdSignal, macdHist, prevHist,
+    rsi, rsi6, rsi12, rsi24, macd, macdSignal, macdHist, prevHist,
     sma20, sma50, sma200, sma120, sma20Dist,
     boll, bollPctB: boll ? boll.pctB : null, bollUpper: boll ? boll.upper : null, bollLower: boll ? boll.lower : null,
     volRatio: volR, roc, atr,
     avgDollarVolume20d, // D1 新增：流动性约束用
     votes, reasons, indObj,
     score, confidence, signal, stopLoss, takeProfit,
+    signalProfiles,
     dataQuality, tradePlan, relativeStrength, marketRegime, longTermTrend,
     volPriceCorr: volPriceCorr, // D3: V2 量价相关性（V1 为 null）
   };
@@ -2667,8 +2766,69 @@ function logSignalSnapshot(results) {
     });
     if (collection.recorded > 0) console.log(`[scenario-shadow] collection health updated for ${collection.recorded} market-day runs`);
   } catch (e) { console.error('[scenario-shadow] snapshot', e.message); }
+  try {
+    const profileShadow = recordSignalProfileSnapshots(results, now);
+    if (profileShadow.inserted > 0) console.log(`[signal-profiles] frozen ${profileShadow.inserted} profile observations`);
+  } catch (e) { console.error('[signal-profiles] snapshot', e.message); }
   scheduleOutcomeEvaluation();
   scheduleScenarioShadowAccrual();
+  scheduleProfileShadowAccrual();
+}
+
+// Profile shadows are frozen only once the result's daily bar is the market's
+// completed session. In-progress daily bars and historical replay never enter
+// this ledger, so profile research cannot contaminate formal live samples.
+export function recordSignalProfileSnapshots(results, observedAt = Date.now(), {
+  completedDateForMarket = lastCompletedTradingDate,
+} = {}) {
+  let inserted = 0;
+  const tx = db.transaction((entries) => {
+    for (const [symbol, analysis] of entries) {
+      const market = String(analysis?.market || 'US').toUpperCase();
+      const completedDate = completedDateForMarket(market);
+      if (!analysis?.asOfDate || !completedDate || analysis.asOfDate !== completedDate) continue;
+      const bundle = analysis.signalProfiles;
+      if (!bundle?.profiles || bundle.schemaVersion !== STOCK_SIGNAL_PROFILE_SCHEMA_VERSION) continue;
+      for (const profile of Object.values(bundle.profiles)) {
+        if (!profile?.available || !profile.profileId || !profile.profileVersion) continue;
+        const config = getSignalProfile(profile.profileId);
+        if (!config || config.version !== profile.profileVersion) continue;
+        // Profile outcomes are event research, not a daily mark-to-market of
+        // the same conclusion. Keep the initial state as a zero-direction
+        // baseline; after that, freeze only a meaningful state change.
+        const signature = [
+          Number(profile.direction || 0),
+          String(profile.signal || 'NEUTRAL'),
+          String(profile.status || 'NEUTRAL'),
+          profile.confirmed ? 1 : 0,
+        ].join('|');
+        const prior = getLatestProfileShadowState.get(symbol, market, profile.profileId, profile.profileVersion);
+        const priorSignature = prior?.state_signature || (prior
+          ? [Number(prior.direction || 0), String(prior.raw_signal || 'NEUTRAL'), String(prior.status || 'NEUTRAL'), prior.confirmed ? 1 : 0].join('|')
+          : null);
+        if (priorSignature === signature) continue;
+        const isBaseline = !priorSignature;
+        const payload = JSON.stringify({
+          schemaVersion: STOCK_SIGNAL_PROFILE_SCHEMA_VERSION,
+          profile,
+          profileConfig: config,
+          formalProfileId: FORMAL_SIGNAL_PROFILE_ID,
+          source: 'live_completed_daily',
+          eventKind: isBaseline ? 'baseline' : 'state_transition',
+        });
+        const info = insertProfileShadow.run(
+          analysis.asOfDate, observedAt, symbol, market, Number(analysis.currentPrice || 0) || null,
+          profile.profileId, profile.profileVersion, profile.role,
+          profile.signal || 'NEUTRAL', profile.status || 'NEUTRAL', isBaseline ? 0 : Number(profile.direction || 0),
+          profile.score == null ? null : Number(profile.score), profile.confirmed ? 1 : 0,
+          payload, 'live_profile_shadow', SIGNAL_ENGINE_VERSION, observedAt, payload, signature,
+        );
+        inserted += info.changes;
+      }
+    }
+  });
+  tx(Object.entries(results || {}));
+  return { inserted };
 }
 
 function signalDirection(action) {
@@ -2747,6 +2907,172 @@ function scheduleScenarioShadowAccrual(force = false) {
     .catch(e => { console.error('[scenario-shadow] accrual', e.message); return null; })
     .finally(() => { lastScenarioShadowAccrualAt = Date.now(); scenarioShadowAccrualPromise = null; });
   return scenarioShadowAccrualPromise;
+}
+
+let profileShadowAccrualPromise = null;
+let lastProfileShadowAccrualAt = 0;
+function scheduleProfileShadowAccrual(force = false) {
+  if (profileShadowAccrualPromise) return profileShadowAccrualPromise;
+  if (!force && lastProfileShadowAccrualAt && Date.now() - lastProfileShadowAccrualAt < 15 * 60_000) return null;
+  profileShadowAccrualPromise = new Promise(resolve => setImmediate(resolve))
+    .then(() => evaluateProfileShadowOutcomes({ limit: 300 }))
+    .then(result => {
+      if (result.updated > 0) console.log(`[signal-profiles] accrued ${result.updated} profile outcomes (${result.pending} pending)`);
+      return result;
+    })
+    .catch(error => {
+      console.error('[signal-profiles] accrual', error.message);
+      return { updated: 0, pending: 0, error: error.message };
+    })
+    .finally(() => { lastProfileShadowAccrualAt = Date.now(); profileShadowAccrualPromise = null; });
+  return profileShadowAccrualPromise;
+}
+
+async function evaluateProfileShadowOutcomes({ limit = 300 } = {}) {
+  const signals = db.prepare(`SELECT s.* FROM stock_signal_profile_shadows s
+    WHERE s.sample_origin='live_profile_shadow'
+      AND s.direction <> 0
+      AND (SELECT COUNT(*) FROM stock_signal_profile_shadow_outcomes o
+        WHERE o.profile_shadow_id=s.id AND o.outcome_contract_version=?) < 5
+    ORDER BY s.as_of_date,s.symbol,s.profile_id
+    LIMIT ?`).all(OUTCOME_CONTRACT_VERSION, Math.max(1, Math.min(Number(limit) || 300, 1000)));
+  const horizons = [1, 3, 5, 10, 20];
+  const barCache = new Map();
+  const benchmarkCache = new Map();
+  const barsFor = symbol => {
+    if (!barCache.has(symbol)) barCache.set(symbol, getKline.all(symbol).filter(row => row.date && Number(row.close) > 0));
+    return barCache.get(symbol);
+  };
+  const benchmarkForMarket = market => {
+    if (!benchmarkCache.has(market)) benchmarkCache.set(market, buildBenchmarkLookup(market));
+    return benchmarkCache.get(market);
+  };
+  const tx = db.transaction(rows => {
+    let updated = 0;
+    for (const signal of rows) {
+      const bars = barsFor(signal.symbol);
+      const benchmark = benchmarkForMarket(signal.market);
+      for (const horizon of horizons) {
+        const forward = calculateForwardOutcomes({
+          bars,
+          signalDate: signal.as_of_date,
+          fallbackPrice: signal.price,
+          horizons: [horizon],
+          direction: signal.direction,
+        });
+        const entry = forward.execution;
+        const exit = entry ? bars[entry.entryIndex + horizon - 1] : null;
+        const gross = forward.grossReturns[horizon];
+        const directional = forward.directionalReturns[horizon];
+        if (!entry || !exit || gross == null || directional == null || !Number.isFinite(Number(exit.close))) continue;
+        const benchmarkReturn = benchmarkReturnPct(benchmark, entry.date, exit.date, { entryAtOpen: true });
+        const excess = benchmarkReturn == null ? null : Number(directional) - Number(benchmarkReturn) * Number(signal.direction);
+        const info = insertProfileShadowOutcome.run(
+          signal.id, horizon, entry.date, exit.date, entry.price, exit.close, signal.direction,
+          +Number(gross).toFixed(6), +Number(directional).toFixed(6),
+          benchmarkReturn == null ? null : +Number(benchmarkReturn).toFixed(6),
+          excess == null ? null : +Number(excess).toFixed(6),
+          forward.mfePct, forward.maePct, Date.now(), OUTCOME_CONTRACT_VERSION, entry.priceSource,
+        );
+        updated += info.changes;
+      }
+    }
+    return updated;
+  });
+  let updated = 0;
+  for (let index = 0; index < signals.length; index += 25) {
+    updated += tx(signals.slice(index, index + 25));
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  return { eligibleSignals: signals.length, updated, pending: Math.max(0, signals.length - updated) };
+}
+
+// /lab consumes this aggregate as a read-only research report. It never
+// schedules an accrual, changes configuration, or exposes a personality as an
+// executable decision. Performance numbers remain hidden by the browser until
+// a profile/horizon has at least this many recorded outcomes.
+const PROFILE_LAB_MIN_OUTCOME_SAMPLES = 30;
+export function getSignalProfileResearchDashboard({ market = null } = {}) {
+  const normalizedMarket = market ? String(market).toUpperCase() : null;
+  const marketClause = normalizedMarket ? ' AND s.market=?' : '';
+  const params = normalizedMarket ? [normalizedMarket] : [];
+  const profiles = db.prepare(`SELECT s.profile_id,s.profile_version,s.profile_role,
+      COUNT(*) AS observations,
+      SUM(CASE WHEN s.direction=0 THEN 1 ELSE 0 END) AS baselines,
+      SUM(CASE WHEN s.direction<>0 THEN 1 ELSE 0 END) AS transitions,
+      COUNT(DISTINCT s.symbol) AS symbols,
+      COUNT(DISTINCT s.market) AS markets,
+      MAX(s.as_of_date) AS latest_as_of_date
+    FROM stock_signal_profile_shadows s
+    WHERE s.sample_origin='live_profile_shadow'${marketClause}
+    GROUP BY s.profile_id,s.profile_version,s.profile_role`).all(...params);
+  const outcomes = db.prepare(`SELECT s.profile_id,s.profile_version,o.horizon,
+      COUNT(*) AS outcomes,
+      SUM(CASE WHEN o.directional_return_pct>0 THEN 1 ELSE 0 END) AS wins,
+      AVG(o.directional_return_pct) AS avg_directional_return_pct,
+      AVG(o.excess_return_pct) AS avg_excess_return_pct,
+      MAX(o.exit_date) AS latest_exit_date
+    FROM stock_signal_profile_shadows s
+    JOIN stock_signal_profile_shadow_outcomes o ON o.profile_shadow_id=s.id
+    WHERE s.sample_origin='live_profile_shadow'
+      AND o.outcome_contract_version=?${marketClause}
+    GROUP BY s.profile_id,s.profile_version,o.horizon`).all(OUTCOME_CONTRACT_VERSION, ...params);
+  const profileByKey = new Map(profiles.map(row => [[row.profile_id, row.profile_version].join('|'), row]));
+  const outcomesByKey = new Map();
+  for (const row of outcomes) outcomesByKey.set([row.profile_id, row.profile_version, row.horizon].join('|'), row);
+  const catalog = getSignalProfileCatalog();
+  const rows = catalog.map(profile => {
+    const aggregate = profileByKey.get([profile.id, profile.version].join('|')) || {};
+    const horizons = Object.fromEntries([5, 20].map(horizon => {
+      const outcome = outcomesByKey.get([profile.id, profile.version, horizon].join('|')) || null;
+      const count = Number(outcome?.outcomes || 0);
+      const adequate = count >= PROFILE_LAB_MIN_OUTCOME_SAMPLES;
+      return [horizon, {
+        count,
+        adequate,
+        wins: Number(outcome?.wins || 0),
+        winRatePct: adequate ? +(Number(outcome.wins || 0) / count * 100).toFixed(1) : null,
+        averageDirectionalReturnPct: adequate && outcome?.avg_directional_return_pct != null
+          ? +Number(outcome.avg_directional_return_pct).toFixed(3) : null,
+        averageExcessReturnPct: adequate && outcome?.avg_excess_return_pct != null
+          ? +Number(outcome.avg_excess_return_pct).toFixed(3) : null,
+        latestExitDate: outcome?.latest_exit_date || null,
+      }];
+    }));
+    const transitions = Number(aggregate.transitions || 0);
+    const hasAnyOutcome = Object.values(horizons).some(item => item.count > 0);
+    const hasAdequateOutcome = Object.values(horizons).some(item => item.adequate);
+    return {
+      id: profile.id,
+      version: profile.version,
+      label: profile.label,
+      role: profile.role,
+      formalActionEligible: profile.formalActionEligible === true,
+      baselines: Number(aggregate.baselines || 0),
+      transitions,
+      observations: Number(aggregate.observations || 0),
+      symbols: Number(aggregate.symbols || 0),
+      markets: Number(aggregate.markets || 0),
+      latestAsOfDate: aggregate.latest_as_of_date || null,
+      status: transitions === 0 ? 'baseline_collecting'
+        : !hasAnyOutcome ? 'outcome_collecting'
+          : !hasAdequateOutcome ? 'sample_insufficient' : 'descriptive_only',
+      horizons,
+    };
+  });
+  return {
+    mode: 'read_only_profile_research',
+    market: normalizedMarket,
+    minimumOutcomeSamples: PROFILE_LAB_MIN_OUTCOME_SAMPLES,
+    executionContract: OUTCOME_CONTRACT_VERSION,
+    profiles: rows,
+    method: [
+      '三套人格均为固定、版本化的研究配置；均衡决策仍是唯一正式动作来源。',
+      '仅在已完成日线首次建立基线或发生状态迁移时记录；盘中、历史重放和持续同状态不会写入。',
+      `每个期限至少积累 ${PROFILE_LAB_MIN_OUTCOME_SAMPLES} 条影子结算记录后，才显示描述性表现统计。`,
+      '面板只读，不会调参、改变正式信号、仓位或提醒；结果不构成预测或投资建议。',
+    ],
+  };
 }
 
 async function evaluateSignalOutcomes() {
@@ -3496,6 +3822,7 @@ function analyzeDaily(sym, mkt) {
     benchmark,
     intradayVolAdjust: true,
     includeLongTermTrend: true,
+    includeProfileAnalyses: true,
     referenceDate: null,
   });
   // 结构化技术点位（pivot 高低点 + 缺口 + 成交密集区 POC）：纯展示用，不参与信号决策。
@@ -3504,10 +3831,11 @@ function analyzeDaily(sym, mkt) {
     engineVersion: a.engineVersion,
     algoVersion: a.algoVersion, // D3: v1|v2，便于前端审计 tab 区分
     symbol: a.symbol, market: a.market, daily: true, dataPoints: a.dataPoints, currentPrice: a.currentPrice, asOfDate: a.asOfDate,
-    rsi: a.rsi, rsi14: a.rsi14, macd: a.macd, macdSignal: a.macdSignal, macdHist: a.macdHist,
+    rsi: a.rsi, rsi6: a.rsi6, rsi12: a.rsi12, rsi24: a.rsi24, macd: a.macd, macdSignal: a.macdSignal, macdHist: a.macdHist,
     sma20: a.sma20, sma50: a.sma50, sma200: a.sma200, sma120: a.longTermTrend?.sma120 || null, sma20Dist: a.sma20Dist,
     bollPctB: a.bollPctB, bollUpper: a.bollUpper, bollLower: a.bollLower,
     volRatio: a.volRatio, roc: a.roc, atr: a.atr,
+    signalProfiles: a.signalProfiles,
     indicators: a.indObj, score: a.score, confidence: a.confidence, signal: a.signal, stopLoss: a.stopLoss, takeProfit: a.takeProfit,
     dataQuality: a.dataQuality, tradePlan: a.tradePlan, relativeStrength: a.relativeStrength, marketRegime: a.marketRegime, longTermTrend: a.longTermTrend,
     votes: a.votes, // D3: 完整投票明细，供审计 tab 展示
@@ -3534,11 +3862,7 @@ function analyzeIntraday(sym) {
     const sv = emaSeries(mv, 9);
     macd = mv[mv.length - 1]; macdSignal = sv[sv.length - 1]; macdHist = macd - macdSignal;
   }
-  let rsi = null;
-  if (prices.length >= 15) {
-    let g = 0, l = 0; for (let i = prices.length - 14; i < prices.length; i++) { const d = prices[i] - prices[i - 1]; if (d > 0) g += d; else l += Math.abs(d); }
-    const ag = g / 14, al = l / 14; if (al === 0) rsi = 100; else { const rs = ag / al; rsi = 100 - 100 / (1 + rs); }
-  }
+  const rsi = rsiWilder(prices, RSI_PERIODS.decision);
   const volRows = db.prepare("SELECT volume FROM stock_snapshots WHERE symbol = ? AND volume IS NOT NULL ORDER BY ts DESC LIMIT 21").all(sym);
   let volRatio = null;
   if (volRows.length >= 5) { const vs = volRows.map(r => r.volume); volRatio = vs[0] / (vs.slice(1).reduce((a, b) => a + b, 0) / (vs.length - 1)); }
@@ -3822,6 +4146,7 @@ export function stockHandler(req, res) {
     // 实验室只读展示已有的模型效果评估；没有落盘周报时才基于已冻结结果即时汇总，
     // 不触发 outcome 回填、参数调优或任何正式决策变更。
     dashboard.signalDrift = isCurrentSignalDriftReport(latestDrift) ? latestDrift : buildSignalDriftReport();
+    dashboard.signalProfiles = getSignalProfileResearchDashboard({ market });
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(dashboard));
     return;

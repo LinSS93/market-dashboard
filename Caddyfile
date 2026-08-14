@@ -1,4 +1,4 @@
-# Optional example only. Review TLS, authentication, and firewall policy first.
+# Optional example only. Review TLS, network exposure, and firewall policy first.
 your-server.example {
   reverse_proxy 127.0.0.1:8080
 }

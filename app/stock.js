@@ -682,7 +682,7 @@ function renderDecisionBasis(ai, plan, sw){
     h += '</div>';
     // 各指标投票明细：text + 方向标记
     if(ai && ai.indicators){
-      const indMap = {rsi:'RSI',rsi14:'RSI14',macd:'MACD',ma:'均线',ma50:'MA50',boll:'布林',vol:'量能',volprice:'量价',roc:'动量',trend:'趋势',trend200:'长期',pullback:'回撤',relative:'相对强度',relativeStrength:'相对强度'};
+      const indMap = {rsi:'RSI6',rsi6:'RSI6',rsi12:'RSI12',rsi24:'RSI24',macd:'MACD',ma:'均线',ma50:'MA50',boll:'布林',vol:'量能',volprice:'量价',roc:'动量',trend:'趋势',trend200:'长期',pullback:'回撤',relative:'相对强度',relativeStrength:'相对强度'};
       const rows = [];
       for(const [k,v] of Object.entries(ai.indicators)){
         if(!v) continue;

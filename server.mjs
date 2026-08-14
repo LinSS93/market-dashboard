@@ -66,11 +66,28 @@ import {
 } from './alert_engine.mjs';
 import { handleCompanyProfilePost } from './server_route_handlers.mjs';
 import { registerMcpRoutes } from './mcp_server.mjs';
-import { adminAuth, authRequestIp, clearSessionCookie, isSameOriginRequest, isStateChangingMethod, sessionCookie } from './auth.mjs';
 
 const FRONT_PORT = 8080;
 const FRONT_HOST = String(process.env.DASHBOARD_HOST || '127.0.0.1').trim() || '127.0.0.1';
 const APP_DIR = path.join(process.cwd(), 'app');
+
+// The dashboard is intentionally unauthenticated on the trusted LAN.  Keep
+// same-origin protection for state-changing browser requests; this is CSRF
+// protection, not a login/session mechanism.
+function isStateChangingMethod(method) {
+  return !['GET', 'HEAD', 'OPTIONS'].includes(String(method || '').toUpperCase());
+}
+
+function isSameOriginRequest(req) {
+  const origin = String(req?.headers?.origin || '').trim();
+  if (!origin) return false;
+  try {
+    const parsed = new URL(origin);
+    return parsed.host === String(req?.headers?.host || '') && (parsed.protocol === 'https:' || parsed.protocol === 'http:');
+  } catch {
+    return false;
+  }
+}
 
 // MCP 只读接口依赖注入：暴露给 mcp_server.mjs 的查询函数（全部只读，复用进程内缓存）。
 const mcpDeps = {
@@ -93,8 +110,9 @@ const LOGS_DIR = path.join(process.cwd(), 'logs');
 const PERF_LOG_FILE = path.join(LOGS_DIR, 'perf.log'); // 慢请求(>=500ms)实时日志，便于实时排查
 
 // /health version information: Git metadata is refreshed asynchronously only.
-// Deployment metadata is preferred on a host without an authoritative .git checkout.
-// It records the source revision and deployment time; local development falls back to .git.
+// P1-1 codex 复审：Q07 部署不含 .git 目录（或残留旧 .git），导致 /health 的 git 信息全为 null 或失真。
+//   修复：优先读 .deploy-info.json（由 q07-deploy.ps1 在部署时写入，记录源端 commit hash/branch/
+//   dirty/commitTs/deployedAt），它是部署的可追溯来源；本地开发无此文件时回退到 .git。
 let _healthGit = { hash:null, branch:null, dirty:null, commitTs:null };
 let _healthGitRefreshInFlight = false;
 
@@ -1170,112 +1188,15 @@ const server = http.createServer(async (req, res) => {
   const requestStartedAt = Date.now();
   const u = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
   const p = u.pathname;
-  const q = u.search.replace(/^\?/, '');
 
-  // 初始化和日常登录分为两个独立页面，避免同一表单在两种语义之间切换。
-  if (p === '/login' && !adminAuth.configured) {
-    res.writeHead(302, { Location: `/setup${u.search}` });
-    return res.end();
-  }
-  if (p === '/setup' && adminAuth.configured) {
-    res.writeHead(302, { Location: `/login${u.search}` });
-    return res.end();
-  }
-
-  if (p === '/auth/status' && req.method === 'GET') {
-    const status = adminAuth.getStatus();
-    const session = adminAuth.authenticate(req);
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({
-      ok: true,
-      ...status,
-      setupRequired: !adminAuth.configured,
-      authenticated: !!session,
-      username: session?.username || null,
-    }));
-  }
-  if (p === '/auth/register' && req.method === 'POST') {
-    if (!isSameOriginRequest(req)) {
-      res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: false, error: 'Cross-site registration request rejected.' }));
-    }
-    let body = {};
-    try { body = JSON.parse(await readBody(req) || '{}'); } catch {}
-    if (String(body.password || '') !== String(body.passwordConfirm || '')) {
-      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: false, error: 'The two passwords do not match.' }));
-    }
-    try {
-      const registration = adminAuth.createInitialAdmin({ username: body.username, password: body.password, ip: authRequestIp(req) });
-      if (!registration.ok) {
-        res.writeHead(409, { 'Content-Type': 'application/json; charset=utf-8' });
-        return res.end(JSON.stringify({ ok: false, error: 'An administrator is already configured. Please sign in.' }));
-      }
-      res.writeHead(201, { 'Content-Type': 'application/json; charset=utf-8', 'Set-Cookie': sessionCookie(registration.token, req) });
-      return res.end(JSON.stringify({ ok: true, username: registration.username, expiresAt: registration.expiresAt }));
-    } catch (error) {
-      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: false, error: error?.message || 'Unable to create the administrator account.' }));
-    }
-  }
-  if (p === '/auth/login' && req.method === 'POST') {
-    if (!isSameOriginRequest(req)) {
-      res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: false, error: 'Cross-site login request rejected.' }));
-    }
-    let body = {};
-    try { body = JSON.parse(await readBody(req) || '{}'); } catch {}
-    const remember = !!body.remember;
-    const login = adminAuth.login({ username: body.username, password: body.password, ip: authRequestIp(req), remember });
-    if (!login.ok) {
-      const messages = {
-        not_configured: 'Create the first administrator account before signing in.',
-        rate_limited: 'Too many failed sign-in attempts. Try again in 15 minutes or reset the password on the deployment host.',
-        invalid_credentials: 'Invalid username or password.',
-      };
-      res.writeHead(login.code === 'rate_limited' ? 429 : 401, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: false, error: messages[login.code] || '登录失败' }));
-    }
-    const ttlMs = remember ? 30 * 24 * 60 * 60 * 1000 : 12 * 60 * 60 * 1000;
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Set-Cookie': sessionCookie(login.token, req, ttlMs) });
-    return res.end(JSON.stringify({ ok: true, username: login.username, expiresAt: login.expiresAt }));
-  }
-  if (p === '/auth/logout' && req.method === 'POST') {
-    if (!isSameOriginRequest(req)) {
-      res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: false, error: 'Cross-site logout request rejected.' }));
-    }
-    adminAuth.logout(req);
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Set-Cookie': clearSessionCookie(req) });
-    return res.end(JSON.stringify({ ok: true }));
-  }
-
-  const publicPath = p === '/health' || p === '/login' || p === '/login.js' || p === '/login.css' || p === '/setup' || p === '/setup.js';
-  if (!publicPath) {
-    const session = adminAuth.authenticate(req);
-    if (!session) {
-      const wantsHtml = String(req.headers.accept || '').includes('text/html');
-      if (wantsHtml) {
-        const authPage = adminAuth.configured ? '/login' : '/setup';
-        res.writeHead(302, { Location: `${authPage}?next=${encodeURIComponent(p + q)}` });
-        return res.end();
-      }
-      res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({
-        ok: false,
-        error: adminAuth.configured ? 'Sign-in required.' : 'Dashboard setup is required.',
-        login: '/login',
-        setupRequired: !adminAuth.configured,
-      }));
-    }
-    if (isStateChangingMethod(req.method) && !isSameOriginRequest(req)) {
-      res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: false, error: '跨站写请求被拒绝' }));
-    }
-    req.dashboardUser = session;
+  // MCP has its own loopback and Origin validation in mcp_server.mjs.  Native
+  // MCP clients legitimately omit Origin, so do not apply browser CSRF rules.
+  if (p !== '/mcp' && isStateChangingMethod(req.method) && !isSameOriginRequest(req)) {
+    res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ ok: false, error: '跨站写请求被拒绝' }));
   }
   // 性能埋点：所有 API 请求（非静态文件）都测量，写入 SQLite runtime_metrics + 慢请求(>=500ms)写 perf.log
-  const isApiPath = p === '/stock-snapshot' || p === '/stock-analysis'
+  const isApiPath = p === '/mcp' || p === '/stock-snapshot' || p === '/stock-analysis'
     || p.startsWith('/stock/') || p.startsWith('/stock-') || p.startsWith('/tracker/')
     || p.startsWith('/radar_v2/') || p.startsWith('/news/') || p.startsWith('/alerts')
     || p === '/control/status' || p === '/control/settings' || p === '/market/index-bar' || p === '/market/status';
@@ -1292,8 +1213,6 @@ const server = http.createServer(async (req, res) => {
 
   let file = null;
   if (p === '/') file = path.join(APP_DIR, 'land.html'); // 根路径：项目门户落地页
-  else if (p === '/login') file = path.join(APP_DIR, 'login.html');
-  else if (p === '/setup') file = path.join(APP_DIR, 'setup.html');
   else if (p === '/stock') file = path.join(APP_DIR, 'stock.html');
   else if (p === '/lab') file = path.join(APP_DIR, 'scenario-research.html');
   else if (p === '/tracker') file = path.join(APP_DIR, 'tracker.html');
@@ -1306,7 +1225,6 @@ const server = http.createServer(async (req, res) => {
   else if (p === '/radar-v2.css') file = path.join(APP_DIR, 'radar-v2.css');
   else if (p === '/tracker.css') file = path.join(APP_DIR, 'tracker.css');
   else if (p === '/stock.css') file = path.join(APP_DIR, 'stock.css');
-  else if (p === '/login.css') file = path.join(APP_DIR, 'login.css');
   else if (p === '/scenario-research.css') file = path.join(APP_DIR, 'scenario-research.css');
   else if (p === '/tracker.js') file = path.join(APP_DIR, 'tracker.js');
   else if (p === '/sortable-list.js') file = path.join(APP_DIR, 'sortable-list.js');
@@ -1317,8 +1235,6 @@ const server = http.createServer(async (req, res) => {
   else if (p === '/radar-v2-loadguard.mjs') file = path.join(APP_DIR, 'radar-v2-loadguard.mjs');
   else if (p === '/control.js') file = path.join(APP_DIR, 'control.js');
   else if (p === '/stock.js') file = path.join(APP_DIR, 'stock.js');
-  else if (p === '/login.js') file = path.join(APP_DIR, 'login.js');
-  else if (p === '/setup.js') file = path.join(APP_DIR, 'setup.js');
   else if (p === '/scenario-research.js') file = path.join(APP_DIR, 'scenario-research.js');
   else if (p === '/stock-earnings-patch.js') file = path.join(APP_DIR, 'stock-earnings-patch.js');
   else if (p === '/action-taxonomy.cjs') file = path.join(APP_DIR, 'action-taxonomy.cjs');

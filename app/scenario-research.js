@@ -6,6 +6,7 @@
   const KIND_LABEL = { waiting_confirmation:'等待确认', active_long:'持有/进场', risk_rebuild:'风险重建', insufficient:'数据不足' };
   const STATE_LABEL = { WATCH:'观察', PROBE:'试仓', ADD:'加仓', HOLD:'持有', TRIM:'减仓', EXIT:'清仓', AVOID:'回避' };
   const OUTCOME_LABEL = { target_hit:'触及目标', invalidated:'失效', unresolved:'期满未决', confirmation_expired:'确认过期', expired:'已过期', reclaimed:'价格收复', risk_continues:'风险延续', pending:'待结算', insufficient:'数据不足' };
+  const PROFILE_STATUS_LABEL = { baseline_collecting:'建立基线', outcome_collecting:'等待结算', sample_insufficient:'样本积累中', descriptive_only:'描述性观察' };
   let payload = null;
 
   function label(map, value) { return map[value] || value || '—'; }
@@ -135,6 +136,41 @@
     $('driftMeta').textContent = `真实冻结样本 · ${state.label}`;
     panel.innerHTML = '<div class="drift-list">' + rows.map(([labelText, value, detail, valueIsHtml = false]) => '<div class="drift-row"><div class="drift-label">' + esc(labelText) + '</div><div class="drift-value">' + (valueIsHtml ? value : esc(value)) + '</div><div class="drift-detail">' + esc(detail) + '</div></div>').join('') + '</div>';
   }
+  function profileNumber(value, suffix = '%', signed = true) {
+    if (value == null || !Number.isFinite(Number(value))) return '—';
+    const number = Number(value);
+    return `${signed && number > 0 ? '+' : ''}${number.toFixed(2).replace(/\.00$/, '')}${suffix}`;
+  }
+  function profileHorizonText(horizon, minimum) {
+    if (!horizon?.count) return '尚无已结算样本';
+    if (!horizon.adequate) return `已结算 ${horizon.count}/${minimum}，继续积累`;
+    return `样本 ${horizon.count} · 胜率 ${profileNumber(horizon.winRatePct, '%', false)} · 方向收益 ${profileNumber(horizon.averageDirectionalReturnPct)} · 超额 ${profileNumber(horizon.averageExcessReturnPct)}`;
+  }
+  function renderSignalProfiles(data) {
+    const report = data.signalProfiles || null;
+    const panel = $('profileRows');
+    if (!report?.profiles?.length) {
+      $('profileMeta').textContent = '暂未取得人格影子样本';
+      panel.innerHTML = '<div class="research-empty">等待已完成日线后的首轮人格基线。该面板不会回填历史或读取盘中数据。</div>';
+      return;
+    }
+    const marketText = report.market ? ` · ${label(MARKET_LABEL, report.market)}` : ' · 全部市场';
+    $('profileMeta').textContent = `影子账本${marketText} · 表现统计门槛 ${report.minimumOutcomeSamples} 条`;
+    panel.innerHTML = '<div class="profile-grid">' + report.profiles.map(profile => {
+      const status = label(PROFILE_STATUS_LABEL, profile.status);
+      const role = profile.formalActionEligible ? '唯一正式动作来源' : '仅研究观察';
+      const h5 = profileHorizonText(profile.horizons?.[5], report.minimumOutcomeSamples);
+      const h20 = profileHorizonText(profile.horizons?.[20], report.minimumOutcomeSamples);
+      return '<article class="profile-item role-' + esc(profile.role) + '">'
+        + '<div class="profile-title"><div><b>' + esc(profile.label) + '</b><small>' + esc(profile.version) + '</small></div><span class="profile-badge ' + (profile.formalActionEligible ? 'formal' : 'research') + '">' + esc(role) + '</span></div>'
+        + '<div class="profile-status">' + esc(status) + '</div>'
+        + '<div class="profile-counts"><span>基线 <b>' + Number(profile.baselines || 0) + '</b></span><span>状态迁移 <b>' + Number(profile.transitions || 0) + '</b></span><span>标的 <b>' + Number(profile.symbols || 0) + '</b></span></div>'
+        + '<div class="profile-horizon"><span>5 日</span><p>' + esc(h5) + '</p></div>'
+        + '<div class="profile-horizon"><span>20 日</span><p>' + esc(h20) + '</p></div>'
+        + '<small class="profile-asof">最近冻结：' + esc(profile.latestAsOfDate || '尚无') + '</small>'
+        + '</article>';
+    }).join('') + '</div>';
+  }
   function finalSummary(cohort) {
     const final = cohort.outcomes?.final || {};
     const rows = Object.entries(final).filter(([, count]) => Number(count) > 0).sort((a, b) => b[1] - a[1]);
@@ -165,7 +201,7 @@
   }
   function render(data) {
     payload = data;
-    renderSummary(data); renderCoverage(data); renderDrift(data); renderCohorts(data); renderDaily(data); renderRecent(data); renderMethod(data);
+    renderSummary(data); renderCoverage(data); renderDrift(data); renderSignalProfiles(data); renderCohorts(data); renderDaily(data); renderRecent(data); renderMethod(data);
   }
   async function load() {
     $('researchRefresh').disabled = true;

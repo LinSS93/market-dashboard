@@ -149,7 +149,7 @@
         <div class="mcp-endpoint-row">
           <div class="setting-title">MCP 端点</div>
           <div class="mcp-endpoint-url"><code id="mcpEndpoint">加载中...</code><button id="copyEndpoint" class="btn ghost" type="button">复制</button></div>
-          <div class="setting-note">通过 Caddy HTTPS 反代访问；仅接受 POST 请求，Content-Type 必须为 application/json。</div>
+          <div class="setting-note">无需网页登录或 Cookie；通过 Caddy HTTPS 反代访问，仅接受 POST 请求，Content-Type 必须为 application/json。</div>
         </div>
         <div class="mcp-tools">
           <div class="setting-title">可用工具（13 个，全部只读）</div>
@@ -191,9 +191,9 @@
           <div class="setting-title">使用约束</div>
           <ul>
             <li>所有工具均为只读，不会修改看板数据。</li>
-            <li>Origin 校验：本地（<code>localhost</code> / <code>127.0.0.1</code>）可直接连接；跨机器访问需在服务器配置 <code>MCP_ALLOWED_ORIGINS</code> 环境变量。</li>
+            <li>不使用网页账号、会话或令牌；MCP 客户端可直接发起连接。</li>
+            <li>网络边界：Node 只监听本机 loopback；跨机器访问必须经过 Caddy HTTPS 反代。带 Origin 的客户端需在服务器配置 <code>MCP_ALLOWED_ORIGINS</code>。</li>
             <li>交互顺序：<code>initialize</code> → <code>notifications/initialized</code> → <code>tools/list</code> → <code>tools/call</code>。</li>
-            <li>Session 存内存，服务器重启后需重新初始化。</li>
           </ul>
         </div>
       </div>

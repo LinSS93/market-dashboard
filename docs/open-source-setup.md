@@ -1,6 +1,6 @@
 # Local setup and safe defaults
 
-Install the Node version declared in `.nvmrc`, run `npm ci`, then run `npm run check:all`. Start locally with `npm start` and create the first administrator in the browser.
+Install the Node version declared in `.nvmrc`, run `npm ci`, then run `npm run check:all`. Start locally with `npm start`, then open http://127.0.0.1:8080 directly. Keep LAN deployments behind a trusted network boundary.
 
 The public `package.json` approves install scripts only for `better-sqlite3`, which supplies the local SQLite native binding; its concrete version is pinned in `package-lock.json`. The included `.npmrc` makes any other unapproved lifecycle script fail. Review dependency, lockfile, and approval changes together; do not relax script security globally.
 
