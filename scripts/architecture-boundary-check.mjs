@@ -20,6 +20,14 @@ const stockEngine = read('stock_engine.mjs');
 const boundaryDoc = read('docs/architecture-boundaries.md');
 const decisionSystemDoc = read('docs/decision-system.md');
 
+const retiredAuthFiles = [
+  'auth.mjs', 'app/login.html', 'app/login.js', 'app/login.css',
+  'app/setup.html', 'app/setup.js', 'scripts/auth-check.mjs',
+  'scripts/reset-admin-password.mjs', 'scripts/reset-admin-password.ps1',
+];
+assert(retiredAuthFiles.every(file => !existsSync(resolve(root, file))), 'retired login/session assets are absent');
+assert(!server.includes("from './auth.mjs'") && !server.includes("p === '/auth/") && !server.includes('adminAuth'), 'server has no login routes or session guard');
+
 assert(!existsSync(resolve(root, 'app/lab.html')) && !existsSync(resolve(root, 'app/lab.js')), 'retired /lab UI assets are absent');
 assert(controlHtml.includes('<title>控制中心</title>') && controlHtml.includes('机会雷达'), 'control center owns the current Radar V2 switch');
 assert(!controlHtml.includes('scenarioCollectionHealth') && !controlHtml.includes('实验室采集健康') && !controlClient.includes('renderScenarioCollection') && !server.includes('scenarioResearch:getScenarioResearchOperationsStatus'), 'control center does not surface laboratory collection health');

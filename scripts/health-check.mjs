@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
-// Deployment-safe check.  Business routes are deliberately session-protected,
-// so this script validates their auth boundary rather than bypassing it.
+// Deployment-safe check. The dashboard intentionally has no login/session
+// layer; verify that real read-only business routes and the MCP handshake are
+// directly reachable through the running service.
 const BASE = process.env.DASHBOARD_BASE || 'http://127.0.0.1:8080';
 const failures = [];
 
@@ -28,17 +29,18 @@ async function main() {
   assert(health.response.status === 200 && health.body?.ok === true, '/health is live');
   assert(/^v26\.(3|[4-9]|[1-9][0-9])\./.test(String(health.body?.node || '')), '/health reports supported Node 26.3+');
 
-  const auth = await fetchJson('/auth/status');
-  assert(auth.response.status === 200 && typeof auth.body?.configured === 'boolean', '/auth/status exposes bootstrap state');
+  const researchQueue = await fetchJson('/radar_v2/queue?limit=1');
+  assert(researchQueue.response.status === 200 && researchQueue.body?.ok === true, '/radar_v2/queue is directly readable');
 
-  const protectedRoute = await fetchJson('/radar_v2/queue?limit=1');
-  assert(protectedRoute.response.status === 401, '/radar_v2/queue rejects unauthenticated access');
-
-  if (auth.body?.configured) {
-    console.log('[INFO] Admin password configured. Finish release acceptance by logging in through HTTPS and opening Radar V2.');
-  } else {
-    console.warn('[WARN] First-use setup is pending. Open /login to create the administrator account before exposing the dashboard to an untrusted network.');
-  }
+  const mcpHandshake = await fetchJson('/mcp', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0', id: 1, method: 'initialize',
+      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'health-check', version: '1' } },
+    }),
+  });
+  assert(mcpHandshake.response.status === 200 && mcpHandshake.body?.result?.serverInfo?.name === 'market-dashboard-mcp', '/mcp accepts a direct initialize request');
 
   if (failures.length) {
     console.error(`\n[FAIL] ${failures.length} critical check(s) failed.`);
