@@ -34,7 +34,7 @@ import {
   analyzeRowsForBacktest,
   benchmarkFor,
   buildSwingDecision,
-  applyFormalEntryGate,
+  resolveFinalSwingState,
 } from "./stock_engine.mjs";
 
 // ── 缓存（仅回测域内部使用） ────────────────────────────────────────────────
@@ -416,7 +416,7 @@ function buildBacktestSeriesWithV21(symbol, market, days = 320) {
 //
 // config 参数（可选，用于回测调参，不影响生产 signal_scoring.mjs）：
 //   - thresholds: { PROBE, STRONG_PROBE, WATCH } 覆盖默认阈值
-//   - requireInBuyZone: bool，PROBE/ADD 是否要求 inBuyZone（默认 true，与生产一致）
+//   - requireInBuyZone: bool，研究性实验中是否额外要求 inBuyZone（默认 false；生产不使用该门控）
 //   - tranchePctOverride: { PROBE, STRONG_PROBE, ADD, TRIM, EXIT } 覆盖默认 tranchePct
 function computeV21StateForPosition(analysis, position, config = {}) {
   if (!analysis || !analysis.tradePlan) return null;
@@ -432,13 +432,11 @@ function computeV21StateForPosition(analysis, position, config = {}) {
     const cur = analysis.currentPrice;
     const cost = Number(position?.cost) || 0;
     const pnlPct = hasPosition && cur && cost > 0 ? (cur / cost - 1) * 100 : null;
-    // Default mode deliberately shares the production state mapping and formal
-    // entry gate. Historical reliability/execution-risk cannot be reconstructed
+    // Default mode deliberately shares the production state mapping. Historical
+    // reliability/execution-risk cannot be reconstructed
     // safely from the live cache, so both remain explicit neutral/as-of inputs;
     // this result is never labelled a full live-reliability replay.
-    // When config changes thresholds or tranches, it is research tuning only,
-    // but the formal entry gate is still applied so a custom score cannot bypass
-    // the production buy-zone/reliability eligibility contract.
+    // When config changes thresholds or tranches, it is research tuning only.
     const hasTuningConfig = config.thresholds || config.tranchePctOverride || 'requireInBuyZone' in config;
     const useGate = !hasTuningConfig && config.useChaseGate !== false;
     let stateResult;
@@ -464,16 +462,17 @@ function computeV21StateForPosition(analysis, position, config = {}) {
         overheat: !!baseDecision.zones?.overheat,
       }, config);
     }
-    const scoredDecision = {
-      ...stateResult,
-      actionable:['PROBE', 'ADD', 'TRIM', 'EXIT', 'AVOID'].includes(stateResult.state),
-      compositeScore:scoreResult.compositeScore,
-    };
-    const gatedDecision = applyFormalEntryGate(scoredDecision, baseDecision);
+    const scoredDecision = resolveFinalSwingState({
+      analysis,
+      baseDecision,
+      scoreState: stateResult,
+      scoreResult,
+      hasPosition,
+    });
     return {
-      state: gatedDecision.state,
-      label: gatedDecision.label,
-      tranchePct: gatedDecision.tranchePct ?? 0,
+      state: scoredDecision.state,
+      label: scoredDecision.label,
+      tranchePct: scoredDecision.tranchePct ?? 0,
       compositeScore: scoreResult.compositeScore,
       inBuyZone: !!baseDecision.zones?.inBuyZone,
       overheat: !!baseDecision.zones?.overheat,
@@ -481,10 +480,13 @@ function computeV21StateForPosition(analysis, position, config = {}) {
       stopLoss: analysis.tradePlan.stopLoss ?? null,
       takeProfit: analysis.tradePlan.takeProfit ?? null,
       pnlPct: pnlPct != null ? +pnlPct.toFixed(2) : null,
-      reason: gatedDecision.reason,
-      chaseGate: gatedDecision.chaseGate || null,
-      entryGate:gatedDecision.entryGate || null,
-      validationMode:hasTuningConfig ? 'research_tuning_with_formal_entry_gate' : 'production_state_with_neutral_asof_reliability',
+      reason: scoredDecision.reason,
+      chaseGate: scoredDecision.chaseGate || null,
+      researchSignal: scoredDecision.researchSignal || null,
+      executionReadiness: scoredDecision.executionReadiness || null,
+      scoringState: scoredDecision.scoringState || null,
+      stateSource: scoredDecision.stateSource || null,
+      validationMode:hasTuningConfig ? 'research_tuning_with_custom_state_mapping' : 'production_state_with_neutral_asof_reliability',
       reliabilityMode:'neutral_asof_unavailable',
       executionRiskMode:'neutral_asof_unavailable',
     };
@@ -493,14 +495,14 @@ function computeV21StateForPosition(analysis, position, config = {}) {
   }
 }
 
-// scoreToStateWithConfig：本地版 scoreToState，支持阈值和 inBuyZone 要求可配置。
-// 默认行为与 signal_scoring.mjs 的 scoreToState 完全一致（向后兼容）。
+// scoreToStateWithConfig：仅供研究调参的本地状态映射，支持阈值和买入区要求可配置。
+// 默认不要求买入区；生产状态仍使用 signal_scoring.mjs + resolveFinalSwingState。
 // config.thresholds / config.requireInBuyZone / config.tranchePctOverride 用于回测调参。
 function scoreToStateWithConfig(compositeScore, ctx = {}, config = {}) {
   const { hasPosition = false, inBuyZone = false, cur = null, invalidation = null, pnlPct = null, overheat = false } = ctx;
   const score = Number(compositeScore) || 0;
   const T = { ...TIER_THRESHOLDS, ...(config.thresholds || {}) };
-  const requireInBuyZone = config.requireInBuyZone !== false;
+  const requireInBuyZone = config.requireInBuyZone === true;
   const tp = config.tranchePctOverride || {};
 
   // 安全网：持仓 + 失效位破位 → 强制 EXIT
@@ -570,9 +572,9 @@ function scoreToStateWithConfig(compositeScore, ctx = {}, config = {}) {
     };
   }
   return {
-    state: 'AVOID', label: '回避',
-    tone: 'bear', urgency: 'medium', tranchePct: 0,
-    reason: `评分 ${score.toFixed(2)} < ${T.WATCH}，回避`,
+    state: 'WATCH', label: '观察',
+    tone: 'watch', urgency: 'low', tranchePct: 0,
+    reason: `评分 ${score.toFixed(2)} < ${T.WATCH}，研究倾向不足，暂不新开仓`,
   };
 }
 

@@ -110,9 +110,8 @@ const LOGS_DIR = path.join(process.cwd(), 'logs');
 const PERF_LOG_FILE = path.join(LOGS_DIR, 'perf.log'); // 慢请求(>=500ms)实时日志，便于实时排查
 
 // /health version information: Git metadata is refreshed asynchronously only.
-// P1-1 codex 复审：Q07 部署不含 .git 目录（或残留旧 .git），导致 /health 的 git 信息全为 null 或失真。
-//   修复：优先读 .deploy-info.json（由 q07-deploy.ps1 在部署时写入，记录源端 commit hash/branch/
-//   dirty/commitTs/deployedAt），它是部署的可追溯来源；本地开发无此文件时回退到 .git。
+// Deployment metadata is preferred on a host without an authoritative .git checkout.
+// It records the source revision and deployment time; local development falls back to .git.
 let _healthGit = { hash:null, branch:null, dirty:null, commitTs:null };
 let _healthGitRefreshInFlight = false;
 
