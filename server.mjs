@@ -2564,8 +2564,8 @@ server.listen(FRONT_PORT, FRONT_HOST, () => {
   }
   refreshTracker();
   setTimeout(()=>backfillKnownTrackerFx().catch(e=>console.log('[tracker-fx] '+e.message)),3000);
-  setTimeout(()=>enqueueMaintenanceTask('database:auto-backup',()=>createDatabaseBackup('auto'),{priority:'low',dedupeKey:'database:backup'}).then(x=>console.log('[backup] '+JSON.stringify(x))).catch(e=>console.log('[backup] '+e.message)),8000);
-  setInterval(()=>enqueueMaintenanceTask('database:auto-backup',()=>createDatabaseBackup('auto'),{priority:'low',dedupeKey:'database:backup'}).catch(e=>console.log('[backup] '+e.message)),24*60*60*1000);
+  // Automatic full-database backups are intentionally disabled. Use the manual
+  // backup route only after choosing suitable storage and retention.
   // 分时动态刷新：tracker 标的（港股/韩股/美股 ETF + 正股）任一开盘 → 高频 5s；全休市 → 低频 60s
   let _trkTimer = null;
   function scheduleTracker() {
