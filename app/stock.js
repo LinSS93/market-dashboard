@@ -401,16 +401,25 @@ function renderDecisionCard(ai, plan, eff, sw, mkt, sessionRisk, research=null){
   const toneKey = planToneKey(sw ? sw.tone : (plan && plan.actionTone));
   el.className = 'decision-card tone-' + toneKey;
 
-  // 结论行：综合评分 + 状态标签（v2.1: 去掉重复的 tier，只保留 label）
+  // 结论行：执行状态与研究倾向分开。评分只表达倾向，不能被误读为立即执行指令。
   const composite = sw && sw.compositeScore != null ? sw.compositeScore : null;
   const compositeCls = composite == null ? '' : composite >= 0.22 ? ' high' : composite >= 0.12 ? ' mid' : ' low';
   const stateLabel = sw ? (sw.label || sw.state) : (eff && eff.label ? eff.label : '—');
   const stateTone = sw ? (sw.tone || toneKey) : toneKey;
+  const researchSignal = sw && sw.researchSignal || null;
+  const readiness = sw && sw.executionReadiness || null;
 
   let h = '<div class="dc-conclusion">';
-  if(composite != null) h += '<span class="dc-composite' + compositeCls + '" title="exposure = technicalEdge × qualityMultiplier（乘法方向门），≥22绿/12-21黄/<12红">综合 ' + (composite*100).toFixed(1) + '</span>';
-  h += '<span class="dc-state"><span class="dc-state-tag tone-' + stateTone + '">' + esc(stateLabel) + '</span></span>';
+  h += '<span class="dc-state"><span class="dc-state-k">执行状态</span><span class="dc-state-tag tone-' + stateTone + '">' + esc(stateLabel) + '</span></span>';
+  if(researchSignal) h += '<span class="dc-research tone-' + (researchSignal.tone || 'watch') + '" title="综合评分反映研究倾向与排序，不单独构成执行指令">研究 ' + esc(researchSignal.label || '—') + '</span>';
+  if(composite != null) h += '<span class="dc-composite' + compositeCls + '" title="综合评分 = 技术方向 × 质量乘数；仅用于研究倾向与排序">评分 ' + (composite*100).toFixed(1) + '</span>';
   h += '</div>';
+
+  if(readiness){
+    h += '<div class="dc-readiness tone-' + (readiness.tone || 'watch') + '"><span class="dc-readiness-k">执行条件</span><span class="dc-readiness-v">' + esc(readiness.label || '待确认') + '</span>';
+    if(readiness.reason) h += '<span class="dc-readiness-note">' + esc(readiness.reason) + '</span>';
+    h += '</div>';
+  }
 
   // 信号可信度与数据状态条：引擎版本 + 漂移状态 + 报价来源时间 + 分析日期
   h += '<div class="dc-meta-row">';
@@ -638,10 +647,10 @@ function renderDecisionBasis(ai, plan, sw){
 
   // ── 决策链路：按信号系统实际计算顺序展示，4 步流水线 ──
   // 步骤 1：市场状态判定（基准 regime → 权重分配）
-  // 步骤 2：技术面投票（6 项指标 → rawScore → signal）
-  // 步骤 3：乘法方向门（exposure = technicalEdge × qualityMultiplier）
-  // 步骤 4：门控检查（chaseGate + extSessionGate；触发时显示，否则跳过）
-  // 最终决策（编号根据实际显示步骤数递增）
+  // 步骤 2：技术面与形态计划（指标投票 → 形态确认）
+  // 步骤 3：综合评分（研究倾向与排序）
+  // 步骤 4：执行条件与风险检查
+  // 最终执行状态（编号根据实际显示步骤数递增）
   let stepNum = 0;
 
   // ─── 步骤 1：市场状态判定（简洁版） ───
@@ -673,7 +682,7 @@ function renderDecisionBasis(ai, plan, sw){
   if(techAction || (ai && ai.indicators)){
     stepNum++;
     h += '<div class="basis-step">';
-    h += '<div class="basis-step-head"><span class="basis-step-num">' + stepNum + '</span><span class="basis-step-title">技术面投票</span>';
+    h += '<div class="basis-step-head"><span class="basis-step-num">' + stepNum + '</span><span class="basis-step-title">技术面与形态计划</span>';
     if(techAction){
       const tone = (techAction === 'BUY' || techAction === 'STRONG_BUY') ? 'bull' : (techAction === 'SELL' || techAction === 'STRONG_SELL') ? 'bear' : 'neutral';
       const scoreStr = techScore != null ? ' ' + techScore.toFixed(2) : '';
@@ -699,14 +708,14 @@ function renderDecisionBasis(ai, plan, sw){
     h += '</div>';
   }
 
-  // ─── 步骤 3：乘法方向门（exposure = technicalEdge × qualityMultiplier） ───
+  // ─── 步骤 3：综合评分（研究倾向，不单独构成执行指令） ───
   // v2.0: 技术面因子作为方向门，其余 4 因子加权合成 qualityMultiplier
   // 渲染：方向门(technicalEdge) × 质量乘数(4因子加权) = exposure
   // v2.1: 分数 ×100 展示为整数（避免 0-1 小数与上方因子评分条混淆）
   if(sw && Array.isArray(sw.scoreFactors) && sw.scoreFactors.length > 0){
     stepNum++;
     h += '<div class="basis-step">';
-    h += '<div class="basis-step-head"><span class="basis-step-num">' + stepNum + '</span><span class="basis-step-title">乘法方向门</span>';
+    h += '<div class="basis-step-head"><span class="basis-step-num">' + stepNum + '</span><span class="basis-step-title">综合评分 · 研究倾向</span>';
     if(sw.compositeScore != null) h += '<span class="basis-step-value">exposure ' + (sw.compositeScore*100).toFixed(1) + '</span>';
     h += '</div>';
     h += '<div class="basis-score-detail">';
@@ -740,12 +749,19 @@ function renderDecisionBasis(ai, plan, sw){
     h += '</div>';
   }
 
-  // ─── 步骤 4：门控检查（始终显示，含所有硬门控） ───
-  // v2.1: 即使全部通过也显示，保持步骤数一致；硬门控 1-4 在前端通过 state/summary 推断展示
+  // ─── 步骤 4：执行条件与风险检查（始终显示，含所有硬门控） ───
   if(sw && sw.state){
     stepNum++;
     h += '<div class="basis-step">';
-    h += '<div class="basis-step-head"><span class="basis-step-num">' + stepNum + '</span><span class="basis-step-title">门控检查</span></div>';
+    h += '<div class="basis-step-head"><span class="basis-step-num">' + stepNum + '</span><span class="basis-step-title">执行条件与风险检查</span></div>';
+
+    const readiness = sw.executionReadiness;
+    if(readiness){
+      h += '<div class="basis-alert basis-alert-' + (readiness.status === 'ready' ? 'pass' : readiness.status === 'risk_off' ? 'danger' : 'warn') + '">';
+      h += '<div class="basis-alert-head"><span class="basis-alert-title">技术执行条件</span><span class="basis-alert-badge">' + esc(readiness.label || '待确认') + '</span></div>';
+      if(readiness.reason) h += '<div class="basis-alert-body">' + esc(readiness.reason) + '</div>';
+      h += '</div>';
+    }
 
     // 4a: 安全网（硬门控1）：EXIT 状态 + safetyNet 标记
     if(sw.safetyNet){
@@ -790,8 +806,9 @@ function renderDecisionBasis(ai, plan, sw){
       if(cg){
         const enabled = cg.enabled !== false;
         const triggered = cg.triggered === true;
-        const cls = triggered ? ' basis-alert-warn' : (enabled ? ' basis-alert-pass' : ' basis-alert-disabled');
-        const status = triggered ? '触发' : (enabled ? '通过' : '趋势市禁用');
+        const activeBlock = triggered && enabled;
+        const cls = activeBlock ? ' basis-alert-warn' : (enabled ? ' basis-alert-pass' : ' basis-alert-disabled');
+        const status = activeBlock ? '拦截新增' : (triggered ? '仅提示（当前不拦截）' : (enabled ? '通过' : '当前不启用'));
         h += '<div class="basis-alert' + cls + '">';
         h += '<div class="basis-alert-head"><span class="basis-alert-title">防追高门控</span><span class="basis-alert-badge">' + status + '</span></div>';
         if(triggered) h += '<div class="basis-alert-body">' + esc(cg.reason || '') + '</div>';
@@ -818,13 +835,15 @@ function renderDecisionBasis(ai, plan, sw){
 
     h += '</div>';
 
-    // ─── 最终决策（v2.1: 移除 basis-step-final 特殊样式，与其他卡片一致） ───
+    // ─── 最终执行状态（评分倾向单独展示，避免把排序分当成执行指令） ───
     stepNum++;
     h += '<div class="basis-step">';
-    h += '<div class="basis-step-head"><span class="basis-step-num">' + stepNum + '</span><span class="basis-step-title">最终决策</span>';
+    h += '<div class="basis-step-head"><span class="basis-step-num">' + stepNum + '</span><span class="basis-step-title">最终执行状态</span>';
     h += '<span class="basis-step-value tone-' + (sw.tone || 'neutral') + '">' + esc(sw.label || sw.state) + '</span>';
     h += '</div>';
     if(sw.summary) h += '<div class="basis-step-note">' + esc(sw.summary) + '</div>';
+    if(sw.researchSignal) h += '<div class="basis-step-note muted">研究倾向：' + esc(sw.researchSignal.label || '—') + (sw.compositeScore != null ? ' · 评分 ' + (sw.compositeScore*100).toFixed(1) : '') + '</div>';
+    if(sw.scoringState && sw.scoringState.state && sw.scoringState.state !== sw.state) h += '<div class="basis-step-note muted">评分映射：' + esc(sw.scoringState.label || sw.scoringState.state) + '；已由执行条件调整。</div>';
     h += '</div>';
   }
 

@@ -17,7 +17,7 @@
 //   - v1.4.6 全量回测 886%→17896% 过拟合，不可信
 //   - chaseGate 全样本一刀切年化 -1.38pp，改为 regime 动态启用
 //   - 4 处重复计分（市场/量价/可靠度/长期趋势）已在 stock_engine.mjs 修复
-export const SCORING_ENGINE_VERSION = 'v2.0.0-multiplicative-directional-gate';
+export const SCORING_ENGINE_VERSION = 'v2.3.0-research-bias-execution-state';
 
 // v2.1：合并 tier 到 state，label 由 state + exposure 直接派生
 // PROBE/ADD 在 exposure ≥ STRONG_PROBE 阈值时自动加"强"前缀（强试仓/强加仓）
@@ -43,16 +43,29 @@ function deriveLabel(state, score) {
 }
 
 // v2.0 exposure 阈值（codex 65/35 holdout 样本外验证）
-// < 0.12: AVOID/WATCH（不开仓）
+// < 0.12: WATCH（不新开仓，不等同看空）
 // 0.12-0.22: PROBE（试仓 25%）
 // 0.22-0.32: STRONG_PROBE（强试仓 35%）/ ADD（加仓 35%）
 // >= 0.32: STRONG_PROBE（强试仓 40% 封顶）/ ADD（强加仓 40% 封顶）
 export const TIER_THRESHOLDS = Object.freeze({
   STRONG_PROBE: 0.22,
   PROBE: 0.12,
-  WATCH: 0.12,  // 低于此值：空仓 AVOID，持仓 TRIM
+  WATCH: 0.12,  // 低于此值：空仓观察，持仓仍按既有风控规则处理
   CRITICAL_EXECUTION_RISK: 55,  // 执行风险硬门控（去重后实际范围 0-65，阈值 55 可达）
 });
+
+// 综合评分只描述研究倾向，不能单独被解释为可立即执行的交易动作。
+// 最终执行状态还要经过 stock_engine 中的技术形态与风险裁决层。
+export function scoreToResearchBias(compositeScore) {
+  const score = Number(compositeScore) || 0;
+  if (score >= TIER_THRESHOLDS.STRONG_PROBE) {
+    return { key: 'strong_bullish', label: '强偏多', tone: 'bull', score };
+  }
+  if (score >= TIER_THRESHOLDS.PROBE) {
+    return { key: 'bullish', label: '偏多', tone: 'bull', score };
+  }
+  return { key: 'weak', label: '偏弱', tone: 'watch', score };
+}
 
 // ── 市场质量因子（新增，替代 executionRiskScore 中的市场状态加分）──
 // 从基准 regime 推导 0-1 分，避免市场状态在权重和分值中双重计入
@@ -457,11 +470,11 @@ export function scoreToState(compositeScore, ctx = {}) {
       chaseGate: gate, extSessionGate: extGate,
     };
   }
-  const avoidMeta = STATE_META.AVOID;
+  const watchMeta = STATE_META.WATCH;
   return {
-    state: 'AVOID', label: avoidMeta.label,
-    tone: avoidMeta.tone, urgency: avoidMeta.urgency, tranchePct: 0,
-    reason: `exposure ${score.toFixed(3)} < ${TIER_THRESHOLDS.WATCH}，回避`,
+    state: 'WATCH', label: watchMeta.label,
+    tone: watchMeta.tone, urgency: watchMeta.urgency, tranchePct: 0,
+    reason: `exposure ${score.toFixed(3)} < ${TIER_THRESHOLDS.WATCH}，研究倾向不足，暂不新开仓`,
     chaseGate: gate, extSessionGate: extGate,
   };
 }

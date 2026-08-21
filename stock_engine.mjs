@@ -19,7 +19,7 @@ import { estimateTradeFee } from "./personal_calibration.mjs";
 import { evaluateExtendedSessionRisk } from "./extended_session_risk.mjs";
 import { getGroupNewsRisk, normalizeGroupKey, groupLabel } from "./grouping.mjs";
 import { convertAccountSizeFromCny, getMarketCurrency, getFxStatus } from "./fx_rate.mjs";
-import { computeCompositeScore, scoreToState, SCORING_ENGINE_VERSION } from "./signal_scoring.mjs";
+import { computeCompositeScore, scoreToState, scoreToResearchBias, SCORING_ENGINE_VERSION } from "./signal_scoring.mjs";
 import { OUTCOME_CONTRACT_VERSION, calculateForwardOutcomes } from "./outcome_contract.mjs";
 import { computeStructureLevels } from "./structure_levels.mjs";
 import { computeSignalProfileBundle, FORMAL_SIGNAL_PROFILE_ID, STOCK_SIGNAL_PROFILE_SCHEMA_VERSION, getSignalProfile, getSignalProfileCatalog } from "./stock_signal_profiles.mjs";
@@ -998,7 +998,10 @@ function tradingTimeFraction(market) {
 // RSI12 now uses the broker-compatible Wilder/RMA calculation. This changes a
 // decision input and therefore starts a new frozen-signal cohort; do not blend
 // outcomes from the prior simple-RSI engine into this version's reports.
-const SIGNAL_ENGINE_VERSION = "stock-signal-v2026.08.14-scoring-v2.1.0-rsi12-wilder";
+// v2.2 changes the formal execution-decision contract: composite score now expresses
+// research bias, while the technical plan and safety checks determine whether an
+// entry is executable. Keep its frozen outcomes in a separate validation cohort.
+const SIGNAL_ENGINE_VERSION = "stock-signal-v2026.08.20-scoring-v2.3.0-neutral-low-score";
 const COMPATIBLE_SIGNAL_ENGINE_VERSIONS = Object.freeze([SIGNAL_ENGINE_VERSION]);
 const LEGACY_OUTCOME_CONTRACT_VERSION = "legacy-next-close-unversioned-v1";
 // D3: 信号算法版本切换。v1=原9项加权投票；v2=6项市场状态感知投票。
@@ -2220,7 +2223,9 @@ function buildSwingDecision(analysis, reliability, position = null) {
   const atr = analysis?.atr || (cur ? cur * 0.04 : null);
   const sma20 = analysis?.sma20 || null;
   const setupKey = plan?.setup?.key || "none";
-  const effectiveAction = reliability?.effectiveAction || plan?.action || "WAIT";
+  // 形态计划决定执行条件；可靠度只进入综合评分和说明，不能单独反向覆盖技术执行状态。
+  const effectiveAction = plan?.action || "WAIT";
+  const reliabilityAction = reliability?.effectiveAction || null;
   const reliabilityScore = reliability?.reliabilityScore ?? plan?.confidence ?? 0;
   const probability = reliability?.calibration?.probabilityPct ?? null;
   const expectancy = reliability?.calibration?.expectancyPct ?? null;
@@ -2253,7 +2258,7 @@ function buildSwingDecision(analysis, reliability, position = null) {
 
   // 2) 核心状态机
   const reasons = [
-    "量化动作：" + effectiveAction + "，可靠度 " + reliabilityScore + "%" + (probability != null ? "，校准胜率 " + probability.toFixed(1) + "%" : ""),
+    "技术计划：" + effectiveAction + (reliabilityAction ? "；可靠度动作：" + reliabilityAction : "") + "，可靠度 " + reliabilityScore + "%" + (probability != null ? "，校准胜率 " + probability.toFixed(1) + "%" : ""),
     "市场状态：" + (plan.marketRegime?.label || "基准未知") + "；个股形态：" + (plan.setup?.label || "等待确认"),
   ];
   let { state, tranchePct, summary, trigger } = resolveSwingState({
@@ -2288,6 +2293,11 @@ function buildSwingDecision(analysis, reliability, position = null) {
     sharesBasis,
     sourceAction: effectiveAction,
     reliabilityScore, probabilityPct: probability, expectancyPct: expectancy,
+    executionContext: {
+      dataOk, riskHigh, validationFatal, marketWeak,
+      technicalAction: String(plan?.action || 'WAIT').toUpperCase(),
+      setupKey,
+    },
     position: {
       hasPosition, shares, targetShares, cost: swingPrice(cost, market), currentPrice: swingPrice(cur, market),
       pnlPct: pnlPct != null ? +pnlPct.toFixed(2) : null,
@@ -2299,7 +2309,7 @@ function buildSwingDecision(analysis, reliability, position = null) {
       buyLow: swingPrice(buyLow, market), buyHigh: swingPrice(buyHigh, market), inBuyZone,
       confirmation: swingPrice(confirmPrice, market), invalidation: swingPrice(invalidation, market),
       target1: swingPrice(target1, market), target2: swingPrice(target2, market), overheat,
-      // 正式资格只服务最终动作门控；前端不能把综合评分当成开仓许可。
+      // 买入区与可靠度资格保留为用户决策参考；不作为二次硬门控。
       entryQualified, addQualified,
     },
     validFrom, validUntil: addWeekdays(validFrom, 3), validSessions: 3,
@@ -2309,8 +2319,136 @@ function buildSwingDecision(analysis, reliability, position = null) {
       sma120: longTerm.sma120, sma200: longTerm.sma200, roc90: longTerm.roc90, slope120: longTerm.slope120,
       votes: longTerm.votes || [],
       adjusted: longTermAdjusted, note: longTermNote, prevState,
-    } : null,
+  } : null,
   };
+}
+
+// 综合评分是研究倾向，不是独立的执行许可。这里检查技术计划、数据质量、
+// 高风险形态与样本外验证；不重新引入买入区或低可靠度的二次开仓门槛。
+function getExecutionReadiness(analysis, baseDecision, hasPosition) {
+  const plan = analysis?.tradePlan || {};
+  const technicalAction = String(plan.action || 'WAIT').toUpperCase();
+  const setupKey = String(plan.setup?.key || 'none').toLowerCase();
+  const setupLabel = plan.setup?.label || '等待确认';
+  const dataQuality = String(plan.dataQuality?.level || '').toLowerCase();
+  const executionContext = baseDecision?.executionContext || {};
+  const readySetups = new Set(['trend_pullback', 'breakout_follow', 'mean_reversion']);
+
+  if (!plan.action || dataQuality !== 'ok' || analysis?.daily === false) {
+    return {
+      status: 'unavailable', label: '执行条件待数据确认', tone: 'watch',
+      technicalAction, setupKey, setupLabel,
+      reason: '技术计划或正式日线数据尚未就绪。',
+    };
+  }
+  // 明确破位/卖出优先于验证说明：即使验证样本也不足，仍要如实保留技术风险状态。
+  if (technicalAction === 'SELL' || setupKey === 'risk_off') {
+    return {
+      status: 'risk_off', label: '技术面偏空', tone: 'bear',
+      technicalAction, setupKey, setupLabel,
+      reason: `技术计划为${plan.actionLabel || technicalAction} / ${setupLabel}，不新增仓位。`,
+    };
+  }
+  if (technicalAction === 'REDUCE' || setupKey === 'extended') {
+    return {
+      status: 'defer', label: '暂不追价', tone: 'watch',
+      technicalAction, setupKey, setupLabel,
+      reason: `技术计划为${plan.actionLabel || technicalAction} / ${setupLabel}，暂不新增仓位。`,
+    };
+  }
+  if (executionContext.validationFatal === true) {
+    return {
+      status: 'validation_blocked', label: '验证未通过', tone: 'bear',
+      technicalAction, setupKey, setupLabel,
+      reason: '样本外验证未通过或不稳定，暂停新增仓位。',
+    };
+  }
+  if (executionContext.riskHigh === true) {
+    return {
+      status: 'defer', label: '高风险，暂缓执行', tone: 'watch',
+      technicalAction, setupKey, setupLabel,
+      reason: '技术计划风险评估为高，暂不新增仓位。',
+    };
+  }
+  if (['BUY', 'ADD'].includes(technicalAction) && readySetups.has(setupKey)) {
+    return {
+      status: 'ready', label: '形态已确认', tone: 'bull',
+      technicalAction, setupKey, setupLabel,
+      reason: `技术计划为${plan.actionLabel || technicalAction} / ${setupLabel}，已具备执行形态。`,
+    };
+  }
+  return {
+    status: 'waiting', label: '等待形态确认', tone: 'watch',
+    technicalAction, setupKey, setupLabel,
+    reason: `技术计划为${plan.actionLabel || technicalAction} / ${setupLabel}，尚未形成执行形态。`,
+  };
+}
+
+// 最终状态合并：安全与技术执行层优先，综合评分只在技术形态就绪时决定新增仓位强弱。
+// baseDecision 的 entryQualified / inBuyZone 仍保留为用户参考，绝不在这里恢复为硬门控。
+function resolveFinalSwingState({ analysis, baseDecision, scoreState, scoreResult, hasPosition }) {
+  const readiness = getExecutionReadiness(analysis, baseDecision, hasPosition);
+  const researchSignal = scoreToResearchBias(scoreResult?.compositeScore);
+  const scoreSnapshot = {
+    state: scoreState?.state || null,
+    label: scoreState?.label || null,
+    tranchePct: scoreState?.tranchePct ?? 0,
+    reason: scoreState?.reason || null,
+  };
+  const decorate = (next, stateSource) => ({
+    ...next,
+    stateSource,
+    researchSignal,
+    executionReadiness: readiness,
+    scoringState: scoreSnapshot,
+  });
+
+  // 技术止损、止盈减仓等已有仓位管理不能被评分反向覆盖。
+  if (['EXIT', 'TRIM'].includes(baseDecision?.state)) {
+    return decorate({
+      ...scoreState,
+      state: baseDecision.state,
+      label: baseDecision.label,
+      tone: baseDecision.tone,
+      urgency: baseDecision.urgency,
+      tranchePct: baseDecision.tranchePct,
+      reason: baseDecision.summary,
+    }, 'technical_execution');
+  }
+
+  // scoreToState 已识别的安全网、临界执行风险、市场风险或盘后风险必须保留。
+  if (['EXIT', 'TRIM'].includes(scoreState?.state)) return decorate(scoreState, 'risk_gate');
+
+  if (!hasPosition && readiness.status === 'risk_off') {
+    return decorate({
+      ...scoreState,
+      state: 'AVOID', label: SWING_STATE_META.AVOID.label, tone: SWING_STATE_META.AVOID.tone,
+      urgency: SWING_STATE_META.AVOID.urgency, tranchePct: 0,
+      reason: `${readiness.reason} 综合评分${researchSignal.label}仅用于研究排序。`,
+    }, 'technical_execution');
+  }
+
+  // 弱研究倾向本身保持回避；它不会被形态状态抬高成新增仓位。
+  if (!hasPosition && scoreState?.state === 'AVOID') return decorate(scoreState, 'research_score');
+
+  const wantsNewExposure = !hasPosition
+    ? scoreState?.state === 'PROBE'
+    : scoreState?.state === 'ADD';
+  if (wantsNewExposure && readiness.status !== 'ready') {
+    const fallbackState = hasPosition ? 'HOLD' : 'WATCH';
+    const meta = SWING_STATE_META[fallbackState];
+    return decorate({
+      ...scoreState,
+      state: fallbackState,
+      label: meta.label,
+      tone: meta.tone,
+      urgency: meta.urgency,
+      tranchePct: 0,
+      reason: `研究倾向${researchSignal.label}（综合评分 ${researchSignal.score.toFixed(3)}），但${readiness.reason}${hasPosition ? '维持持有，不新增仓位。' : '保持观察。'}`,
+    }, 'technical_execution');
+  }
+
+  return decorate(scoreState, 'research_score');
 }
 
 // 活跃杠杆 ETF pair 缓存：避免每股票每 60s 都 SELECT tracker_pairs 表。
@@ -2370,45 +2508,6 @@ function applyLeveragedEtfRiskOverlay(decision, analysis, position = null) {
   };
 }
 
-// 综合评分只负责排序和解释，不能绕过 buildSwingDecision 已确认的正式开仓资格。
-// 这条门控放在最终状态覆盖之后，保证任何未来评分器也无法直接把 WATCH/HOLD 变成 PROBE/ADD。
-function applyFormalEntryGate(decision, baseDecision) {
-  const nextState = String(decision?.state || '').toUpperCase();
-  if (!['PROBE', 'ADD'].includes(nextState)) {
-    return { ...decision, entryGate: { status: 'not_applicable', checkedAt: Date.now() } };
-  }
-  const zones = baseDecision?.zones || {};
-  const wantsAdd = nextState === 'ADD';
-  const qualified = wantsAdd ? zones.addQualified === true : zones.entryQualified === true;
-  const inBuyZone = zones.inBuyZone === true;
-  if (qualified && inBuyZone) {
-    return { ...decision, entryGate: { status: 'pass', action: nextState, checkedAt: Date.now() } };
-  }
-
-  const reasons = [];
-  const reliability = Number(baseDecision?.reliabilityScore);
-  if (Number.isFinite(reliability)) {
-    const threshold = wantsAdd ? 45 : 35;
-    if (reliability < threshold) reasons.push(`可靠度 ${reliability}% 低于正式${wantsAdd ? '加仓' : '试仓'}线 ${threshold}%`);
-  }
-  if (!inBuyZone) reasons.push('当前价格未进入正式买入区');
-  if (!reasons.length) reasons.push('正式日线资格尚未通过');
-
-  const fallbackState = wantsAdd ? 'HOLD' : 'WATCH';
-  const fallbackMeta = SWING_STATE_META[fallbackState];
-  return {
-    ...decision,
-    state: fallbackState,
-    label: fallbackMeta.label,
-    tone: fallbackMeta.tone,
-    urgency: fallbackMeta.urgency,
-    tranchePct: 0,
-    actionable: false,
-    summary: `综合评分可用于观察排序，但${reasons.join('；')}，不生成正式${wantsAdd ? '加仓' : '试仓'}动作。`,
-    entryGate: { status: 'blocked', action: nextState, reasons, checkedAt: Date.now() },
-  };
-}
-
 function attachReliability(result, sym, mkt) {
   const quote = latestStock?.[sym] || null;
   const liveQuote = quote ? { name: quote.name || null, price: Number.isFinite(Number(quote.price)) ? Number(quote.price) : null, quoteTs: quote.quoteTs || latestStock?.ts || null, observationId: quote.observationId || null, providerTime: quote.providerTime || null, providerDate: providerTradeDate(quote.providerTime, mkt) || null, providerLagMinutes:quote.providerLagMinutes??null, isRealtime:!!quote.isRealtime, stale: !!quote.stale, source: quote.source || null, error:quote.error||null } : null;
@@ -2425,7 +2524,7 @@ function attachReliability(result, sym, mkt) {
   }
   const position = { symbol: sym, shares: 0, cost: 0, ...computePositionFromEvents(sym) };
 
-  // v21 scoring: baseDecision retains zones/longTerm; gates replaced by weighted scoring
+  // 基础计划保留价位与长期趋势；最终状态由技术执行、风险门控与研究评分合并决定。
   const baseDecision = applyLeveragedEtfRiskOverlay(buildSwingDecision(result, ev, position), result, position);
 
   // v1.4.3: 盘后风险软门控 —— 美股读取 _extCache 计算盘前/盘后破位风险
@@ -2493,37 +2592,46 @@ function attachReliability(result, sym, mkt) {
     executionRiskScore: executionRisk?.score ?? null,
   });
 
-  // Override decision state/label/tone with scoring output
+  // 综合评分产生研究倾向；最终执行状态由技术形态、风险门控和评分共同裁决。
+  const finalStateResult = resolveFinalSwingState({
+    analysis: result,
+    baseDecision,
+    scoreState: stateResult,
+    scoreResult,
+    hasPosition,
+  });
   const scoredDecision = {
     ...baseDecision,
     originalState: baseDecision.state,
     originalLabel: baseDecision.label,
-    state: stateResult.state,
-    label: stateResult.label,
-    tone: stateResult.tone,
-    urgency: stateResult.urgency,
-    tranchePct: stateResult.tranchePct,
-    summary: stateResult.reason,
-    actionable: ['PROBE', 'ADD', 'TRIM', 'EXIT', 'AVOID'].includes(stateResult.state),
+    state: finalStateResult.state,
+    label: finalStateResult.label,
+    tone: finalStateResult.tone,
+    urgency: finalStateResult.urgency,
+    tranchePct: finalStateResult.tranchePct,
+    summary: finalStateResult.reason,
+    actionable: ['PROBE', 'ADD', 'TRIM', 'EXIT', 'AVOID'].includes(finalStateResult.state),
     compositeScore: scoreResult.compositeScore,
     scoreFactors: scoreResult.factors,
     scoreWeights: scoreResult.weights,
     scoreRegime: scoreResult.regime,
-    safetyNet: stateResult.safetyNet || false,
-    chaseGate: stateResult.chaseGate || null,
-    extSessionGate: stateResult.extSessionGate || null,
+    safetyNet: finalStateResult.safetyNet || false,
+    chaseGate: finalStateResult.chaseGate || null,
+    extSessionGate: finalStateResult.extSessionGate || null,
     extSessionRisk: extSessionRisk,
+    stateSource: finalStateResult.stateSource,
+    researchSignal: finalStateResult.researchSignal,
+    executionReadiness: finalStateResult.executionReadiness,
+    scoringState: finalStateResult.scoringState,
   };
   // v2.1: 合并 tier 后 displayLabel 已废弃，清除 baseDecision 遗留
   delete scoredDecision.displayLabel;
   delete scoredDecision.scoreTier;
   delete scoredDecision.conflictWarning;
 
-  const gatedDecision = applyFormalEntryGate(scoredDecision, baseDecision);
-
-  // Recompute recommended shares after the formal entry gate has made the final state.
-  const { recommendedShares, sharesBasis } = computeRecommendedShares(gatedDecision.state, {
-    tranchePct: gatedDecision.tranchePct,
+  // 最终执行状态决定建议股数；买入区与可靠度仍作为分析信息展示，由用户自行判断是否执行。
+  const { recommendedShares, sharesBasis } = computeRecommendedShares(scoredDecision.state, {
+    tranchePct: scoredDecision.tranchePct,
     targetShares: Math.max(0, Number(position?.target_shares || 0)),
     shares: Math.max(0, Number(position?.shares || 0)),
     inBuyZone: !!baseDecision.zones?.inBuyZone,
@@ -2533,11 +2641,11 @@ function attachReliability(result, sym, mkt) {
     avgDollarVolume20d: result?.avgDollarVolume20d || null,
     market: String(mkt || result?.market || 'US').toUpperCase(),
   });
-  gatedDecision.recommendedShares = recommendedShares;
-  gatedDecision.sharesBasis = sharesBasis ? (sharesBasis + ' | ' + gatedDecision.summary) : gatedDecision.summary;
+  scoredDecision.recommendedShares = recommendedShares;
+  scoredDecision.sharesBasis = sharesBasis ? (sharesBasis + ' | ' + scoredDecision.summary) : scoredDecision.summary;
 
   // Safety net: critical data gate (stale quotes, missing data)
-  const finalDecision = applyCriticalDataGate(gatedDecision, { result, quote: liveQuote, market:mkt });
+  const finalDecision = applyCriticalDataGate(scoredDecision, { result, quote: liveQuote, market:mkt });
 
   finalDecision.scoreFactors = scoreResult.factors;
   finalDecision.compositeScore = scoreResult.compositeScore;
@@ -4863,7 +4971,7 @@ export async function initStockEngine({ runBackgroundTask = null } = {}) {
 // P2-6b: K 线域函数（fetchKlineArray / backfillAllDailyK / recordMinuteQuote /
 // aggregateIntradayBars / validateKline 等）已迁移至 stock_kline.mjs，这里 re-export 保持外部
 // API 稳定（虽然目前无外部模块直接从 stock_engine 导入这些函数，但作为防御性措施保留）。
-export { db, DB_PATH, computePositionFromEventRows, computePositionFromEvents, computeAllPositionsFromEvents, recalcTrackerPositionFromEvents, voidTradeEvent, invalidateActiveEtfPairCache, getWatchlist, getLatestAnalysis, getScenarioResearchOperationsStatus, getScenarioResearchSymbolSummary, getStockDisplayName, getStockPositions, recordStockSignalAudit, getStockSignalAudit, recordAlertAudit, updateAlertAudit, getAlertAudit, recordRuntimeMetric, getRuntimeMetrics, getSystemSetting, setSystemSetting, transitionsOnly, createDatabaseBackup, getBackupStatus, verifyDatabaseBackup, restoreDatabaseBackup, getMarketStateFor, isAnyMarketOpen, buildSwingDecision, applyFormalEntryGate, applyCriticalDataGate, getHistoricalAnalysisForDate, backfillPersonalSymbols, rebuildHistoricalSignalReplay, getHistoricalReplayStatus, SIGNAL_ENGINE_VERSION, COMPATIBLE_SIGNAL_ENGINE_VERSIONS,
+export { db, DB_PATH, computePositionFromEventRows, computePositionFromEvents, computeAllPositionsFromEvents, recalcTrackerPositionFromEvents, voidTradeEvent, invalidateActiveEtfPairCache, getWatchlist, getLatestAnalysis, getScenarioResearchOperationsStatus, getScenarioResearchSymbolSummary, getStockDisplayName, getStockPositions, recordStockSignalAudit, getStockSignalAudit, recordAlertAudit, updateAlertAudit, getAlertAudit, recordRuntimeMetric, getRuntimeMetrics, getSystemSetting, setSystemSetting, transitionsOnly, createDatabaseBackup, getBackupStatus, verifyDatabaseBackup, restoreDatabaseBackup, getMarketStateFor, isAnyMarketOpen, buildSwingDecision, resolveFinalSwingState, applyCriticalDataGate, getHistoricalAnalysisForDate, backfillPersonalSymbols, rebuildHistoricalSignalReplay, getHistoricalReplayStatus, SIGNAL_ENGINE_VERSION, COMPATIBLE_SIGNAL_ENGINE_VERSIONS,
   // D1 新增：风险配置 + API Key 管理
   getRiskConfig, setRiskConfig, getEarningsPolicy, getApiKeys, getApiKey, setApiKey, deleteApiKey, maskApiKey, SUPPORTED_API_PROVIDERS,
   // P2-6b: 供 stock_kline.mjs 通过 ESM live binding 反向引用

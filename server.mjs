@@ -110,9 +110,8 @@ const LOGS_DIR = path.join(process.cwd(), 'logs');
 const PERF_LOG_FILE = path.join(LOGS_DIR, 'perf.log'); // 慢请求(>=500ms)实时日志，便于实时排查
 
 // /health version information: Git metadata is refreshed asynchronously only.
-// P1-1 codex 复审：Q07 部署不含 .git 目录（或残留旧 .git），导致 /health 的 git 信息全为 null 或失真。
-//   修复：优先读 .deploy-info.json（由 q07-deploy.ps1 在部署时写入，记录源端 commit hash/branch/
-//   dirty/commitTs/deployedAt），它是部署的可追溯来源；本地开发无此文件时回退到 .git。
+// Deployment metadata is preferred on a host without an authoritative .git checkout.
+// It records the source revision and deployment time; local development falls back to .git.
 let _healthGit = { hash:null, branch:null, dirty:null, commitTs:null };
 let _healthGitRefreshInFlight = false;
 
@@ -2565,8 +2564,8 @@ server.listen(FRONT_PORT, FRONT_HOST, () => {
   }
   refreshTracker();
   setTimeout(()=>backfillKnownTrackerFx().catch(e=>console.log('[tracker-fx] '+e.message)),3000);
-  setTimeout(()=>enqueueMaintenanceTask('database:auto-backup',()=>createDatabaseBackup('auto'),{priority:'low',dedupeKey:'database:backup'}).then(x=>console.log('[backup] '+JSON.stringify(x))).catch(e=>console.log('[backup] '+e.message)),8000);
-  setInterval(()=>enqueueMaintenanceTask('database:auto-backup',()=>createDatabaseBackup('auto'),{priority:'low',dedupeKey:'database:backup'}).catch(e=>console.log('[backup] '+e.message)),24*60*60*1000);
+  // Automatic full-database backups are intentionally disabled. Use the manual
+  // backup route only after choosing suitable storage and retention.
   // 分时动态刷新：tracker 标的（港股/韩股/美股 ETF + 正股）任一开盘 → 高频 5s；全休市 → 低频 60s
   let _trkTimer = null;
   function scheduleTracker() {

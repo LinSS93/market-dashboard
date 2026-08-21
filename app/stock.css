@@ -473,14 +473,15 @@
   .decision-card.tone-amber { border-left-color:#d4a017; background:#fff8db; }
   .decision-card.tone-neutral { border-left-color:#5a606b; background:#f3f6fa; }
 
-  /* 决策结论行：档位 + 综合评分 + 状态标签 */
+  /* 决策结论行：执行状态 + 研究倾向 + 综合评分 */
   .dc-conclusion { display:flex; align-items:center; flex-wrap:wrap; gap:8px 14px; margin-bottom:10px; }
   .dc-tier { font-size:var(--ws-font-xl); font-weight:700; color:var(--ws-ink); letter-spacing:0.01em; }
   .dc-composite { font-size:14px; font-weight:700; font-variant-numeric:tabular-nums; padding:2px 10px; border-radius:var(--ws-radius-sm); background:var(--ws-surface); border:1px solid var(--ws-line); }
   .dc-composite.high { color:var(--ws-green); border-color:var(--ws-green); }
   .dc-composite.mid { color:var(--ws-amber); border-color:#d4a017; }
   .dc-composite.low { color:var(--ws-red); border-color:var(--ws-red); }
-  .dc-state { font-size:14px; font-weight:600; color:var(--ws-ink-soft); }
+  .dc-state { display:inline-flex; align-items:center; gap:6px; font-size:14px; font-weight:600; color:var(--ws-ink-soft); }
+  .dc-state-k { color:var(--ws-muted-soft); font-size:11px; font-weight:650; }
   .dc-state .dc-state-tag { display:inline-block; padding:2px 10px; border-radius:var(--ws-radius-sm); font-weight:700; }
   .dc-state .dc-state-tag.tone-bull { background:var(--ws-green); color:#fff; }
   .dc-state .dc-state-tag.tone-bear { background:var(--ws-red); color:#fff; }
@@ -488,6 +489,16 @@
   .dc-state .dc-state-tag.tone-amber { background:#d4a017; color:#fff; }
   .dc-state .dc-state-tag.tone-neutral { background:#5a606b; color:#fff; }
   .dc-state .dc-state-tag.tone-hot { background:var(--ws-amber); color:#fff; }
+  .dc-research { font-size:12px; font-weight:700; padding:3px 9px; border:1px solid currentColor; border-radius:var(--ws-radius-pill); background:var(--ws-surface); }
+  .dc-research.tone-bull { color:var(--ws-green); }
+  .dc-research.tone-watch { color:var(--ws-muted); }
+  .dc-research.tone-bear { color:var(--ws-red); }
+  .dc-readiness { display:flex; align-items:baseline; flex-wrap:wrap; gap:5px 8px; margin:-3px 0 10px; padding:7px 10px; border-left:3px solid var(--ws-blue); background:var(--ws-surface-soft); font-size:12px; line-height:1.45; }
+  .dc-readiness.tone-bull { border-left-color:var(--ws-green); }
+  .dc-readiness.tone-bear { border-left-color:var(--ws-red); }
+  .dc-readiness-k { color:var(--ws-muted-soft); font-weight:650; }
+  .dc-readiness-v { color:var(--ws-ink); font-weight:750; }
+  .dc-readiness-note { color:var(--ws-muted); }
 
   /* 数据状态/可靠度行 */
   .dc-meta-row { display:flex; flex-wrap:wrap; gap:6px 16px; margin-bottom:10px; font-size:12.5px; }

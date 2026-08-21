@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { buildSwingDecision, applyFormalEntryGate, applyCriticalDataGate, buildSignalDriftReport } from '../stock_engine.mjs';
+import { buildSwingDecision, resolveFinalSwingState, applyCriticalDataGate, buildSignalDriftReport } from '../stock_engine.mjs';
+import { computeCompositeScore, scoreToState } from '../signal_scoring.mjs';
 
 const failures = [];
 function check(cond, label) {
@@ -49,22 +50,42 @@ const exit = buildSwingDecision(analysis({ currentPrice: 80 }), reliability('HOL
 check(exit.state === 'EXIT' && exit.recommendedShares === 100, 'invalidation breach becomes full EXIT');
 
 const avoid = buildSwingDecision(analysis(), reliability('SELL'), { shares: 0, cost: 0, target_shares: 100 });
-check(avoid.state === 'WATCH' && !avoid.actionable, 'empty position under sell signal stays WATCH (AVOID assigned by scoreToState in the full pipeline)');
+check(avoid.state === 'PROBE' && avoid.actionable,
+  'base technical plan is not overridden by reliability action; reliability is applied through the scoring layer');
 
 const failed = buildSwingDecision(analysis(), reliability('BUY', { rollingAudit: { level: 'fail' } }), { shares: 0, cost: 0, target_shares: 100 });
 check(failed.state === 'WATCH', 'failed out-of-sample validation blocks entry');
 
-const lowReliabilityBase = buildSwingDecision(analysis(), reliability('BUY', { reliabilityScore: 5 }), { shares: 0, cost: 0, target_shares: 100 });
-const lowReliabilityScored = applyFormalEntryGate({ state:'PROBE', label:'强试仓', tone:'bull', urgency:'medium', tranchePct:40, actionable:true }, lowReliabilityBase);
-check(lowReliabilityScored.state === 'WATCH' && !lowReliabilityScored.actionable && lowReliabilityScored.tranchePct === 0,
-  'final score cannot turn a 5% reliability WATCH into a formal PROBE');
-check(lowReliabilityScored.entryGate?.status === 'blocked' && lowReliabilityScored.entryGate.reasons.some(x => x.includes('可靠度 5%')),
-  'entry gate exposes the reliability rejection reason');
+const failedReliability = reliability('BUY', { rollingAudit: { level: 'fail' } });
+const failedBase = buildSwingDecision(analysis(), failedReliability, { shares: 0, cost: 0, target_shares: 100 });
+const failedScore = computeCompositeScore({ analysis:analysis(), reliability:failedReliability, executionRisk:{ score:0, level:'low' }, longTermTrend:null });
+const failedState = scoreToState(failedScore.compositeScore, { hasPosition:false, cur:100, sma20:100, atr:5, marketRegime:'range' });
+const failedFinal = resolveFinalSwingState({ analysis:analysis(), baseDecision:failedBase, scoreState:failedState, scoreResult:failedScore, hasPosition:false });
+check(failedState.state === 'PROBE' && failedFinal.state === 'WATCH'
+  && failedFinal.executionReadiness.status === 'validation_blocked',
+  'failed out-of-sample validation still blocks a strong research score from opening a position');
 
-const outOfZoneBase = buildSwingDecision(analysis({ currentPrice: 120 }), reliability(), { shares: 0, cost: 0, target_shares: 100 });
-const outOfZoneScored = applyFormalEntryGate({ state:'PROBE', label:'强试仓', tone:'bull', urgency:'medium', tranchePct:40, actionable:true }, outOfZoneBase);
-check(outOfZoneScored.state === 'WATCH' && outOfZoneScored.entryGate?.reasons.some(x => x.includes('买入区')),
-  'final score cannot bypass the formal buy-zone condition');
+const highRiskAnalysis = analysis({
+  tradePlan: { ...analysis().tradePlan, risk: { level: 'high', label: '高' } },
+});
+const highRiskBase = buildSwingDecision(highRiskAnalysis, reliability(), { shares: 0, cost: 0, target_shares: 100 });
+const highRiskScore = computeCompositeScore({ analysis:highRiskAnalysis, reliability:reliability(), executionRisk:{ score:0, level:'low' }, longTermTrend:null });
+const highRiskState = scoreToState(highRiskScore.compositeScore, { hasPosition:false, cur:100, sma20:100, atr:5, marketRegime:'range' });
+const highRiskFinal = resolveFinalSwingState({ analysis:highRiskAnalysis, baseDecision:highRiskBase, scoreState:highRiskState, scoreResult:highRiskScore, hasPosition:false });
+check(highRiskState.state === 'PROBE' && highRiskFinal.state === 'WATCH'
+  && highRiskFinal.executionReadiness.status === 'defer',
+  'high technical risk still defers a strong research score from opening a position');
+
+const riskOffValidationReliability = reliability('BUY', { rollingAudit: { level: 'fail' } });
+const riskOffValidationAnalysis = analysis({
+  tradePlan: { ...analysis().tradePlan, action:'SELL', actionLabel:'卖出', setup:{ key:'risk_off', label:'破位风控' } },
+});
+const riskOffValidationBase = buildSwingDecision(riskOffValidationAnalysis, riskOffValidationReliability, { shares: 0, cost: 0, target_shares: 100 });
+const riskOffValidationScore = computeCompositeScore({ analysis:riskOffValidationAnalysis, reliability:riskOffValidationReliability, executionRisk:{ score:0, level:'low' }, longTermTrend:null });
+const riskOffValidationState = scoreToState(riskOffValidationScore.compositeScore, { hasPosition:false, cur:100, sma20:100, atr:5, marketRegime:'range' });
+const riskOffValidationFinal = resolveFinalSwingState({ analysis:riskOffValidationAnalysis, baseDecision:riskOffValidationBase, scoreState:riskOffValidationState, scoreResult:riskOffValidationScore, hasPosition:false });
+check(riskOffValidationFinal.state === 'AVOID' && riskOffValidationFinal.executionReadiness.status === 'risk_off',
+  'an explicit technical sell remains AVOID even when validation is also unavailable');
 
 const missingQuote = applyCriticalDataGate(exit, { result:analysis(), quote:null, market:'US' });
 check(missingQuote.signalAvailable === false && missingQuote.exitPending && missingQuote.state === 'EXIT' && missingQuote.notifyEligible && !missingQuote.actionable, 'missing quote blocks execution but preserves an exit-pending alert');
