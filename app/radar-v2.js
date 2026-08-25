@@ -9,6 +9,7 @@
 //   /radar_v2/financial         — V2-owned 财务数据
 
 import { createRequestGuard } from './radar-v2-loadguard.mjs';
+import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
 
 (function () {
   'use strict';
@@ -1016,9 +1017,10 @@ import { createRequestGuard } from './radar-v2-loadguard.mjs';
         `/radar_v2/company-profile?${params}`,
         { method: 'POST' }
       );
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const json = await resp.json();
-      if (!json.ok) throw new Error(json.error || '生成失败');
+      const json = await resp.json().catch(() => null);
+      if (!resp.ok || !json?.ok) {
+        throw new Error(describeCompanyProfileFailure(json, resp.status));
+      }
       // 生成成功后重新渲染公司概览区域
       if (state.detailToken !== token) return;
       const profile = json.profile || json.data?.profile || null;

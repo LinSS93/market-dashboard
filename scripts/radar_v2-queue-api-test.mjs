@@ -58,6 +58,7 @@ db.exec(`
     (1, 'US', 'RISKY',   'Risk Review Corp',      'equity', 1, '{}', ${NOW}),
     (1, 'US', 'RISKONLY','Pure Risk Corp',        'equity', 1, '{}', ${NOW}),
     (1, 'US', 'NEUTRALX','Neutral Cross Corp',    'equity', 1, '{}', ${NOW}),
+    (1, 'US', 'NEUTRALONLY','Neutral Context Corp','equity', 1, '{}', ${NOW}),
     (1, 'US', 'OLDDAT',  'Old Data Inc',          'equity', 1, '{}', ${NOW}),
     (1, 'US', 'AAVM',    'Aavm ETF',              'equity', 1, '{}', ${NOW}),
     (1, 'US', 'ADAMI',   'Adami Notes',           'equity', 1, '{}', ${NOW}),
@@ -69,6 +70,8 @@ db.exec(`
     (1, 'US', 'AUDET',   'Audited Etf Holdings',  'equity', 1, '{}', ${NOW}),
     (1, 'US', 'INVPOS',  'Invalidated Positive',  'equity', 1, '{}', ${NOW}),
     (1, 'US', 'INVNEG',  'Invalidated Negative',  'equity', 1, '{}', ${NOW}),
+    (1, 'US', 'NEGRES',  'Resolved Negative Risk', 'equity', 1, '{}', ${NOW}),
+    (1, 'US', 'REVIEWX', 'Needs Review Only',      'equity', 1, '{}', ${NOW}),
     (1, 'US', 'NS1',     'New Signal One',        'equity', 1, '{}', ${NOW}),
     (1, 'US', 'NS2',     'New Signal Two',        'equity', 1, '{}', ${NOW}),
     (1, 'US', 'NS3',     'New Signal Three',      'equity', 1, '{}', ${NOW}),
@@ -139,6 +142,10 @@ insertDossier('US', 'NEUTRALX', 'event', 'earnings_announcement', 'positive',
 insertDossier('US', 'NEUTRALX', 'trend', 'trend_overheat', 'neutral',
   'trend_overheat: Monitor temperature', TODAY_MS);
 
+// NEUTRALONLY：例行/中性上下文配高分，也不得单独进入候选池。
+insertDossier('US', 'NEUTRALONLY', 'event', 'ROUTINE_DISCLOSURE', 'neutral',
+  'ROUTINE_DISCLOSURE: Board meeting notice', TODAY_MS);
+
 // OLDDAT：远古 dossier（应被老化退出过滤）
 insertDossier('US', 'OLDDAT', 'event', 'official_disclosure', 'positive',
   'earnings_announcement: Old earnings', OLD_MS);
@@ -171,6 +178,19 @@ insertDossier('US', 'INVPOS', 'event', 'official_disclosure', 'positive',
 //   P0-3：旧负面论点被否定不影响，股票仍可因其他信号保留
 insertDossier('US', 'INVNEG', 'event', 'official_disclosure', 'negative',
   'fundamental_cash_quality_risk: Old risk', TODAY_MS, { status: 'invalidated' });
+
+// NEGRES：负面基本面论点已经 invalidated，但仍有正向事件。
+// 它应该是普通正向研究对象，不能因已经失效的负面论点继续进入 risk_review。
+insertDossier('US', 'NEGRES', 'fundamental', 'fundamental_leverage_deterioration', 'negative',
+  'fundamental_leverage_deterioration: Risk was resolved', TODAY_MS, { status: 'invalidated' });
+insertDossier('US', 'NEGRES', 'event', 'earnings_announcement', 'positive',
+  'earnings_announcement: Current positive update', TODAY_MS);
+
+// REVIEWX：同一通道最新论点转为 needs_review。更早的 active 论点不得回流加分。
+insertDossier('US', 'REVIEWX', 'event', 'earnings_announcement', 'positive',
+  'earnings_announcement: Older active evidence', TODAY_MS - 3600000);
+insertDossier('US', 'REVIEWX', 'event', 'earnings_announcement', 'positive',
+  'earnings_announcement: Latest evidence needs review', TODAY_MS, { status: 'needs_review' });
 
 // NS1-NS10：10 个有评分单通道正向 → new_signal（用于 P0-4 配额测试）
 for (let i = 1; i <= 10; i++) {
@@ -223,6 +243,9 @@ for (let i = 1; i <= 10; i++) {
 insertScore('US', 'RISKY', 90);
 insertScore('US', 'RISKONLY', 90);
 insertScore('US', 'NEUTRALX', 80);
+insertScore('US', 'NEUTRALONLY', 90);
+insertScore('US', 'NEGRES', 75);
+insertScore('US', 'REVIEWX', 80);
 
 // AUDBOTH：有评分（78）+ 多通道，provisional → P1 后按分数进 cross_confirm
 insertScore('US', 'AUDBOTH', 78);
@@ -255,6 +278,9 @@ setAssetAudit('US', 'DATAGAP', 'common_stock', { source: 'manual', note: 'test: 
 setAssetAudit('US', 'RISKY', 'common_stock', { source: 'manual', note: 'test: RISKY common stock' });
 setAssetAudit('US', 'RISKONLY', 'common_stock', { source: 'manual', note: 'test: RISKONLY common stock' });
 setAssetAudit('US', 'NEUTRALX', 'common_stock', { source: 'manual', note: 'test: NEUTRALX common stock' });
+setAssetAudit('US', 'NEUTRALONLY', 'common_stock', { source: 'manual', note: 'test: NEUTRALONLY common stock' });
+setAssetAudit('US', 'NEGRES', 'common_stock', { source: 'manual', note: 'test: NEGRES common stock' });
+setAssetAudit('US', 'REVIEWX', 'common_stock', { source: 'manual', note: 'test: REVIEWX common stock' });
 
 // ============================================================
 // 执行测试
@@ -292,6 +318,7 @@ assert(symbols.includes('CROSS'), 'CROSS 进入队列（有评分，composite≥
 assert(symbols.includes('RISKY'), 'RISKY 进入队列（risk_review 始终可见）');
 assert(!symbols.includes('RISKONLY'), 'RISKONLY 不在队列（纯负面即使高分也不能绕过困境反转门槛）');
 assert(symbols.includes('NEUTRALX'), 'NEUTRALX 进入队列（高分但仍需展示为待确认）');
+assert(!symbols.includes('NEUTRALONLY'), 'NEUTRALONLY 仅中性上下文，即使高分也不进候选池');
 assert(symbols.includes('AUDBOTH'), 'AUDBOTH 进入队列（provisional 有评分，按分数进池）');
 assert(symbols.includes('NS1'), 'NS1 进入队列（composite≈71≥60）');
 assert(symbols.includes('NS10'), 'NS10 进入队列（composite≈80≥60）');
@@ -406,6 +433,21 @@ assert(!symbols.includes('INVPOS'),
 assert(!symbols.includes('INVNEG'),
   'INVNEG 无正向证据 → 不进候选池（单纯风险信号留在档案库）');
 
+// P0：已失效/待复核 dossier 不再作为候选池有效证据。
+console.log('\n--- P0: 仅当前有效 dossier 参与候选池 ---');
+const negresItem = items.find((i) => i.symbol === 'NEGRES');
+assert(negresItem != null, 'NEGRES 保留当前正向事件证据');
+if (negresItem) {
+  assert(negresItem.bucket === 'new_signal',
+    'NEGRES 不因已 invalidated 的负面论点进入 risk_review，实际: ' + negresItem.bucket);
+  assert(negresItem.primary_driver.direction === 'positive',
+    'NEGRES primary_driver 来自仍有效的正向事件');
+  assert(negresItem.coverage.channel_count === 1,
+    'NEGRES 不把 invalidated 基本面论点计入通道数');
+}
+assert(!symbols.includes('REVIEWX'),
+  'REVIEWX 最新 dossier=needs_review 时，更早 active 证据不回流进入候选池');
+
 // --- P0-1: 市场过滤（US/HK 混合 fixture） ---
 console.log('\n--- P0-1: 市场过滤（US/HK 混合 fixture） ---');
 const usOnly = listResearchQueue({ market: 'US', limit: 30 });
@@ -430,7 +472,7 @@ assert(allMkt.data.items.some((i) => i.market === 'HK'),
 
 // --- 分数截断：risk_review 置顶 + 高分标的按分数降序 ---
 console.log('\n--- 分数截断：risk_review 置顶 + 高分标的按分数降序 ---');
-// US 候选池：1 risk_review（RISKY）+ 2 cross_confirm（CROSS, AUDBOTH）+ 11 new_signal（NS1-NS10, NEUTRALX）= 14 条
+// US 候选池：1 risk_review（RISKY）+ 2 cross_confirm（CROSS, AUDBOTH）+ 12 new_signal（NS1-NS10, NEUTRALX, NEGRES）= 15 条
 // limit=8 时：RISKY 置顶 + 按 composite_score DESC 取前 7 个高分标的
 const quotaResult = listResearchQueue({ market: 'US', limit: 8 });
 const quotaSymbols = quotaResult.data.items.map((i) => i.symbol);
@@ -451,8 +493,8 @@ assert(quotaResult.data.buckets.unscored.total === 0,
 assert(quotaResult.data.buckets.audit_pending.total === 0,
   'buckets.audit_pending.total=0（无评分标的不进候选池）');
 // new_signal 在候选池中（NS1-NS10 composite 71-80，全部 ≥60）
-assert(quotaResult.data.buckets.new_signal.total === 11,
-  'buckets.new_signal.total=11（NS1-NS10 + NEUTRALX 均满足分数截断）');
+assert(quotaResult.data.buckets.new_signal.total === 12,
+  'buckets.new_signal.total=12（NS1-NS10、NEUTRALX、NEGRES 均满足分数截断）');
 
 // --- buckets 结构（各 bucket 在候选池中的计数） ---
 console.log('\n--- buckets 结构（各 bucket 在候选池中的计数） ---');

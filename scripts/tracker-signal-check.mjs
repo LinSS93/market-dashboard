@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { evaluateTrackerSignal, premiumSignal, providerDate } from '../tracker_signal.mjs';
+import { resolveRegisteredTrackerProduct, registeredTrackerProductCount } from '../tracker_product_registry.mjs';
 
 const failures=[];
 function check(cond,msg){if(cond)console.log('[PASS] '+msg);else{failures.push(msg);console.error('[FAIL] '+msg)}}
@@ -8,6 +9,15 @@ const bearish={swingDecision:{state:'EXIT'}};
 const avoid={swingDecision:{state:'AVOID',reliabilityScore:5}};
 
 check(providerDate('20260713 10:30:00')==='20260713','provider timestamp date is normalized');
+check(registeredTrackerProductCount()===4,'system registry contains the four supported tracker products');
+const knownHynix=resolveRegisteredTrackerProduct({etf:'7709',etf_market:'HK',underlying:'000660',underlying_market:'KR'});
+check(knownHynix.entry?.etf==='07709'&&knownHynix.entry?.leverage===2&&knownHynix.entry?.product_direction==='long'&&knownHynix.entry?.rebalance_frequency==='daily','HK 7709 is automatically verified from the official product registry');
+const knownMuu=resolveRegisteredTrackerProduct({etf:'MUU',etf_market:'US',underlying:'MU',underlying_market:'US'});
+check(knownMuu.entry?.leverage===2&&knownMuu.entry?.issuer==='Direxion Shares ETF Trust'&&knownMuu.entry?.verification_source?.startsWith('https://www.direxion.com/'),'US MUU is automatically verified with its official source');
+const mismatchProduct=resolveRegisteredTrackerProduct({etf:'SNXX',etf_market:'US',underlying:'MU',underlying_market:'US'});
+check(!mismatchProduct.entry&&mismatchProduct.reason.includes('不符'),'underlying mismatch cannot be silently auto-verified');
+const unknownProduct=resolveRegisteredTrackerProduct({etf:'UNKNOWN',etf_market:'US',underlying:'MU',underlying_market:'US'});
+check(!unknownProduct.entry&&unknownProduct.reason.includes('暂未收录'),'unknown product remains research-only');
 check(evaluateTrackerSignal({premium:-7,leverage:2,underlyingReturnPct:2,etfProviderTime:'20260713',underlyingProviderTime:'20260713',underlyingAnalysis:bullish}).signal==='STRONG_BUY','aligned discount with confirmed underlying keeps entry');
 const missingUnderlying=evaluateTrackerSignal({premium:-7,leverage:2,underlyingReturnPct:1,etfProviderTime:'20260713',underlyingProviderTime:'20260713',underlyingAnalysis:null});
 check(missingUnderlying.signal==='HOLD'&&missingUnderlying.gate==='underlying_analysis_missing','missing underlying analysis blocks a discount-only ETF entry');
@@ -162,6 +172,34 @@ check((() => {
   const result = evaluateTrackerSignal(input);
   return result.signal === 'STRONG_BUY' && result.gate === 'pass';
 })(), 'cross_market aligned date: navQuality=cross_market_exact + same date → pass');
+
+// 产品身份与阈值样本是独立准入层：名称、倍率或一条折价不能绕过它们。
+check((() => {
+  const result=evaluateTrackerSignal(makeBaseInput({
+    productEntryEligible:false,
+    productEntryReason:'产品定义待核验',
+    premiumBands:{status:'active',sample_count:60,thresholds:{strong_buy:-6,buy:-3,reduce:4,sell:8}},
+  }));
+  return result.signal==='HOLD' && result.gate==='product_unverified' && result.layers.execution.includes('待核验');
+})(), 'unverified tracker product blocks a discount entry while retaining a research explanation');
+
+check((() => {
+  const result=evaluateTrackerSignal(makeBaseInput({
+    productEntryEligible:true,
+    premiumBands:{status:'insufficient',sample_count:29,thresholds:{strong_buy:-6,buy:-3,reduce:4,sell:8}},
+  }));
+  return result.signal==='HOLD' && result.gate==='premium_history_insufficient' && result.layers.execution.includes('收盘样本');
+})(), 'intraday or insufficient daily samples cannot activate an ETF entry threshold');
+
+check((() => {
+  const result=evaluateTrackerSignal(makeBaseInput({
+    productEntryEligible:false,
+    premium:9,
+    positionShares:100,
+    premiumBands:{status:'insufficient',sample_count:0,thresholds:{strong_buy:-6,buy:-3,reduce:4,sell:8}},
+  }));
+  return result.signal==='SELL';
+})(), 'product verification never suppresses an existing-position premium risk action');
 
 if(failures.length)process.exit(1);
 console.log('[OK] Tracker signal behavior checks passed.');

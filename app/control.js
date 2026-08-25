@@ -5,7 +5,7 @@
   const ACTIONS=['PROBE','ADD','TRIM','EXIT','AVOID'];
   const ACTION_LABELS={PROBE:'试仓',ADD:'加仓',TRIM:'减仓',EXIT:'清仓',AVOID:'回避'};
   const RADAR_V2_TIERS=['risk','confirmed','new'];
-  const RADAR_V2_TIER_LABELS={risk:'困境反转',confirmed:'高置信机会',new:'待确认信号'};
+  const RADAR_V2_TIER_LABELS={risk:'风险待核验',confirmed:'优先研究（多通道）',new:'新变化（待验证）'};
   const MARKET_LABELS={US:'美股',HK:'港股',KR:'韩股',CN:'A 股'};
   const CHANNEL_LABELS={webhook:'Webhook',feishu:'Webhook',browser:'浏览器',server:'服务端记录'};
   const STATUS_LABELS={sent:'已发送',failed:'发送失败',queued:'发送中',logged:'已记录',legacy:'历史记录'};

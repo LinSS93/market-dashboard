@@ -29,7 +29,7 @@
 
 <div class="wrap">
   <div class="toolbar">
-    <div class="market-filter-buttons" id="mktFilter" role="group" aria-label="市场筛选">
+    <div class="market-filter-buttons" id="mktFilter" role="group" aria-label="ETF 交易市场筛选">
       <button class="active" data-mkt="HK" onclick="toggleMarket('HK')">港股</button>
       <button class="active" data-mkt="KR" onclick="toggleMarket('KR')">韩股</button>
       <button class="active" data-mkt="US" onclick="toggleMarket('US')">美股</button>
@@ -47,11 +47,12 @@
     <div class="fld">正股代码<input id="f_und" placeholder="如 000660（可空）"></div>
     <div class="fld">正股市场<select id="f_umkt"><option value="">无</option><option>KR</option><option>US</option><option>HK</option></select></div>
     <div class="fld">汇率对<input id="f_fx" placeholder="自动推断（KR→fx_skrwhkd）"></div>
-    <div class="fld">杠杆倍率<input id="f_lev" type="number" value="2" step="0.5" style="width:70px"></div>
+    <div class="fld">杠杆倍率<input id="f_lev" type="number" value="2" min="0.5" step="0.5" style="width:70px"></div>
     <div class="fld">年化产品成本 %<input id="f_cost" type="number" min="0" step="0.01" placeholder="可留空" style="width:100px"></div>
     <div class="fld">标签<input id="f_label" placeholder="如 海力士2x"></div>
     <button class="btn" id="saveBtn" onclick="addPair(this)">保存</button>
     <button class="btn ghost" onclick="toggleAdd()">取消</button>
+    <div class="form-hint">系统会按 ETF 代码、市场和正股自动核对已收录的每日正向杠杆产品；暂未收录的产品仍可观察，但不会给出开仓动作。</div>
   </div>
 
   <div class="main-layout split-layout">
@@ -67,8 +68,8 @@
         </div>
         <div class="card-inner">
         <table class="tracker-grid-table">
-          <colgroup><col style="width:22%"><col style="width:10%"><col style="width:10%"><col style="width:13%"><col style="width:13%"><col style="width:13%"><col style="width:15%"><col style="width:4%"></colgroup>
-          <thead><tr><th style="padding-left:36px"><button class="sort-header" type="button" id="sortCode" onclick="cycleTrackerSort('code')">ETF / 正股 <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th><button class="sort-header" type="button" id="sortPrice" onclick="cycleTrackerSort('price')">现价 <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th><button class="sort-header" type="button" id="sortPrem" onclick="cycleTrackerSort('prem')">溢价 <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th>信号</th><th>量价</th><th><button class="sort-header" type="button" id="sortPnl" onclick="cycleTrackerSort('pnl')">持仓 / 盈亏 <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th data-col="sentiment">期权 / 空头</th><th></th></tr></thead>
+          <colgroup><col style="width:28%"><col style="width:14%"><col style="width:14%"><col style="width:20%"><col style="width:20%"><col style="width:4%"></colgroup>
+          <thead><tr><th style="padding-left:36px"><button class="sort-header" type="button" id="sortCode" onclick="cycleTrackerSort('code')">ETF / 正股 <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th><button class="sort-header" type="button" id="sortPrice" onclick="cycleTrackerSort('price')">现价 <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th><button class="sort-header" type="button" id="sortPrem" onclick="cycleTrackerSort('prem')">估算溢价 <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th>当前动作</th><th><button class="sort-header" type="button" id="sortPnl" onclick="cycleTrackerSort('pnl')">持仓 / 盈亏 <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th></th></tr></thead>
           <tbody id="gridBody"></tbody>
         </table>
         <div id="empty" class="hint" style="padding:14px 0;display:none">还没有追踪项。点击「+ 添加追踪」加入一对 ETF 与正股。</div>
@@ -111,31 +112,47 @@
       <button class="detail-tab active" data-tab="decision" onclick="switchTrackerTab('decision',this)">决策</button>
       <button class="detail-tab" data-tab="position" onclick="switchTrackerTab('position',this)">持仓</button>
     </div>
-    <!-- 决策 tab：4 段决策链路（参照股票监控看板） -->
+    <!-- 决策 tab：以“当前判断 → 为什么 → 接下来观察什么”为主线。 -->
     <section class="detail-tab-panel active" data-panel="decision">
-      <!-- 段 1：决策结论 —— 决策卡（分组键值表 + 数字高亮） -->
+      <!-- 段 1：当前判断。只展示投资者需要的结论和三项关键因素。 -->
       <div id="d_decision" class="decision-card"></div>
-      <!-- 段 2：关键价位条 + 溢价走势图 -->
-      <div id="d_keylevels" class="key-levels">
-        <div class="kl-item"><div class="kl-k">ETF 现价</div><div class="kl-v" id="d_price">—</div></div>
-        <div class="kl-item"><div class="kl-k" id="d_nav_k">理论 NAV</div><div class="kl-v" id="d_nav">—</div></div>
-        <div class="kl-item"><div class="kl-k">溢价率</div><div class="kl-v" id="d_prem">—</div></div>
-        <div class="kl-item"><div class="kl-k">正股现价</div><div class="kl-v" id="d_und">—</div></div>
+      <div class="tracker-focus-grid">
+        <section class="tracker-focus-card">
+          <div class="tracker-section-heading"><span>接下来观察</span><small>不构成自动交易指令</small></div>
+          <div id="d_next_steps" class="tracker-next-steps"></div>
+        </section>
+        <section class="tracker-focus-card">
+          <div class="tracker-section-heading"><span>正股分析</span><a id="d_underlying_link" class="tracker-stock-link" href="/stock">查看股票监控 →</a></div>
+          <div id="d_underlying_signal" class="underlying-signal-card"></div>
+        </section>
       </div>
-      <div class="charts">
-        <div id="chPrem" class="chart"></div>
-      </div>
-      <!-- 段 3：决策依据 —— 4 个子模块（按"决策推理 → 正股详情 → 数据可信度 → 市场情绪"逻辑链路） -->
-      <details class="fold" open><summary>决策依据</summary><div class="fold-content">
-        <div id="d_underlying_signal" class="underlying-signal-card"></div>
+      <!-- 段 2：价格与溢价。数值与图表放在同一语境中，不与结论混排。 -->
+      <section class="tracker-market-card">
+        <div class="tracker-section-heading"><span>价格与溢价</span><small id="d_market_asof">—</small></div>
+        <div id="d_keylevels" class="key-levels">
+          <div class="kl-item"><div class="kl-k">ETF 现价</div><div class="kl-v" id="d_price">—</div></div>
+          <div class="kl-item"><div class="kl-k" id="d_nav_k">估算 NAV</div><div class="kl-v" id="d_nav">—</div></div>
+          <div class="kl-item"><div class="kl-k">溢价率</div><div class="kl-v" id="d_prem">—</div></div>
+          <div class="kl-item"><div class="kl-k">正股现价</div><div class="kl-v" id="d_und">—</div></div>
+          <div class="kl-item"><div class="kl-k">数据时点</div><div class="kl-v" id="d_asof">—</div></div>
+        </div>
+        <div class="charts">
+          <div id="chPrem" class="chart"></div>
+        </div>
+      </section>
+      <!-- 段 3：解释与风险。内部流程状态不再出现在当前判断区。 -->
+      <details class="fold tracker-fold" open><summary>判断依据与风险</summary><div class="fold-content">
         <div id="d_layers" class="tracker-decision-layers"></div>
         <div id="d_diagnosis"></div>
         <div id="d_sentiment_cross"></div>
       </div></details>
-      <!-- 段 4：历史复盘 —— 整合原"研究"tab 的 3 个 fold，默认折叠 -->
-      <details class="fold" ontoggle="onHistoryFoldToggle(this)"><summary>历史复盘<span class="muted" style="margin-left:8px;font-weight:normal">· 仅供回看，不影响决策</span></summary><div class="fold-content">
-        <div class="research-intro">溢价率分布用于判断买点 / 卖点，信号 / 提醒记录仅供回看，不会反向影响正式决策。</div>
-        <details class="fold sub-fold"><summary>溢价率历史分布<span class="muted" style="margin-left:8px;font-weight:normal">· 最近 30 天</span></summary><div class="fold-content">
+      <details class="fold tracker-fold"><summary>产品结构与风险说明</summary><div class="fold-content">
+        <div id="d_product_profile" class="product-profile-card"></div>
+      </div></details>
+      <!-- 段 4：数据与记录。供回看与验证，不抢占当前结论。 -->
+      <details class="fold tracker-fold" ontoggle="onHistoryFoldToggle(this)"><summary>数据与记录<span class="muted" style="margin-left:8px;font-weight:normal">· 不反向影响正式决策</span></summary><div class="fold-content">
+        <div class="research-intro">盘中记录用于观察价格变化；只有收盘封口的独立交易日样本才会用于溢价阈值与 NAV 收敛验证。</div>
+        <details class="fold sub-fold"><summary>收盘溢价位置<span class="muted" style="margin-left:8px;font-weight:normal">· 最近 90 天</span></summary><div class="fold-content">
           <div id="d_premium_dist" class="premium-dist-box"><div class="hint">加载中…</div></div>
         </div></details>
         <details class="fold sub-fold"><summary>近期信号生命周期<span class="muted" style="margin-left:8px;font-weight:normal">· 最近 40 条</span></summary><div class="fold-content">

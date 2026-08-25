@@ -20,9 +20,20 @@ import { evaluateExtendedSessionRisk } from "./extended_session_risk.mjs";
 import { getGroupNewsRisk, normalizeGroupKey, groupLabel } from "./grouping.mjs";
 import { convertAccountSizeFromCny, getMarketCurrency, getFxStatus } from "./fx_rate.mjs";
 import { computeCompositeScore, scoreToState, scoreToResearchBias, SCORING_ENGINE_VERSION } from "./signal_scoring.mjs";
+import { describeSignalTransition, snapshotFromAnalysis, snapshotFromStoredPayload } from "./stock_signal_transition.mjs";
 import { OUTCOME_CONTRACT_VERSION, calculateForwardOutcomes } from "./outcome_contract.mjs";
 import { computeStructureLevels } from "./structure_levels.mjs";
 import { computeSignalProfileBundle, FORMAL_SIGNAL_PROFILE_ID, STOCK_SIGNAL_PROFILE_SCHEMA_VERSION, getSignalProfile, getSignalProfileCatalog } from "./stock_signal_profiles.mjs";
+import {
+  initializeMeanReversionLedger,
+  recordMeanReversionObservations,
+  accrueMeanReversionOutcomes,
+} from "./stock_mean_reversion_ledger.mjs";
+import {
+  initializeFeatureSnapshotLedger,
+  recordLiveFeatureSnapshots,
+  accrueFeatureSnapshotOutcomes,
+} from "./stock_feature_snapshot_ledger.mjs";
 // P2-1：技术指标与统计工具函数拆到 indicators.mjs（纯函数，无 db 依赖）
 import {
   emaSeries, smaArr, intradayEmaSeries, rsiWilder, RSI_PERIODS,
@@ -242,7 +253,12 @@ db.exec(`
     etf TEXT NOT NULL, etf_market TEXT NOT NULL DEFAULT 'HK',
     underlying TEXT, underlying_market TEXT, fx_pair TEXT,
     leverage REAL NOT NULL DEFAULT 2, label TEXT, active INTEGER NOT NULL DEFAULT 1,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    -- 产品准入不是由代码/名称猜测：新建产品默认待核验，只有用户补全来源后才能生成开仓动作。
+    product_status TEXT NOT NULL DEFAULT 'provisional',
+    product_direction TEXT NOT NULL DEFAULT 'long',
+    tracking_index TEXT, issuer TEXT, rebalance_frequency TEXT NOT NULL DEFAULT 'daily',
+    verification_source TEXT, verified_at INTEGER
   );
   CREATE INDEX IF NOT EXISTS idx_snapshots_ts ON snapshots(ts);
   CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(ts);
@@ -256,9 +272,19 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS tracker_fx_daily (fx_pair TEXT NOT NULL,date TEXT NOT NULL,close REAL NOT NULL,source TEXT,updated_at INTEGER NOT NULL,PRIMARY KEY(fx_pair,date));
   CREATE TABLE IF NOT EXISTS tracker_premium_daily (
     pair_id INTEGER NOT NULL,date TEXT NOT NULL,premium REAL NOT NULL,nav_quality TEXT NOT NULL,
-    liquidity_status TEXT NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(pair_id,date)
+    liquidity_status TEXT NOT NULL,updated_at INTEGER NOT NULL,etf_price REAL,nav REAL,
+    captured_at INTEGER,finalized_at INTEGER,market_state TEXT,
+    PRIMARY KEY(pair_id,date)
   );
   CREATE INDEX IF NOT EXISTS idx_tracker_premium_pair_date ON tracker_premium_daily(pair_id,date);
+  -- 盘中观察记录与收盘日样本严格分表：前者只用于图表，不能进入阈值、分位或 NAV 收敛验证。
+  CREATE TABLE IF NOT EXISTS tracker_intraday_history (
+    pair_id INTEGER NOT NULL, ts INTEGER NOT NULL,
+    etf_price REAL, premium REAL, nav REAL, signal TEXT, signal_gate TEXT, nav_quality TEXT,
+    underlying_price REAL, market_state TEXT,
+    PRIMARY KEY(pair_id,ts)
+  );
+  CREATE INDEX IF NOT EXISTS idx_tracker_intraday_pair_time ON tracker_intraday_history(pair_id,ts);
   CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY,value TEXT,updated_at INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS system_settings (
     key TEXT PRIMARY KEY,
@@ -525,11 +551,28 @@ db.prepare(`UPDATE stock_watchlist SET group_key='semiconductor'
     AND symbol IN ('MU','SNDK','MRVL','AMAT','INTC','LITE')`).run();
 try { db.prepare("ALTER TABLE tracker_pairs ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0").run(); } catch {}
 try { db.prepare("ALTER TABLE tracker_pairs ADD COLUMN annual_cost_pct REAL").run(); } catch {}
+try { db.prepare("ALTER TABLE tracker_pairs ADD COLUMN product_status TEXT NOT NULL DEFAULT 'provisional'").run(); } catch {}
+try { db.prepare("ALTER TABLE tracker_pairs ADD COLUMN product_direction TEXT NOT NULL DEFAULT 'long'").run(); } catch {}
+try { db.prepare("ALTER TABLE tracker_pairs ADD COLUMN tracking_index TEXT").run(); } catch {}
+try { db.prepare("ALTER TABLE tracker_pairs ADD COLUMN issuer TEXT").run(); } catch {}
+try { db.prepare("ALTER TABLE tracker_pairs ADD COLUMN rebalance_frequency TEXT NOT NULL DEFAULT 'daily'").run(); } catch {}
+try { db.prepare("ALTER TABLE tracker_pairs ADD COLUMN verification_source TEXT").run(); } catch {}
+try { db.prepare("ALTER TABLE tracker_pairs ADD COLUMN verified_at INTEGER").run(); } catch {}
 try { db.prepare("ALTER TABLE tracker_premium_daily ADD COLUMN etf_price REAL").run(); } catch {}
 try { db.prepare("ALTER TABLE tracker_premium_daily ADD COLUMN nav REAL").run(); } catch {}
+try { db.prepare("ALTER TABLE tracker_premium_daily ADD COLUMN captured_at INTEGER").run(); } catch {}
+try { db.prepare("ALTER TABLE tracker_premium_daily ADD COLUMN finalized_at INTEGER").run(); } catch {}
+try { db.prepare("ALTER TABLE tracker_premium_daily ADD COLUMN market_state TEXT").run(); } catch {}
 try { db.prepare("ALTER TABLE tracker_positions ADD COLUMN base_currency TEXT").run(); } catch {}
+// Legacy rows were written continuously during the session.  They remain auditable,
+// but are intentionally excluded from formal bands and next-day NAV validation.
+db.prepare("UPDATE tracker_pairs SET product_status='blocked' WHERE leverage<=0 AND product_status<>'blocked'").run();
 db.prepare("DELETE FROM stock_signal_outcomes WHERE net_directional_return_pct IS NULL").run();
 migrateScenarioShadowLedger(db);
+// Intraday RSI6 mean-reversion observations have their own stable research
+// ledger. They must never share formal signal/outcome or drift tables.
+initializeMeanReversionLedger(db);
+initializeFeatureSnapshotLedger(db);
 // Seed defaults on a fresh DB (idempotent).
 db.prepare(`INSERT OR IGNORE INTO stock_watchlist(symbol,market,added_at) VALUES ('MU','US',0),('SNDK','US',0),('MRVL','US',0),('AMAT','US',0),('INTC','US',0),('LITE','US',0)`).run();
 if (db.prepare("SELECT COUNT(*) c FROM tracker_pairs").get().c === 0) {
@@ -2879,6 +2922,8 @@ function logSignalSnapshot(results) {
     if (profileShadow.inserted > 0) console.log(`[signal-profiles] frozen ${profileShadow.inserted} profile observations`);
   } catch (e) { console.error('[signal-profiles] snapshot', e.message); }
   scheduleOutcomeEvaluation();
+  scheduleMeanReversionOutcomeAccrual();
+  scheduleFeatureSnapshotOutcomeAccrual();
   scheduleScenarioShadowAccrual();
   scheduleProfileShadowAccrual();
 }
@@ -2992,6 +3037,57 @@ function scheduleOutcomeEvaluation(force = false) {
     .catch(e => console.error('[signal-outcomes]', e.message))
     .finally(() => { lastOutcomeEvaluationAt = Date.now(); outcomeEvaluationPromise = null; });
   return outcomeEvaluationPromise;
+}
+
+// A separate result ledger for intraday mean-reversion candidates.  Its outcome
+// contract is shared with formal signals, but its data never enters the formal
+// signal log, reliability model, or drift report.
+let meanReversionOutcomePromise = null;
+let lastMeanReversionOutcomeAt = 0;
+function scheduleMeanReversionOutcomeAccrual(force = false) {
+  if (meanReversionOutcomePromise) return meanReversionOutcomePromise;
+  if (!force && lastMeanReversionOutcomeAt && Date.now() - lastMeanReversionOutcomeAt < 15 * 60_000) return null;
+  const run = () => accrueMeanReversionOutcomes({
+    db,
+    getBars: symbol => getKline.all(symbol),
+    benchmarkForMarket: benchmarkFor,
+    limit: 300,
+  });
+  const pending = typeof signalReplayTaskRunner === 'function'
+    ? signalReplayTaskRunner('stock:mean-reversion-outcomes', run, { priority:'low', dedupeKey:'stock:mean-reversion-outcomes' })
+    : new Promise(resolve => setImmediate(resolve)).then(run);
+  meanReversionOutcomePromise = Promise.resolve(pending)
+    .then(result => {
+      if (result?.updated > 0) console.log(`[mean-reversion] accrued ${result.updated} outcome rows from ${result.scanned} candidates`);
+      return result;
+    })
+    .catch(e => console.error('[mean-reversion-outcomes]', e.message))
+    .finally(() => { lastMeanReversionOutcomeAt = Date.now(); meanReversionOutcomePromise = null; });
+  return meanReversionOutcomePromise;
+}
+
+let featureSnapshotOutcomePromise = null;
+let lastFeatureSnapshotOutcomeAt = 0;
+function scheduleFeatureSnapshotOutcomeAccrual(force = false) {
+  if (featureSnapshotOutcomePromise) return featureSnapshotOutcomePromise;
+  if (!force && lastFeatureSnapshotOutcomeAt && Date.now() - lastFeatureSnapshotOutcomeAt < 15 * 60_000) return null;
+  const run = () => accrueFeatureSnapshotOutcomes({
+    db,
+    getBars: symbol => getKline.all(symbol),
+    benchmarkForMarket: benchmarkFor,
+    limit: 500,
+  });
+  const pending = typeof signalReplayTaskRunner === 'function'
+    ? signalReplayTaskRunner('stock:feature-snapshot-outcomes', run, { priority:'low', dedupeKey:'stock:feature-snapshot-outcomes' })
+    : new Promise(resolve => setImmediate(resolve)).then(run);
+  featureSnapshotOutcomePromise = Promise.resolve(pending)
+    .then(result => {
+      if (result?.updated > 0) console.log(`[feature-snapshots] accrued ${result.updated} outcome rows from ${result.scanned} snapshots`);
+      return result;
+    })
+    .catch(e => console.error('[feature-snapshot-outcomes]', e.message))
+    .finally(() => { lastFeatureSnapshotOutcomeAt = Date.now(); featureSnapshotOutcomePromise = null; });
+  return featureSnapshotOutcomePromise;
 }
 
 let scenarioShadowAccrualPromise = null;
@@ -4089,6 +4185,21 @@ export function stockHandler(req, res) {
         const mkt = (row.market || "US").toUpperCase();
         results[row.symbol] = attachReliability(rawResults[row.symbol], row.symbol, mkt);
       }
+      try {
+        recordMeanReversionObservations({
+          db,
+          results,
+          marketStateFor: getMarketStateFor,
+          marketDateFor: marketLocalToday,
+        });
+      } catch (e) { console.error('[mean-reversion] initial observation', e.message); }
+      try {
+        recordLiveFeatureSnapshots({
+          db,
+          results,
+          completedDateForMarket: lastCompletedTradingDate,
+        });
+      } catch (e) { console.error('[feature-snapshots] initial capture', e.message); }
       latestAnalysis = results;
       try { logSignalSnapshot(results); } catch (e) { console.error("[signal-log]", e.message); }
     }
@@ -4386,6 +4497,27 @@ export function stockHandler(req, res) {
         zones:swing.zones||null,reasons:Array.isArray(swing.reasons)?swing.reasons:(payload.reasons||[]),outcomes:byId.get(row.id)||{}};
     });
     res.writeHead(200,{"Content-Type":"application/json"});res.end(JSON.stringify(result));return;
+  }
+
+  // 监控层只报告正式技术状态的变化。它不重新评分，也不会把研究倾向变成执行许可。
+  if (url.pathname === "/stock/signal-transition") {
+    const symbol=(url.searchParams.get("symbol")||"").toUpperCase().replace(/[^A-Z0-9]/g,"");
+    if(!symbol){res.writeHead(400,{"Content-Type":"application/json"});res.end(JSON.stringify({error:"symbol required"}));return;}
+    const analysis=latestAnalysis?.[symbol] || null;
+    if(!analysis){res.writeHead(404,{"Content-Type":"application/json"});res.end(JSON.stringify({error:"analysis unavailable"}));return;}
+    const current=snapshotFromAnalysis(analysis);
+    const previousRow=current.asOfDate
+      ? db.prepare(`SELECT date,action,payload FROM stock_signal_log
+          WHERE symbol=? AND sample_origin=? AND engine_version=? AND date<?
+          ORDER BY date DESC LIMIT 1`).get(symbol,LIVE_FROZEN_ORIGIN,SIGNAL_ENGINE_VERSION,current.asOfDate)
+      : null;
+    const previous=previousRow ? snapshotFromStoredPayload(previousRow) : null;
+    res.writeHead(200,{"Content-Type":"application/json"});
+    res.end(JSON.stringify({
+      symbol, market:analysis.market||null, engineVersion:SIGNAL_ENGINE_VERSION,
+      current, previous, transition:describeSignalTransition({current,previous}),
+    }));
+    return;
   }
 
   if (url.pathname === "/stock/signal-performance") {
@@ -4897,6 +5029,27 @@ async function analyzeAll() {
       try { recordRuntimeMetric({ endpoint: `func:attachReliability:${row.symbol}`, durationMs: elapsed, statusCode: 200 }); } catch {}
       await yieldToEventLoop();
     }
+    // Collect a version-stable, intraday RSI6 observation cohort only after a
+    // full live analysis exists. This never changes swingDecision or writes to
+    // stock_signal_log, so future policy adjustments do not reset official
+    // signal validation samples.
+    try {
+      const meanReversion = recordMeanReversionObservations({
+        db,
+        results,
+        marketStateFor: getMarketStateFor,
+        marketDateFor: marketLocalToday,
+      });
+      if (meanReversion.inserted > 0) console.log(`[mean-reversion] recorded ${meanReversion.inserted} live observation events`);
+    } catch (e) { console.error('[mean-reversion] observation', e.message); }
+    try {
+      const featureSnapshots = recordLiveFeatureSnapshots({
+        db,
+        results,
+        completedDateForMarket: lastCompletedTradingDate,
+      });
+      if (featureSnapshots.inserted > 0) console.log(`[feature-snapshots] frozen ${featureSnapshots.inserted} completed-daily source snapshots`);
+    } catch (e) { console.error('[feature-snapshots] capture', e.message); }
     latestAnalysis = results;
     try { logSignalSnapshot(results); } catch (e) { console.error("[signal-log]", e.message); }
   } catch (e) { console.error("[stock-engine] analyzeAll", e.message); }

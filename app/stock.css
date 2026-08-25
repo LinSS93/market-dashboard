@@ -499,6 +499,26 @@
   .dc-readiness-k { color:var(--ws-muted-soft); font-weight:650; }
   .dc-readiness-v { color:var(--ws-ink); font-weight:750; }
   .dc-readiness-note { color:var(--ws-muted); }
+  /* 独立的 RSI6 均值回归观察，不使用正式动作的绿色/红色语义。 */
+  .dc-mean-reversion { margin:-2px 0 10px; padding:8px 10px; border:1px solid #c9d9ee; border-left:3px solid var(--ws-blue); background:#f6f9fd; font-size:12px; line-height:1.5; }
+  .dc-mean-reversion.candidate { border-color:#f0d89a; border-left-color:#d4a017; background:#fffaf0; }
+  .dc-mean-reversion.confirmed { border-left-color:var(--ws-blue); background:#f3f8ff; }
+  .dc-mean-reversion-head { display:flex; align-items:center; gap:8px; }
+  .dc-mean-reversion-title { color:var(--ws-ink); font-size:12px; font-weight:750; }
+  .dc-mean-reversion-badge { padding:1px 6px; border:1px solid currentColor; border-radius:var(--ws-radius-pill); color:#8a5c00; font-size:10.5px; font-weight:700; }
+  .dc-mean-reversion.confirmed .dc-mean-reversion-badge { color:var(--ws-blue); }
+  .dc-mean-reversion-body { margin-top:3px; color:var(--ws-ink-soft); }
+  .dc-mean-reversion-metrics { margin-top:3px; color:var(--ws-muted); font-variant-numeric:tabular-nums; }
+  .dc-mean-reversion-note { margin-top:3px; color:var(--ws-muted-soft); font-size:11px; }
+  /* 首要信息：相对上一有效日线的状态变化；分数仍保留在解释层。 */
+  .dc-change { display:flex; align-items:baseline; flex-wrap:wrap; gap:5px 8px; margin:0 0 10px; padding:8px 10px; border:1px solid var(--ws-line); border-radius:var(--ws-radius-sm); background:var(--ws-surface); font-size:12px; line-height:1.5; }
+  .dc-change-title { color:var(--ws-ink); font-weight:750; }
+  .dc-change-title.tone-bull { color:var(--ws-green); }
+  .dc-change-title.tone-bear { color:var(--ws-red); }
+  .dc-change-title.tone-watch { color:var(--ws-blue); }
+  .dc-change-title.tone-neutral { color:var(--ws-ink-soft); }
+  .dc-change-detail { color:var(--ws-muted); }
+  .dc-change-review { margin-left:auto; color:var(--ws-muted-soft); font-size:11px; white-space:nowrap; }
 
   /* 数据状态/可靠度行 */
   .dc-meta-row { display:flex; flex-wrap:wrap; gap:6px 16px; margin-bottom:10px; font-size:12.5px; }
@@ -511,6 +531,8 @@
 
   /* 评分因子（紧凑版，4行进度条） */
   .dc-score-factors { margin-bottom:10px; padding:9px 11px; background:var(--ws-surface-soft); border-radius:var(--ws-radius-sm); }
+  .dc-score-factors summary { cursor:pointer; color:var(--ws-muted); font-size:11px; font-weight:650; letter-spacing:.02em; }
+  .dc-score-list { margin-top:8px; }
   .dc-score-title { font-size:11px; color:var(--ws-muted-soft); font-weight:600; margin-bottom:6px; letter-spacing:0.04em; text-transform:uppercase; }
   .dc-score-row { display:grid; grid-template-columns:72px 1fr 38px 36px; align-items:center; gap:8px; padding:3px 0; font-size:12.5px; line-height:1.4; }
   .dc-score-label { color:var(--ws-ink-soft); font-weight:600; }

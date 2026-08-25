@@ -8,6 +8,12 @@
 
 import { getRadarV2Db } from './radar_v2_schema.mjs';
 
+function companyProfileFailureStatus(result) {
+  const status = Number(result?.http_status);
+  // 只接受本模块明确的上游失败状态，其他旧调用方仍保持 502 兼容行为。
+  return [400, 429, 502, 503, 504].includes(status) ? status : 502;
+}
+
 /**
  * POST /radar_v2/company-profile 路由处理逻辑
  *
@@ -49,7 +55,7 @@ export async function handleCompanyProfilePost({ market, symbol, forceRefresh, g
       };
     }
     const result = await generateFn({ market, symbol, companyName, forceRefresh });
-    return { status: result.ok ? 200 : 502, body: result };
+    return { status: result.ok ? 200 : companyProfileFailureStatus(result), body: result };
   } catch (e) {
     return { status: 500, body: { ok: false, error: String(e?.message || e) } };
   }

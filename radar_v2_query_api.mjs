@@ -1378,7 +1378,7 @@ function computePoolBucket({ compositeScore, freshPositiveChannelCount, hasCurre
  * 准入条件：
  *   - 普通股：asset_audit.asset_category='common_stock' 或 'common_stock_provisional'，
  *     或无审计记录时由 classifyByNameFallback 实时判定
- *   - 有至少一个非例行披露 dossier
+ *   - 有至少一个仍有效的正向或负向研究 dossier（中性上下文只留在档案库）
  *   - 不在用户"不感兴趣"列表中
  *   - 候选池分数截断：risk_review 需同时有正向证据（困境反转），或有评分标的综合评分 ≥ POOL_SCORE_THRESHOLD
  *
@@ -1412,7 +1412,10 @@ export function listResearchQueue({ market, limit = 30 } = {}) {
       queueAsOf[m] = lastCompletedTradingDate(m);
     }
 
-    // 2. 查询每个 (market, symbol, channel) 的最新非例行 dossier
+    // 2. 先找每个 (market, symbol, channel) 的最新 dossier，再只保留仍有效的证据。
+    //    不能先按状态过滤：若最新正向论点已 invalidated/needs_review，较早的
+    //    active 论点不能重新浮现并继续给该股票加分。invalidated 仍由后续的
+    //    latestPositiveRows 明确触发退出；已失效的负面论点则不再制造风险组。
     //    P0-1: market 参数已绑定到 eligible_universe 与 channel_latest。
     //    P0-5: LEFT JOIN radar_v2_asset_audit；无审计记录时 JS 侧用 classifyByNameFallback 兜底。
     const dossierRows = db.prepare(`
@@ -1445,6 +1448,7 @@ export function listResearchQueue({ market, limit = 30 } = {}) {
       FROM channel_latest cl
       JOIN eligible_universe eu ON eu.market = cl.market AND eu.symbol = cl.symbol
       WHERE cl.ch_rn = 1
+        AND cl.status IN ('active', 'confirmed')
       ORDER BY cl.available_at DESC
     `).all({ market: marketFilter });
 
@@ -1595,6 +1599,14 @@ export function listResearchQueue({ market, limit = 30 } = {}) {
       // 退出条件 3：趋势通道最新 dossier direction='negative'
       const trendChannel = entry.channels.find((c) => c.channel === 'trend');
       if (trendChannel && trendChannel.direction === 'negative') continue;
+
+      // 中性官方披露、例行更新和趋势过热提示可以丰富档案，但没有形成研究
+      // 方向，不能只凭一个五维分数把股票送进候选池。否则会把大量有新闻
+      // 上下文的普通股票伪装成“新信号”。
+      const hasDirectionalEvidence = entry.channels.some(
+        (c) => c.direction === 'positive' || c.direction === 'negative'
+      );
+      if (!hasDirectionalEvidence) continue;
 
       // 计算综合评分（无评分返回 null）
       const scoreRow = scoreMap.get(key);
@@ -1919,9 +1931,9 @@ export function restoreSymbol(market, symbol) {
  * 聚合查询：机会雷达 v2 通知摘要数据
  *
  * 用于盘后扫描完成后的聚合推送，按候选池 bucket 分组返回三类标的：
- *   - risks: 困境反转（bucket=risk_review）
- *   - crossConfirm: 高置信机会（bucket=cross_confirm）
- *   - newSignals: 待确认信号（bucket=new_signal）
+ *   - risks: 风险待核验（bucket=risk_review）
+ *   - crossConfirm: 多通道优先研究（bucket=cross_confirm）
+ *   - newSignals: 新变化待验证（bucket=new_signal）
  *
  * 数据来源：复用 listResearchQueue 的完整结果（limit=100 取全量），按 bucket 过滤。
  *

@@ -125,6 +125,159 @@ function bucketRows(rows, bucketCount) {
   return buckets;
 }
 
+function safeParseEvidence(value) {
+  if (Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(value || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Candidate scoring always supplies the technical base.  The extra channel
+ * labels below intentionally describe only evidence present in the historical
+ * candidate snapshot itself.  In particular, we do not look at a dossier that
+ * happened to be generated later, which would be a look-ahead leak.
+ */
+function isMaterialEventEvidence(evidence) {
+  const content = String(evidence?.content || '');
+  // Historical candidate evidence stores the triage result in its text.  A
+  // routine or neutral item is useful archive context, but it is not an event
+  // signal and must not turn a technical candidate into an event candidate.
+  if (/ROUTINE_DISCLOSURE/i.test(content) || /\[neutral\]/i.test(content)) return false;
+  return /\[(?:positive|negative)\]/i.test(content);
+}
+
+function channelsFromEvidence(evidenceJson) {
+  const channels = new Set();
+  for (const evidence of safeParseEvidence(evidenceJson)) {
+    const type = String(evidence?.type || '').toLowerCase();
+    if (type === 'event' && isMaterialEventEvidence(evidence)) channels.add('event');
+    if (type === 'fundamental' || type === 'fundamental_change') channels.add('fundamental');
+    // A historical candidate may explicitly carry a Radar V2 trend transition
+    // in a future replay contract.  Ordinary MA/RSI/volume score evidence is
+    // deliberately not promoted to the independent trend channel.
+    if (type === 'trend_transition' || type === 'trend_dossier') channels.add('trend');
+  }
+  return [...channels].sort();
+}
+
+function countNeutralEventEvidence(evidenceJson) {
+  return safeParseEvidence(evidenceJson)
+    .filter(evidence => String(evidence?.type || '').toLowerCase() === 'event' && !isMaterialEventEvidence(evidence)).length;
+}
+
+function researchGroupLabel(channels) {
+  return channels.length ? channels.join('+') : 'technical_only';
+}
+
+function selectPurgedRows(rows, step) {
+  const dates = [...new Set(rows.map(row => row.trade_date).filter(Boolean))].sort();
+  const selected = new Set(dates.filter((_, index) => index % step === 0));
+  return rows.filter(row => selected.has(row.trade_date));
+}
+
+function summarizeResearchGroupRows(rows) {
+  const directional = rows
+    .filter(row => row.direction === 'positive' || row.direction === 'negative')
+    .map(row => row.direction === 'negative' ? -row.excess_return_5d : row.excess_return_5d);
+  return {
+    snapshots: rows.length,
+    unique_symbols: new Set(rows.map(row => row.symbol)).size,
+    unique_trade_dates: new Set(rows.map(row => row.trade_date)).size,
+    raw_excess_5d: summarize(rows.map(row => row.excess_return_5d)),
+    directional_excess_5d: summarize(directional),
+  };
+}
+
+function summarizeRunCoverage(rows) {
+  const runs = new Map();
+  for (const row of rows) {
+    if (!Number.isFinite(row.run_id)) continue;
+    if (!runs.has(row.run_id)) {
+      const attempted = finite(row.attempted_count);
+      const succeeded = finite(row.succeeded_count);
+      runs.set(row.run_id, {
+        status: row.run_status || 'unknown',
+        coverage: attempted != null && attempted > 0 && succeeded != null ? succeeded / attempted : null,
+      });
+    }
+  }
+  const values = [...runs.values()].map(run => run.coverage).filter(Number.isFinite);
+  return {
+    runs: runs.size,
+    complete_runs: [...runs.values()].filter(run => run.status === 'complete').length,
+    partial_runs: [...runs.values()].filter(run => run.status === 'partial').length,
+    coverage: summarize(values),
+  };
+}
+
+/**
+ * Compare the research channels that are provably present in a historical,
+ * point-in-time candidate snapshot.  This is intentionally descriptive: it
+ * reports missing channel coverage instead of inferring event/trend/fundamental
+ * membership from dossiers written after the snapshot.
+ */
+export function summarizeHistoricalResearchGroups(rows, { purgeStep = 6 } = {}) {
+  const safePurgeStep = Math.max(2, Math.min(30, Number(purgeStep) || 6));
+  const normalized = (rows || []).map(row => ({
+    candidate_id: Number(row.candidate_id),
+    market: String(row.market || ''),
+    symbol: String(row.symbol || ''),
+    run_id: Number(row.run_id),
+    run_status: String(row.run_status || 'unknown'),
+    attempted_count: finite(row.attempted_count),
+    succeeded_count: finite(row.succeeded_count),
+    trade_date: String(row.trade_date || ''),
+    direction: String(row.direction || 'neutral'),
+    excess_return_5d: finite(row.excess_return_5d),
+    channels: channelsFromEvidence(row.evidence_json),
+    neutral_event_evidence: countNeutralEventEvidence(row.evidence_json),
+  })).filter(row => row.market && row.symbol && row.trade_date && row.excess_return_5d != null);
+
+  const byMarket = {};
+  for (const market of [...new Set(normalized.map(row => row.market))].sort()) {
+    const marketRows = normalized.filter(row => row.market === market);
+    const grouped = new Map();
+    for (const row of marketRows) {
+      const label = researchGroupLabel(row.channels);
+      if (!grouped.has(label)) grouped.set(label, []);
+      grouped.get(label).push(row);
+    }
+    const groups = {};
+    for (const [label, groupRows] of [...grouped.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+      groups[label] = {
+        all_snapshots: summarizeResearchGroupRows(groupRows),
+        purged_5d: summarizeResearchGroupRows(selectPurgedRows(groupRows, safePurgeStep)),
+      };
+    }
+    byMarket[market] = {
+      total: summarizeResearchGroupRows(marketRows),
+      run_coverage: summarizeRunCoverage(marketRows),
+      neutral_event_evidence_rows: marketRows.filter(row => row.neutral_event_evidence > 0).length,
+      groups,
+      observed_channels: [...new Set(marketRows.flatMap(row => row.channels))].sort(),
+      missing_channels: ['event', 'trend', 'fundamental']
+        .filter(channel => !marketRows.some(row => row.channels.includes(channel))),
+    };
+  }
+  return {
+    methodology: {
+      trigger: 'historical_backfill',
+      contract: 'point_in_time_v1',
+      maturity: 'candidate outcomes with comparable 5d excess return',
+      execution: 'next trading-day open; benchmark date-aligned',
+      purge: `every ${safePurgeStep}th trade-date within each market/group`,
+      interpretation: 'descriptive only; partial historical runs are retained with their coverage reported, and a missing channel means no point-in-time snapshot coverage, not neutral performance',
+      no_look_ahead: 'channel labels are parsed only from each historical candidate evidence_json; routine/neutral event context is not a signal channel',
+    },
+    rows: normalized.length,
+    by_market: byMarket,
+  };
+}
+
 /**
  * Produce per-market descriptive score buckets from rows that are already
  * selected by the caller.  A negative direction uses -excess return in the

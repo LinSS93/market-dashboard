@@ -17,6 +17,22 @@ db.pragma('busy_timeout = 5000');
 
 const PROFILE_PROMPT_VERSION = 1;
 const PROFILE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const PROFILE_RETRY_AFTER_SECONDS = 15;
+const PROFILE_RATE_LIMIT_RETRY_AFTER_SECONDS = 30;
+
+// 同一股票的首次生成或强制刷新只能共享一条上游请求。公司简介是研究辅助，
+// 不应因重复点击把短暂的上游拥堵放大成多次付费调用。
+const inFlightProfileGenerations = new Map();
+
+const defaultDependencies = Object.freeze({
+  getApiKey,
+  callLLM,
+  recordLLMTokenUsage,
+  getProfile: getCompanyProfile,
+  upsertProfile: (params) => upsertProfileStmt.run(params),
+  now: () => Date.now(),
+});
+let testDependencies = null;
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS llm_company_profiles (
@@ -88,6 +104,84 @@ export function getCompanyProfile({ market, symbol } = {}) {
   return serialize(getProfileStmt.get(safeMarket, safeSymbol, PROFILE_PROMPT_VERSION, Date.now()));
 }
 
+/**
+ * 将上游/解析错误转换为稳定、可展示的错误契约。
+ * 原始 provider 响应可能很长或包含不应展示给用户的细节，因此不透传。
+ */
+export function classifyCompanyProfileFailure(error) {
+  const raw = String(error?.message || error || '');
+  const httpMatch = raw.match(/LLM HTTP\s+(\d{3})/i);
+  const providerStatus = httpMatch ? Number(httpMatch[1]) : null;
+  const aborted = error?.name === 'AbortError' || /abort|timeout|timed out/i.test(raw);
+
+  if (aborted) {
+    return {
+      error: 'llm_timeout',
+      message: '公司简介生成超时，请稍后重试。',
+      retryable: true,
+      retry_after_seconds: PROFILE_RETRY_AFTER_SECONDS,
+      http_status: 504,
+    };
+  }
+  if (providerStatus === 429) {
+    return {
+      error: 'llm_rate_limited',
+      message: '公司简介服务请求较多，请稍后重试。',
+      retryable: true,
+      retry_after_seconds: PROFILE_RATE_LIMIT_RETRY_AFTER_SECONDS,
+      http_status: 429,
+    };
+  }
+  if (providerStatus != null && providerStatus >= 500) {
+    return {
+      error: 'llm_provider_unavailable',
+      message: '公司简介服务暂时不可用，请稍后重试。',
+      retryable: true,
+      retry_after_seconds: PROFILE_RETRY_AFTER_SECONDS,
+      http_status: 503,
+    };
+  }
+  if (/JSON.*(?:解析|parse)|返回内容为空/i.test(raw)) {
+    return {
+      error: 'llm_invalid_response',
+      message: '公司简介服务返回异常，请稍后重试。',
+      retryable: true,
+      retry_after_seconds: PROFILE_RETRY_AFTER_SECONDS,
+      http_status: 502,
+    };
+  }
+  if (providerStatus != null && providerStatus >= 400) {
+    return {
+      error: 'llm_request_rejected',
+      message: '公司简介服务暂时无法处理此请求，请稍后再试。',
+      retryable: true,
+      retry_after_seconds: PROFILE_RETRY_AFTER_SECONDS,
+      http_status: 503,
+    };
+  }
+  return {
+    error: 'llm_network_error',
+    message: '公司简介服务连接失败，请检查网络后重试。',
+    retryable: true,
+    retry_after_seconds: PROFILE_RETRY_AFTER_SECONDS,
+    http_status: 503,
+  };
+}
+
+function activeDependencies() {
+  return testDependencies || defaultDependencies;
+}
+
+// 仅供离线测试注入虚拟缓存/模型，生产路径不会设置该状态。
+export function setCompanyProfileDependenciesForTest(dependencies) {
+  testDependencies = { ...defaultDependencies, ...(dependencies || {}) };
+}
+
+export function resetCompanyProfileDependenciesForTest() {
+  testDependencies = null;
+  inFlightProfileGenerations.clear();
+}
+
 export function parseCompanyProfileResponse(rawResponse) {
   try {
     const parsed = typeof rawResponse === 'string' ? JSON.parse(rawResponse) : rawResponse;
@@ -123,43 +217,77 @@ export function buildCompanyProfileMessages({ market, symbol, companyName, sourc
   ];
 }
 
-export async function generateCompanyProfile({ market, symbol, companyName, sourceRefs = [], forceRefresh = false } = {}) {
-  const safeMarket = normalizedMarket(market);
-  const safeSymbol = normalizedSymbol(symbol);
-  const safeName = text(companyName, 160);
-  if (!safeMarket || !safeSymbol || !safeName) return { ok: false, error: 'market, symbol and companyName are required' };
-  const refs = normalizeSourceRefs(sourceRefs);
-  const contextHash = createHash('sha256').update(JSON.stringify({ safeMarket, safeSymbol, safeName, refs })).digest('hex');
-  const cached = getCompanyProfile({ market: safeMarket, symbol: safeSymbol });
-  if (cached && !forceRefresh) return { ok: true, cached: true, profile: cached };
-
-  const keyEntry = getApiKey('deepseek');
-  if (!keyEntry) return { ok: false, error: 'DeepSeek API 未配置' };
+async function generateCompanyProfileInner({ safeMarket, safeSymbol, safeName, refs, contextHash, cached, forceRefresh }) {
+  const deps = activeDependencies();
+  const keyEntry = deps.getApiKey('deepseek');
+  if (!keyEntry) {
+    const failure = {
+      error: 'llm_not_configured',
+      message: '公司简介服务暂未配置，请稍后再试。',
+      retryable: false,
+      http_status: 503,
+    };
+    return cached && forceRefresh ? { ok: false, ...failure, profile: cached, preserved: true } : { ok: false, ...failure };
+  }
   try {
-    const llm = await callLLM({
+    const llm = await deps.callLLM({
       provider: keyEntry.provider, apiKey: keyEntry.apiKey, baseUrl: keyEntry.baseUrl,
       messages: buildCompanyProfileMessages({ market: safeMarket, symbol: safeSymbol, companyName: safeName, sourceRefs: refs }),
       model: 'deepseek-v4-flash', maxTokens: 450, temperature: 0.15,
     });
     // 记录 token 用量
-    recordLLMTokenUsage({
+    deps.recordLLMTokenUsage({
       provider: keyEntry.provider, model: llm.model, feature: 'company_profile',
       market: safeMarket, symbol: safeSymbol, usage: llm.usage,
     });
     const profile = parseCompanyProfileResponse(llm.content);
     if (!profile) throw new Error('LLM 公司简介 JSON 解析失败');
-    const now = Date.now();
-    upsertProfileStmt.run({
+    const now = deps.now();
+    deps.upsertProfile({
       market: safeMarket, symbol: safeSymbol, company_name: safeName, summary: profile.summary,
       business_lines_json: JSON.stringify(profile.business_lines), industry: profile.industry,
       confidence: profile.confidence, basis: profile.basis, caveat: profile.caveat,
       source_refs_json: JSON.stringify(refs), provider: keyEntry.provider, model: llm.model,
       prompt_version: PROFILE_PROMPT_VERSION, context_hash: contextHash, created_at: now, expires_at: now + PROFILE_TTL_MS,
     });
-    return { ok: true, cached: false, profile: getCompanyProfile({ market: safeMarket, symbol: safeSymbol }) };
+    return { ok: true, cached: false, profile: deps.getProfile({ market: safeMarket, symbol: safeSymbol }) };
   } catch (error) {
-    return { ok: false, error: String(error?.message || error).slice(0, 300) };
+    const failure = classifyCompanyProfileFailure(error);
+    // 只记录稳定错误码，避免把上游响应正文或凭据写入服务日志。
+    console.warn(`[company-profile] generation failed ${safeMarket}:${safeSymbol} code=${failure.error}`);
+    return cached && forceRefresh ? { ok: false, ...failure, profile: cached, preserved: true } : { ok: false, ...failure };
   }
+}
+
+export async function generateCompanyProfile({ market, symbol, companyName, sourceRefs = [], forceRefresh = false } = {}) {
+  const safeMarket = normalizedMarket(market);
+  const safeSymbol = normalizedSymbol(symbol);
+  const safeName = text(companyName, 160);
+  if (!safeMarket || !safeSymbol || !safeName) {
+    return {
+      ok: false,
+      error: 'company_profile_invalid_input',
+      message: '市场、代码和规范公司名不完整，无法生成公司简介。',
+      retryable: false,
+      http_status: 400,
+    };
+  }
+  const refs = normalizeSourceRefs(sourceRefs);
+  const contextHash = createHash('sha256').update(JSON.stringify({ safeMarket, safeSymbol, safeName, refs })).digest('hex');
+  const deps = activeDependencies();
+  const cached = deps.getProfile({ market: safeMarket, symbol: safeSymbol });
+  if (cached && !forceRefresh) return { ok: true, cached: true, profile: cached };
+
+  const inFlightKey = `${safeMarket}:${safeSymbol}`;
+  const existing = inFlightProfileGenerations.get(inFlightKey);
+  if (existing) return existing;
+  const task = generateCompanyProfileInner({ safeMarket, safeSymbol, safeName, refs, contextHash, cached, forceRefresh });
+  inFlightProfileGenerations.set(inFlightKey, task);
+  task.then(
+    () => { if (inFlightProfileGenerations.get(inFlightKey) === task) inFlightProfileGenerations.delete(inFlightKey); },
+    () => { if (inFlightProfileGenerations.get(inFlightKey) === task) inFlightProfileGenerations.delete(inFlightKey); },
+  );
+  return task;
 }
 
 export function pruneCompanyProfileCache() {

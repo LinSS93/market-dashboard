@@ -501,15 +501,80 @@ export async function registerAlertRoutes(req, res, p, u, readBody) {
 //   - 3 个 tier 与候选池 3 个 bucket 一一对应：risk→risk_review, confirmed→cross_confirm, new→new_signal
 
 const RADAR_V2_MARKET_LABELS = { US: '美股', HK: '港股', CN: 'A 股' };
-const RADAR_V2_DIR_LABELS = { positive: '正向', negative: '负向', neutral: '中性' };
+const RADAR_V2_PRIORITY_ITEM_LIMIT = 2;
 
-// 构造单行标的摘要：· AAPL · Apple Inc. · 正向 · 季报营收超预期 · 78分
-function formatRadarV2Item(item) {
-  const dir = RADAR_V2_DIR_LABELS[item.direction] || item.direction || '—';
-  const score = item.composite_score != null ? ` · ${item.composite_score}分` : '';
-  const fact = item.fact ? ` · ${item.fact}` : '';
-  const name = item.name ? ` · ${item.name}` : '';
-  return `· ${item.symbol}${name} · ${dir}${fact}${score}`;
+function compactNumber(value, digits = 1) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(digits).replace(/\.0$/, '') : null;
+}
+
+function firstMatch(text, pattern) {
+  const match = String(text || '').match(pattern);
+  return match?.[1] ?? null;
+}
+
+// 将 producer 的原始 facts 转为一行推送短句。通知只保留“为什么现在要看”，
+// 不平铺 state-machine、RSI 等次要诊断信息。
+function summarizeRadarV2Fact(fact) {
+  const raw = String(fact || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return '触发原因待核验';
+
+  if (/BASE→BREAKOUT/i.test(raw)) {
+    const ratio = compactNumber(firstMatch(raw, /量比\s*([\d.]+)/i));
+    return ['站上 20 日新高', ratio && `量比 ${ratio}`].filter(Boolean).join('，');
+  }
+  if (/BREAKOUT→TREND/i.test(raw)) {
+    const slope = compactNumber(firstMatch(raw, /5\s*日斜率\s*([+-]?[\d.]+)%/i));
+    return ['均线趋势向上', slope && `5 日斜率 ${Number(slope) > 0 ? '+' : ''}${slope}%`].filter(Boolean).join('，');
+  }
+  if (/PROFIT WARNING/i.test(raw)) return '业绩预警：利润可能承压';
+  if (/REDUCTION (?:IN|OF) LOSS/i.test(raw)) return '业绩更新：亏损收窄，仍需核验';
+  if (/POSITIVE PROFIT ALERT/i.test(raw)) return '业绩预告：盈利改善';
+  if (/PROFIT ALERT/i.test(raw)) return '业绩预告：经营表现更新';
+  if (/FINANCIAL PERFORMANCE UPDATE/i.test(raw)) return '财务表现更新，需核验方向';
+
+  const cleaned = raw
+    .replace(/^[a-z_]+:\s*/i, '')
+    .replace(/[_-]+/g, ' ')
+    .trim();
+  return cleaned.length > 40 ? `${cleaned.slice(0, 40)}…` : (cleaned || '触发原因待核验');
+}
+
+function formatRadarV2CompactItem(item) {
+  const score = item.composite_score != null
+    ? `${Math.min(100, Math.max(0, Math.round(Number(item.composite_score))))}分`
+    : '待评分';
+  const name = item.name ? ` ${String(item.name).replace(/\s+/g, ' ').trim()}` : '';
+  return `${item.symbol}${name} ${score}｜${summarizeRadarV2Fact(item.fact)}`;
+}
+
+/**
+ * 构造飞书用的简明盘后摘要。
+ * 这是研究优先级通知，不改变候选池分数、准入或任何交易决策。
+ */
+export function buildRadarV2DigestMessage(market, digestData, tiers) {
+  const risks = digestData?.risks || [];
+  const crossConfirm = digestData?.crossConfirm || [];
+  const newSignals = digestData?.newSignals || [];
+  const selectedTiers = Array.isArray(tiers) ? tiers : [];
+  const showCrossConfirm = selectedTiers.includes('confirmed') && crossConfirm.length > 0;
+  const showNew = selectedTiers.includes('new') && newSignals.length > 0;
+  const showRisks = selectedTiers.includes('risk') && risks.length > 0;
+  if (!showCrossConfirm && !showNew && !showRisks) return null;
+
+  const marketLabel = RADAR_V2_MARKET_LABELS[market] || market;
+  const lines = [
+    `【机会雷达｜${marketLabel}盘后】`,
+    `优先 ${showCrossConfirm ? crossConfirm.length : 0}｜风险 ${showRisks ? risks.length : 0}｜新变化 ${showNew ? newSignals.length : 0}`,
+  ];
+  const priorityItems = showCrossConfirm ? crossConfirm.slice(0, RADAR_V2_PRIORITY_ITEM_LIMIT) : [];
+  if (priorityItems.length > 0) {
+    lines.push(`优先：${formatRadarV2CompactItem(priorityItems[0])}`);
+    for (const item of priorityItems.slice(1)) lines.push(`      ${formatRadarV2CompactItem(item)}`);
+  }
+  if (showRisks) lines.push(`风险：${formatRadarV2CompactItem(risks[0])}`);
+  lines.push('查看：机会雷达 → 持续研究候选池');
+  return lines.join('\n');
 }
 
 /**
@@ -527,40 +592,15 @@ export async function sendRadarV2Digest(market, digestData) {
   if (risks.length === 0 && crossConfirm.length === 0 && newSignals.length === 0) return { ok: false, skipped: 'no-events' };
 
   const tiers = _getControlSettings().modules.radar_v2?.tiers || [];
-  const showCrossConfirm = tiers.includes('confirmed') && crossConfirm.length > 0;
-  const showNew = tiers.includes('new') && newSignals.length > 0;
-  const showRisks = tiers.includes('risk') && risks.length > 0;
-  if (!showCrossConfirm && !showNew && !showRisks) return { ok: false, skipped: 'no-selected-tiers' };
-
-  const marketLabel = RADAR_V2_MARKET_LABELS[market] || market;
-  const lines = [`【机会雷达 · ${marketLabel} 盘后扫描】`];
-
-  if (showCrossConfirm) {
-    lines.push(`高置信机会 ${crossConfirm.length} 个：`);
-    for (const item of crossConfirm.slice(0, 10)) lines.push(formatRadarV2Item(item));
-    if (crossConfirm.length > 10) lines.push(`...等共 ${crossConfirm.length} 个`);
-  }
-
-  if (showNew) {
-    lines.push(`待确认信号 ${newSignals.length} 个：`);
-    for (const item of newSignals.slice(0, 10)) lines.push(formatRadarV2Item(item));
-    if (newSignals.length > 10) lines.push(`...等共 ${newSignals.length} 个`);
-  }
-
-  if (showRisks) {
-    lines.push(`困境反转 ${risks.length} 项：`);
-    for (const item of risks.slice(0, 10)) lines.push(formatRadarV2Item(item));
-    if (risks.length > 10) lines.push(`...等共 ${risks.length} 项`);
-  }
-
-  const msg = lines.join('\n');
+  const msg = buildRadarV2DigestMessage(market, { risks, crossConfirm, newSignals }, tiers);
+  if (!msg) return { ok: false, skipped: 'no-selected-tiers' };
 
   const now = Date.now();
   const eventKey = [now, 'radar_v2', market, 'digest', 'server'].join('|');
   const auditRow = recordAlertAudit({
     event_key: eventKey, ts: now, type: 'radar_v2',
     symbol_code: market, channel: 'webhook', signal: 'DIGEST',
-    detail: `高置信${crossConfirm.length} 待确认${newSignals.length} 困境反转${risks.length}`, market_state: '',
+    detail: `优先研究${crossConfirm.length} 新变化${newSignals.length} 风险待核验${risks.length}`, market_state: '',
     status: 'queued',
   });
 

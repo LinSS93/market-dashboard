@@ -558,7 +558,9 @@
   .tracker-workspace .list-panel { flex-basis:46%; }
   .tracker-workspace .detail-panel { flex-basis:54%; }
   .tracker-workspace .detail .stats { grid-template-columns:repeat(3,minmax(0,1fr)); }
-  .tracker-workspace .tracker-grid-table th:nth-child(3),.tracker-workspace .tracker-grid-table td:nth-child(3) { display:none; }
+  /* 保留“估算溢价”这一决策依据，优先隐藏持仓栏。 */
+  .tracker-workspace .tracker-grid-table th:nth-child(5),.tracker-workspace .tracker-grid-table td:nth-child(5) { display:none; }
+  .tracker-workspace .tracker-grid-table col:nth-child(5) { width:0 !important; }
 }
 @media (max-width:900px) {
   /* toolbar 3 列 grid 改 2 列；market-filter-buttons 加 flex-wrap */
@@ -583,10 +585,11 @@
   .tracker-workspace #d_sentiment_cross .tsc-grid,
   .tracker-workspace #d_sentiment_cross .tsc-grid.tsc-grid-2 { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .tracker-workspace .premium-dist-box .pd-stats { grid-template-columns:repeat(4,minmax(0,1fr)); }
-  /* 列表次要列隐藏 */
+  /* 列表次要列隐藏：保留估算溢价、当前动作和删除入口。 */
   .tracker-workspace .tracker-grid-table th:nth-child(2),.tracker-workspace .tracker-grid-table td:nth-child(2),
-  .tracker-workspace .tracker-grid-table th:nth-child(3),.tracker-workspace .tracker-grid-table td:nth-child(3),
-  .tracker-workspace .tracker-grid-table th:nth-child(6),.tracker-workspace .tracker-grid-table td:nth-child(6) { display:none; }
+  .tracker-workspace .tracker-grid-table th:nth-child(5),.tracker-workspace .tracker-grid-table td:nth-child(5) { display:none; }
+  .tracker-workspace .tracker-grid-table col:nth-child(2),
+  .tracker-workspace .tracker-grid-table col:nth-child(5) { width:0 !important; }
 }
 @media (max-width:760px) {
   .tracker-workspace header { gap:6px; padding:0 10px; }

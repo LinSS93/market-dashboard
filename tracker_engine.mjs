@@ -22,6 +22,7 @@ import {
   recalcTrackerPositionFromEvents,
   voidTradeEvent,
 } from './stock_engine.mjs';
+import { resolveRegisteredTrackerProduct } from './tracker_product_registry.mjs';
 
 function ensureTrackerAuditColumn(column, definition) {
   const columns = db.prepare('PRAGMA table_info(tracker_signal_audit)').all().map(row => row.name);
@@ -30,6 +31,65 @@ function ensureTrackerAuditColumn(column, definition) {
 ensureTrackerAuditColumn('earnings_event_type', 'TEXT');
 ensureTrackerAuditColumn('earnings_source_confidence', 'TEXT');
 ensureTrackerAuditColumn('earnings_policy_json', 'TEXT');
+
+const PRODUCT_DIRECTIONS = new Set(['long', 'inverse']);
+
+/**
+ * 只有产品注册表中的官方条目可以进入执行层。用户填写的文字不构成核验，
+ * 因而不会把陌生产品误标为已核验。
+ */
+function normalizeTrackerProduct(row = {}) {
+  const leverage = Number(row.leverage);
+  const registered = resolveRegisteredTrackerProduct(row);
+  if (registered.entry && leverage > 0) {
+    return {
+      product_status: 'verified', product_direction: registered.entry.product_direction,
+      tracking_index: registered.entry.tracking_index, issuer: registered.entry.issuer,
+      rebalance_frequency: registered.entry.rebalance_frequency,
+      verification_source: registered.entry.verification_source,
+      verified_at: Number(row.verified_at) || Date.now(), registry_entry: registered.entry,
+      verification_reason: null,
+    };
+  }
+  const productDirection = PRODUCT_DIRECTIONS.has(String(row.product_direction || '').toLowerCase())
+    ? String(row.product_direction).toLowerCase() : 'long';
+  const rebalanceFrequency = String(row.rebalance_frequency || 'daily').toLowerCase();
+  const status = leverage > 0 && productDirection === 'long' ? 'provisional' : 'blocked';
+  const verificationReason = registered.entry && !(leverage > 0)
+    ? '产品杠杆倍率无效，未自动核验'
+    : registered.reason;
+  return {
+    product_status: status,
+    product_direction: productDirection,
+    tracking_index: row.tracking_index || null,
+    issuer: row.issuer || null,
+    rebalance_frequency: rebalanceFrequency,
+    verification_source: row.verification_source || null,
+    verified_at: null, registry_entry: null, verification_reason: verificationReason,
+  };
+}
+
+function getProductEntryStatus(row = {}) {
+  const normalized = normalizeTrackerProduct(row);
+  if (Number(row.leverage) <= 0 || normalized.product_direction === 'inverse') {
+    return { eligible: false, reason: '当前版本仅支持已核验的正向每日杠杆产品；反向/非正倍率产品仅可研究' };
+  }
+  if (normalized.product_status !== 'verified') {
+    return { eligible: false, reason: normalized.verification_reason || '系统产品注册表暂未收录，保留为研究观察' };
+  }
+  return { eligible: true, reason: null };
+}
+
+function resolveTrackerPairIdentity(row = {}) {
+  const product = normalizeTrackerProduct(row);
+  if (!product.registry_entry) return { ...row, product };
+  const entry = product.registry_entry;
+  return {
+    ...row, etf: entry.etf, etf_market: entry.etf_market,
+    underlying: entry.underlying, underlying_market: entry.underlying_market,
+    fx_pair: entry.fx_pair, leverage: entry.leverage, label: entry.label, product,
+  };
+}
 
 // ── 持仓推算 ────────────────────────────────────────────────────────────────
 // tracker_positions 表只缓存 currency/base_currency；shares/cost 优先从
@@ -182,16 +242,19 @@ function getTrackerSignalAudit(pairId, limit=200) {
   return db.prepare("SELECT * FROM tracker_signal_audit ORDER BY ts DESC LIMIT ?").all(n);
 }
 
-// 溢价率历史分布：从 tracker_signal_audit 拉取历史 premium 样本，计算分位数 + 直方图
-// 用于判断"当前溢价率在历史上算不算极端"
+// 溢价率分布只使用已收盘封口的独立日样本。盘中每分钟审计记录可用于回看，
+// 但不能伪装成几十个独立交易日，更不能驱动买卖阈值。
 function getPremiumDistribution(pairId, opts={}) {
   const pid = Number(pairId);
   if (!(pid > 0)) return { error: 'invalid pair_id' };
-  const days = Number(opts.days) || 30;       // 默认最近 30 天
+  const days = Math.max(30, Number(opts.days) || 90);
   const buckets = Number(opts.buckets) || 20; // 直方图桶数
-  const rows = db.prepare("SELECT premium, ts FROM tracker_signal_audit WHERE pair_id=? AND premium IS NOT NULL AND premium != '' AND ts >= ? ORDER BY ts ASC").all(pid, Date.now() - days * 86400000);
+  const rows = db.prepare(`SELECT premium, date, finalized_at FROM tracker_premium_daily
+    WHERE pair_id=? AND finalized_at IS NOT NULL AND premium IS NOT NULL
+      AND date >= date('now', ?)
+    ORDER BY date ASC`).all(pid, `-${days - 1} days`);
   if (rows.length < 30) {
-    return { pair_id: pid, samples: rows.length, status: 'insufficient', message: `历史样本不足（${rows.length}/30），等待数据积累` };
+    return { pair_id: pid, samples: rows.length, basis: 'finalized_daily', status: 'insufficient', message: `收盘样本不足（${rows.length}/30 个交易日），暂不展示分位判断` };
   }
   const samples = rows.map(r => Number(r.premium)).filter(v => Number.isFinite(v));
   if (samples.length < 30) {
@@ -224,7 +287,7 @@ function getPremiumDistribution(pairId, opts={}) {
   let currentRank = 0;
   for (const v of sorted) { if (v <= current) currentRank++; else break; }
   const currentPercentile = +(currentRank / n * 100).toFixed(1);
-  // 极端性判定：< 5 分位 = 历史低位折价（适合买）；> 95 分位 = 历史高位溢价（适合卖）
+  // 极端性只描述历史位置；不把统计位置翻译成买卖建议。
   let verdict, verdictColor;
   if (currentPercentile <= 5) { verdict = '历史低位折价'; verdictColor = '#1a9d5a'; }
   else if (currentPercentile <= 20) { verdict = '偏低折价'; verdictColor = '#56c596'; }
@@ -249,9 +312,9 @@ function getPremiumDistribution(pairId, opts={}) {
       p90: +quantile(0.90).toFixed(2),
       p95: +quantile(0.95).toFixed(2),
     },
-    histogram,
-    first_ts: rows[0].ts,
-    last_ts: rows[rows.length - 1].ts,
+    histogram, basis: 'finalized_daily',
+    first_date: rows[0].date,
+    last_date: rows[rows.length - 1].date,
   };
 }
 
@@ -307,13 +370,26 @@ function getTrackerDailyContext(etf, underlying, fxPair, etfQuoteDate, underlyin
 
 function importTrackerPairs(rows=[]) {
   const valid=(Array.isArray(rows)?rows:[]).filter(x=>x&&x.etf);
-  const upsert=db.prepare(`INSERT INTO tracker_pairs(id,etf,etf_market,underlying,underlying_market,fx_pair,leverage,label,active,created_at,sort_order,annual_cost_pct)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET etf=excluded.etf,etf_market=excluded.etf_market,
+  const upsert=db.prepare(`INSERT INTO tracker_pairs(id,etf,etf_market,underlying,underlying_market,fx_pair,leverage,label,active,created_at,sort_order,annual_cost_pct,product_status,product_direction,tracking_index,issuer,rebalance_frequency,verification_source,verified_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET etf=excluded.etf,etf_market=excluded.etf_market,
     underlying=excluded.underlying,underlying_market=excluded.underlying_market,fx_pair=excluded.fx_pair,leverage=excluded.leverage,
-    label=excluded.label,active=excluded.active,sort_order=excluded.sort_order,annual_cost_pct=COALESCE(excluded.annual_cost_pct,tracker_pairs.annual_cost_pct)`);
-  db.transaction(list=>list.forEach((x,i)=>upsert.run(Number(x.id)||null,String(x.etf),String(x.etf_market||'HK'),x.underlying||null,
-    x.underlying_market||null,x.fx_pair||null,Number(x.leverage)||2,x.label||null,x.active===0?0:1,Number(x.created_at)||Date.now(),i,x.annual_cost_pct??null)))(valid);
+    label=excluded.label,active=excluded.active,sort_order=excluded.sort_order,annual_cost_pct=COALESCE(excluded.annual_cost_pct,tracker_pairs.annual_cost_pct),
+    product_status=CASE WHEN excluded.product_status='blocked' THEN 'blocked' ELSE tracker_pairs.product_status END,
+    product_direction=COALESCE(NULLIF(excluded.product_direction,''),tracker_pairs.product_direction),
+    tracking_index=COALESCE(excluded.tracking_index,tracker_pairs.tracking_index),issuer=COALESCE(excluded.issuer,tracker_pairs.issuer),
+    rebalance_frequency=COALESCE(NULLIF(excluded.rebalance_frequency,''),tracker_pairs.rebalance_frequency),
+    verification_source=COALESCE(excluded.verification_source,tracker_pairs.verification_source),verified_at=COALESCE(excluded.verified_at,tracker_pairs.verified_at)`);
+  db.transaction(list=>list.forEach((x,i)=>{
+    const leverage = Number(x.leverage);
+    const safeLeverage = Number.isFinite(leverage) && leverage !== 0 ? leverage : 2;
+    const identity = resolveTrackerPairIdentity({ ...x, leverage: safeLeverage });
+    const product = identity.product;
+    upsert.run(Number(x.id)||null,String(identity.etf),String(identity.etf_market||'HK'),identity.underlying||null,
+      identity.underlying_market||null,identity.fx_pair||null,identity.leverage,identity.label||null,x.active===0?0:1,Number(x.created_at)||Date.now(),i,x.annual_cost_pct??null,
+      product.product_status,product.product_direction,product.tracking_index,product.issuer,product.rebalance_frequency,product.verification_source,product.verified_at);
+  }))(valid);
   invalidateActiveEtfPairCache();
+  autoVerifyTrackerProducts();
   return getTrackerPairs();
 }
 
@@ -326,13 +402,45 @@ function migrateLegacyTrackerPairs(rows=[]) {
 }
 
 function getTrackerPairs() {
-  return db.prepare("SELECT id,etf,etf_market,underlying,underlying_market,fx_pair,leverage,label,active,created_at,sort_order,annual_cost_pct FROM tracker_pairs ORDER BY active DESC,sort_order,id").all();
+  return db.prepare("SELECT id,etf,etf_market,underlying,underlying_market,fx_pair,leverage,label,active,created_at,sort_order,annual_cost_pct,product_status,product_direction,tracking_index,issuer,rebalance_frequency,verification_source,verified_at FROM tracker_pairs ORDER BY active DESC,sort_order,id").all();
+}
+
+/** 在服务启动、兼容导入和新建配对后执行；不访问网络，也不从名称猜测。 */
+function autoVerifyTrackerProducts() {
+  const rows = getTrackerPairs();
+  const updateVerified = db.prepare(`UPDATE tracker_pairs SET
+      etf=?,etf_market=?,underlying=?,underlying_market=?,fx_pair=?,leverage=?,label=?,
+      product_status='verified',product_direction=?,tracking_index=?,issuer=?,
+      rebalance_frequency=?,verification_source=?,verified_at=?
+    WHERE id=?`);
+  const downgradeUnknown = db.prepare(`UPDATE tracker_pairs
+    SET product_status='provisional', verified_at=NULL WHERE id=? AND product_status='verified'`);
+  const now = Date.now(); let verified = 0, provisional = 0;
+  db.transaction(items => items.forEach(row => {
+    const identity = resolveTrackerPairIdentity(row);
+    if (identity.product.registry_entry) {
+      updateVerified.run(identity.etf, identity.etf_market, identity.underlying, identity.underlying_market,
+        identity.fx_pair, identity.leverage, identity.label, identity.product.product_direction, identity.product.tracking_index,
+        identity.product.issuer, identity.product.rebalance_frequency, identity.product.verification_source,
+        Number(row.verified_at) || now, row.id);
+      verified++;
+    } else {
+      downgradeUnknown.run(row.id); provisional++;
+    }
+  }))(rows);
+  invalidateActiveEtfPairCache();
+  return { verified, provisional };
 }
 
 function addTrackerPair(row={}) {
+  const leverage=Number(row.leverage);
+  if (!Number.isFinite(leverage) || leverage <= 0) throw new Error('当前版本仅支持正向杠杆产品，杠杆倍率必须大于 0');
   const next=Number(db.prepare("SELECT COALESCE(MAX(sort_order),-1)+1 n FROM tracker_pairs WHERE active=1").get().n)||0;
-  const r=db.prepare(`INSERT INTO tracker_pairs(etf,etf_market,underlying,underlying_market,fx_pair,leverage,label,active,created_at,sort_order,annual_cost_pct) VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
-    .run(String(row.etf),String(row.etf_market||'HK'),row.underlying||null,row.underlying_market||null,row.fx_pair||null,Number(row.leverage)||2,row.label||null,1,Date.now(),next,row.annual_cost_pct??null);
+  const identity=resolveTrackerPairIdentity({ ...row, leverage });
+  const product=identity.product;
+  const r=db.prepare(`INSERT INTO tracker_pairs(etf,etf_market,underlying,underlying_market,fx_pair,leverage,label,active,created_at,sort_order,annual_cost_pct,product_status,product_direction,tracking_index,issuer,rebalance_frequency,verification_source,verified_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(String(identity.etf),String(identity.etf_market||'HK'),identity.underlying||null,identity.underlying_market||null,identity.fx_pair||null,identity.leverage,identity.label||null,1,Date.now(),next,row.annual_cost_pct??null,
+      product.product_status,product.product_direction,product.tracking_index,product.issuer,product.rebalance_frequency,product.verification_source,product.verified_at);
   invalidateActiveEtfPairCache();
   return db.prepare("SELECT * FROM tracker_pairs WHERE id=?").get(Number(r.lastInsertRowid));
 }
@@ -354,14 +462,22 @@ function reorderTrackerPairs(ids=[]) {
 
 // ── premium 日表 / 阈值带 / NAV 审计 ────────────────────────────────────────
 
-function recordTrackerPremiumDaily(pairId,date,premium,navQuality,liquidityStatus,etfPrice=null,nav=null) {
+function recordTrackerPremiumDaily(pairId,date,premium,navQuality,liquidityStatus,etfPrice=null,nav=null,options={}) {
   if(!(Number(pairId)>0)||!/^\d{4}-\d{2}-\d{2}$/.test(String(date))||!Number.isFinite(Number(premium)))return;
   if(!['aligned','cross_market_exact'].includes(String(navQuality))||String(liquidityStatus)!=='normal')return;
-  db.prepare(`INSERT INTO tracker_premium_daily(pair_id,date,premium,nav_quality,liquidity_status,updated_at,etf_price,nav)
-    VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(pair_id,date) DO UPDATE SET premium=excluded.premium,
-    nav_quality=excluded.nav_quality,liquidity_status=excluded.liquidity_status,updated_at=excluded.updated_at,
-    etf_price=excluded.etf_price,nav=excluded.nav`)
-    .run(Number(pairId),String(date),Number(premium),String(navQuality),String(liquidityStatus),Date.now(),Number(etfPrice)||null,Number(nav)||null);
+  // A legacy intraday row for today may already exist when this schema ships:
+  // replace only that unfinalized row.  Once a formal close has been written,
+  // later refreshes must not overwrite it with a different quote.
+  if (options.finalize !== true) return { recorded:false, reason:'not_market_close' };
+  const now=Number(options.finalizedAt)||Date.now();
+  const info=db.prepare(`INSERT INTO tracker_premium_daily(pair_id,date,premium,nav_quality,liquidity_status,updated_at,etf_price,nav,captured_at,finalized_at,market_state)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(pair_id,date) DO UPDATE SET
+      premium=excluded.premium,nav_quality=excluded.nav_quality,liquidity_status=excluded.liquidity_status,
+      updated_at=excluded.updated_at,etf_price=excluded.etf_price,nav=excluded.nav,captured_at=excluded.captured_at,
+      finalized_at=excluded.finalized_at,market_state=excluded.market_state
+    WHERE tracker_premium_daily.finalized_at IS NULL`)
+    .run(Number(pairId),String(date),Number(premium),String(navQuality),String(liquidityStatus),now,Number(etfPrice)||null,Number(nav)||null,now,now,String(options.marketState||'official_close'));
+  return { recorded:info.changes===1, reason:info.changes===1?'finalized':'already_finalized' };
 }
 
 function percentile(sorted,p){
@@ -370,7 +486,7 @@ function percentile(sorted,p){
 }
 
 function getTrackerPremiumBands(pairId) {
-  const values=db.prepare("SELECT premium FROM tracker_premium_daily WHERE pair_id=? ORDER BY date DESC LIMIT 250").all(Number(pairId)).map(x=>Number(x.premium)).filter(Number.isFinite).sort((a,b)=>a-b);
+  const values=db.prepare("SELECT premium FROM tracker_premium_daily WHERE pair_id=? AND finalized_at IS NOT NULL ORDER BY date DESC LIMIT 250").all(Number(pairId)).map(x=>Number(x.premium)).filter(Number.isFinite).sort((a,b)=>a-b);
   const count=values.length,defaults={strong_buy:-6,buy:-3,reduce:4,sell:8};
   if(count<30)return {status:'insufficient',sample_count:count,thresholds:defaults};
   const stats={median:percentile(values,.5),p10:percentile(values,.1),p25:percentile(values,.25),p75:percentile(values,.75),p90:percentile(values,.9)};
@@ -390,7 +506,7 @@ function importTrackerFxRows(fxPair,rows=[],source='historical') {
 function getTrackerFxCoverage(){return db.prepare("SELECT fx_pair,COUNT(*) count,MIN(date) first_date,MAX(date) last_date,MAX(updated_at) updated_at FROM tracker_fx_daily GROUP BY fx_pair ORDER BY fx_pair").all();}
 
 function getTrackerNavAudit(pairId){
-  const rows=db.prepare("SELECT date,premium,etf_price,nav FROM tracker_premium_daily WHERE pair_id=? ORDER BY date DESC LIMIT 250").all(Number(pairId)).reverse();
+  const rows=db.prepare("SELECT date,premium,etf_price,nav FROM tracker_premium_daily WHERE pair_id=? AND finalized_at IS NOT NULL ORDER BY date DESC LIMIT 250").all(Number(pairId)).reverse();
   const abs=rows.map(x=>Math.abs(Number(x.premium))).filter(Number.isFinite);
   // 收敛率升级：符号一致且 |premium| 收缩 ≥ 50% 才算"有效修复"
   // 旧定义只比 |premium_{t+1}| < |premium_t|，未考虑方向和幅度
@@ -412,11 +528,54 @@ function getTrackerNavAudit(pairId){
     large_deviation_days:abs.filter(x=>x>=3).length,rows:rows.slice(-30)};
 }
 
+function recordTrackerIntradayHistory(rec, marketState='closed') {
+  if (!rec || !(Number(rec.id) > 0) || !(Number(rec.ts) > 0)) return false;
+  db.prepare(`INSERT OR REPLACE INTO tracker_intraday_history(pair_id,ts,etf_price,premium,nav,signal,signal_gate,nav_quality,underlying_price,market_state)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`)
+    .run(Number(rec.id),Number(rec.ts),rec.etf_price??null,rec.premium??null,rec.nav??null,rec.execution_action||rec.signal||null,
+      rec.signal_gate||null,rec.nav_quality||null,rec.underlying_price??null,String(marketState||'closed'));
+  return true;
+}
+
+function getTrackerIntradayHistory(pairId, since, limit=6000) {
+  const pid=Number(pairId), from=Number(since)||0, n=Math.min(20000,Math.max(1,Math.round(Number(limit)||6000)));
+  if (!(pid > 0)) return [];
+  return db.prepare(`SELECT ts,etf_price,premium,nav,signal,signal_gate,nav_quality,underlying_price,market_state
+    FROM tracker_intraday_history WHERE pair_id=? AND ts>=? ORDER BY ts ASC LIMIT ?`).all(pid,from,n);
+}
+
+function pruneTrackerIntradayHistory(retentionDays=14) {
+  const cutoff=Date.now()-Math.max(1,Number(retentionDays)||14)*86400000;
+  return db.prepare('DELETE FROM tracker_intraday_history WHERE ts<?').run(cutoff).changes;
+}
+
+function importLegacyTrackerHistory(history={}) {
+  const key='tracker_history_json_migrated_v2';
+  if (db.prepare('SELECT 1 FROM app_meta WHERE key=?').get(key)) return { imported:0, already:true };
+  const insert=db.prepare(`INSERT OR IGNORE INTO tracker_intraday_history(pair_id,ts,etf_price,premium,nav,signal,signal_gate,nav_quality,underlying_price,market_state)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`);
+  let imported=0;
+  db.transaction(source=>{
+    for (const [rawId, rows] of Object.entries(source || {})) {
+      const pairId=Number(rawId); if (!(pairId>0) || !Array.isArray(rows)) continue;
+      for (const row of rows) {
+        if (!(Number(row?.ts)>0)) continue;
+        imported += insert.run(pairId,Number(row.ts),row.etf_price??null,row.premium??null,row.nav??null,row.signal??null,row.signal_gate??null,row.nav_quality??null,row.underlying_price??null,'legacy_import').changes;
+      }
+    }
+  })(history);
+  db.prepare('INSERT INTO app_meta(key,value,updated_at) VALUES(?,?,?)').run(key,String(imported),Date.now());
+  return { imported, already:false };
+}
+
 export {
   // pair CRUD
   getTrackerPairs,
   addTrackerPair,
   updateTrackerPairCost,
+  autoVerifyTrackerProducts,
+  getProductEntryStatus,
+  normalizeTrackerProduct,
   deleteTrackerPair,
   reorderTrackerPairs,
   importTrackerPairs,
@@ -437,6 +596,10 @@ export {
   getTrackerDailyContext,
   recordTrackerPremiumDaily,
   getTrackerPremiumBands,
+  recordTrackerIntradayHistory,
+  getTrackerIntradayHistory,
+  pruneTrackerIntradayHistory,
+  importLegacyTrackerHistory,
   importTrackerFxRows,
   getTrackerFxCoverage,
   getTrackerNavAudit,

@@ -6,6 +6,8 @@ let stockHeavySymbol = null, stockHeavyAt = 0, stockChartKey = '', stockScenario
 let stockDetailRequestId = 0, stockScenarioResearchRequestId = 0, stockOptionController = null, stockShortController = null;
 let stockChartRequestId = 0, stockChartController = null;
 const stockChartCache = new Map();
+const stockSignalTransitionCache = new Map();
+let stockSignalTransitionRequestId = 0;
 let stockTradeHistoryRequestId = 0;
 let stockNewsLlmRequestId = 0;
 let optionScanAt = 0, shortRefreshAt = 0, shortRefreshInFlight = false;
@@ -394,6 +396,34 @@ function scenarioSampleSummaryHtml(research){
     : '已冻结 '+observations+' 条 · 已结算 '+mature+' 条 · 待结算 '+pending+' 条';
   return '<div class="scenario-sample scenario-sample-'+tone+'"><span class="scenario-sample-k">线上实验样本</span><span class="scenario-sample-v">'+esc(counts)+'</span><span class="scenario-sample-note" title="'+esc(research.method||'')+'">只作审计，不构成概率或交易指令</span></div>';
 }
+
+function renderSignalTransitionHtml(transition){
+  if(!transition) return '<span class="dc-change-title">读取状态变化…</span>';
+  const tone=planToneKey(transition.tone || 'neutral');
+  return '<span class="dc-change-title tone-' + tone + '">' + esc(transition.title || '状态待确认') + '</span>'
+    + '<span class="dc-change-detail">' + esc(transition.detail || '') + '</span>'
+    + '<span class="dc-change-review">下次复查：' + esc(transition.nextReview || '下一个交易日日线收盘后') + '</span>';
+}
+function renderSignalTransition(symbol, transition){
+  if(symbol!==selectedSym)return;
+  const el=$('d_signal_change');
+  if(el)el.innerHTML=renderSignalTransitionHtml(transition);
+}
+function loadSignalTransition(symbol){
+  const requestId=++stockSignalTransitionRequestId;
+  fetch('/stock/signal-transition?symbol='+encodeURIComponent(symbol),{cache:'no-store'})
+    .then(response=>response.ok?response.json():null)
+    .then(payload=>{
+      if(!payload||selectedSym!==symbol||requestId!==stockSignalTransitionRequestId)return;
+      stockSignalTransitionCache.set(symbol,payload.transition||null);
+      renderSignalTransition(symbol,payload.transition||null);
+    }).catch(()=>{
+      if(selectedSym===symbol&&requestId===stockSignalTransitionRequestId){
+        const el=$('d_signal_change');
+        if(el)el.textContent='状态变化暂不可用。';
+      }
+    });
+}
 // === 决策卡：摘要 + 状态 + 关键理由（动作徽章已在标题栏，此处不重复） ===
 function renderDecisionCard(ai, plan, eff, sw, mkt, sessionRisk, research=null){
   const el = $('d_decision'); if(!el) return;
@@ -420,6 +450,24 @@ function renderDecisionCard(ai, plan, eff, sw, mkt, sessionRisk, research=null){
     if(readiness.reason) h += '<span class="dc-readiness-note">' + esc(readiness.reason) + '</span>';
     h += '</div>';
   }
+
+  // 独立盘中观察账本：只展示实时 RSI6 均值回归候选/确认，绝不替代正式执行状态。
+  const mr = ai.meanReversion;
+  if(mr && (mr.status === 'candidate' || mr.status === 'confirmed')){
+    const confirmed = mr.status === 'confirmed';
+    const rsi6 = Number.isFinite(Number(mr.rsi6)) ? Number(mr.rsi6).toFixed(1) : '—';
+    const rsi12 = Number.isFinite(Number(mr.rsi12)) ? Number(mr.rsi12).toFixed(1) : '—';
+    const pctB = Number.isFinite(Number(mr.bollPctB)) ? Number(mr.bollPctB).toFixed(2) : '—';
+    h += '<div class="dc-mean-reversion ' + (confirmed ? 'confirmed' : 'candidate') + '">';
+    h += '<div class="dc-mean-reversion-head"><span class="dc-mean-reversion-title">短线反转观察</span><span class="dc-mean-reversion-badge">' + (confirmed ? '条件确认' : '等待确认') + '</span></div>';
+    h += '<div class="dc-mean-reversion-body">' + esc(mr.reason || '') + '</div>';
+    h += '<div class="dc-mean-reversion-metrics">RSI6 ' + rsi6 + ' · RSI12 ' + rsi12 + ' · 布林%B ' + pctB + '</div>';
+    h += '<div class="dc-mean-reversion-note">影子研究：不改变上方执行状态、建议股数或正式信号样本。</div>';
+    h += '</div>';
+  }
+
+  const transition=stockSignalTransitionCache.get(ai.symbol || selectedSym);
+  h += '<div class="dc-change" id="d_signal_change">' + renderSignalTransitionHtml(transition) + '</div>';
 
   // 信号可信度与数据状态条：引擎版本 + 漂移状态 + 报价来源时间 + 分析日期
   h += '<div class="dc-meta-row">';
@@ -464,8 +512,7 @@ function renderDecisionCard(ai, plan, eff, sw, mkt, sessionRisk, research=null){
   // 评分因子（紧凑版，进度条，不含 reason）
   // v2.0: 方向门因子(technical)标注"门"字，质量乘数因子显示权重
   if(sw && Array.isArray(sw.scoreFactors) && sw.scoreFactors.length > 0){
-    h += '<div class="dc-score-factors">';
-    h += '<div class="dc-score-title">评分因子</div>';
+    h += '<details class="dc-score-factors"><summary>研究排序依据（不构成执行指令）</summary><div class="dc-score-list">';
     for(const f of sw.scoreFactors){
       const pct = Math.round(f.score * 100); // 进度条宽度仍用百分比
       const isGate = f.isDirectionGate === true;
@@ -479,7 +526,7 @@ function renderDecisionCard(ai, plan, eff, sw, mkt, sessionRisk, research=null){
       h += '<span class="dc-score-weight">' + (isGate ? '方向门' : 'w' + wPct + '%') + '</span>';
       h += '</div>';
     }
-    h += '</div>';
+    h += '</div></details>';
   }
 
   // 执行摘要只保留仓位和有效期；确认、失效及目标价格统一由情景研究卡呈现。
@@ -541,7 +588,7 @@ function renderDecisionCard(ai, plan, eff, sw, mkt, sessionRisk, research=null){
   // === 情景解释区（原 scenario-card 合并入决策卡） ===
   const scenario = buildScenarioPresentation(ai, sw);
   h += '<div class="dc-scenario">';
-  h += '<span class="dc-scenario-kicker">实验室 · V0</span>';
+  h += '<span class="dc-scenario-kicker">当前计划 · 实验室 V0</span>';
   if(scenario.status !== 'insufficient' && scenario.primary.length > 0){
     h += '<div class="dc-scenario-summary">' + esc(scenario.summary) + '</div>';
     h += '<div class="scenario-levels">';
@@ -2223,6 +2270,7 @@ async function loadDetail(s,opts={}){
     if(heavy)preserveStockScroll(()=>renderDecisionBasis(ai, plan, sw));
     // === 层 4：历史验证（折叠区，异步fetch） ===
     if(newSymbol)loadDecisionSnapshot(s);
+    if(heavy)loadSignalTransition(s);
     // === 层 5：K 线图 ===
     const p = pos[s];
     if(heavy)loadStockCharts(s, ai, p, mkt, newSymbol);

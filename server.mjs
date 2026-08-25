@@ -21,7 +21,7 @@ function execAsync(cmd, opts = {}) {
   });
 }
 import { stockHandler, initStockEngine, getWatchlist, getLatestAnalysis, getStockPositions, getStockSignalAudit, getAlertAudit, recordRuntimeMetric, getRuntimeMetrics, getSystemSetting, setSystemSetting, transitionsOnly, createDatabaseBackup, getBackupStatus, verifyDatabaseBackup, restoreDatabaseBackup, getMarketStateFor, getHistoricalAnalysisForDate, getEarningsPolicy, SIGNAL_ENGINE_VERSION } from './stock_engine.mjs';
-import { getTrackerPositions, upsertTrackerPosition, addTrackerPositionLot, voidTrackerPositionLot, getTrackerPositionLots, recordTrackerSignalAudit, getTrackerSignalAudit, recordTrackerFxDaily, getTrackerDailyContext, recordTrackerPremiumDaily, getTrackerPremiumBands, importTrackerFxRows, getTrackerFxCoverage, getTrackerNavAudit, getPremiumDistribution, importTrackerPairs, migrateLegacyTrackerPairs, getTrackerPairs, addTrackerPair, updateTrackerPairCost, deleteTrackerPair, reorderTrackerPairs } from './tracker_engine.mjs';
+import { getTrackerPositions, upsertTrackerPosition, addTrackerPositionLot, voidTrackerPositionLot, getTrackerPositionLots, recordTrackerSignalAudit, getTrackerSignalAudit, recordTrackerFxDaily, getTrackerDailyContext, recordTrackerPremiumDaily, getTrackerPremiumBands, recordTrackerIntradayHistory, getTrackerIntradayHistory, pruneTrackerIntradayHistory, importLegacyTrackerHistory, importTrackerFxRows, getTrackerFxCoverage, getTrackerNavAudit, getPremiumDistribution, importTrackerPairs, migrateLegacyTrackerPairs, getTrackerPairs, addTrackerPair, updateTrackerPairCost, autoVerifyTrackerProducts, getProductEntryStatus, deleteTrackerPair, reorderTrackerPairs } from './tracker_engine.mjs';
 import { getPersonalTrades, getPersonalReview, getPersonalCalibration, getPersonalOverview, rebuildPersonalData, minimumEconomicShares, setKrwPerUsd } from './personal_calibration.mjs';
 import { fetchQuote, fetchFxPair } from './quote.mjs'; // 共享行情层：与 /stock 看板共用进程内缓存，避免同标的重复抓取
 import { advanceAlertState } from './alert_logic.mjs';
@@ -206,7 +206,7 @@ const DEFAULT_CONTROL_SETTINGS = {
   modules:{
     stock:{enabled:true,tiers:['PROBE','ADD','TRIM','EXIT']},
     etf:{enabled:true,tiers:['PROBE','ADD','TRIM','EXIT']},
-    // 机会雷达 v2 通知档位：risk=风险待核验, confirmed=高置信度机会确认, new=今日新进入
+    // 机会雷达通知档位：risk=风险待核验, confirmed=多通道优先研究, new=新变化待验证。
     radar_v2:{enabled:false,tiers:['risk','confirmed','new']},
   },
 };
@@ -540,28 +540,16 @@ const TRK_HISTORY_FILE = path.join(APP_DIR, 'tracker_history.json');
 const TRK_TTL = 15000;
 
 let trackerPairs = [];
-let trackerHistory = {};       // id -> [{ts, etf_price, premium}]
 const trkCache = new Map();    // id -> 最新 record
-let trackerHistoryDirty = false;
-let trackerHistorySavedAt = 0;
-const TRACKER_HISTORY_FLUSH_MS = 30_000;
 
 function loadTrackerStore() {
   try { const a = JSON.parse(fs.readFileSync(TRK_PAIRS_FILE, 'utf8')); migrateLegacyTrackerPairs(Array.isArray(a)?a:[]); } catch { migrateLegacyTrackerPairs([]); }
+  autoVerifyTrackerProducts();
   trackerPairs = getTrackerPairs();
-  try { const h = JSON.parse(fs.readFileSync(TRK_HISTORY_FILE, 'utf8')); if (h && typeof h === 'object') trackerHistory = h; } catch {}
-  trackerHistoryDirty = false;
-  trackerHistorySavedAt = Date.now();
-}
-function saveTrackerHistory(force = false) {
-  if (!trackerHistoryDirty && !force) return false;
-  if (!force && Date.now() - trackerHistorySavedAt < TRACKER_HISTORY_FLUSH_MS) return false;
-  try {
-    fs.writeFileSync(TRK_HISTORY_FILE, JSON.stringify(trackerHistory));
-    trackerHistoryDirty = false;
-    trackerHistorySavedAt = Date.now();
-    return true;
-  } catch { return false; }
+  // One-time import keeps existing visual history, then SQLite becomes the sole
+  // writer. The JSON file is deliberately left untouched as a recoverable source.
+  try { importLegacyTrackerHistory(JSON.parse(fs.readFileSync(TRK_HISTORY_FILE, 'utf8'))); } catch { importLegacyTrackerHistory({}); }
+  pruneTrackerIntradayHistory(14);
 }
 
 async function curlText(url, opts = {}) {
@@ -879,6 +867,8 @@ function checkRiskOverrides(pair, ctx, state) {
 // 主编排函数（替代原 290 行 computePair）
 async function computePair(pair) {
   const id = pair.id;
+  const etfMarketStatus = getMarketStateFor(String(pair.etf_market || 'HK').toUpperCase());
+  const productEntry = getProductEntryStatus(pair);
   // 1. 并行抓取数据
   const { etf, und, fx } = await fetchPairData(pair);
   const fxDate = String(und?.providerTime||etf?.providerTime||'').replace(/\D/g,'').slice(0,8).replace(/^(\d{4})(\d{2})(\d{2})$/,'$1-$2-$3');
@@ -922,12 +912,10 @@ async function computePair(pair) {
     etfProviderTime: etf?.providerTime, underlyingProviderTime: und?.providerTime, underlyingAnalysis, navQuality, liquidityStatus, premiumBands,
     navRepairRate, navAuditSamples, volDecayPctAnn, underlyingVolDaily,
     optionSentiment, shortSentiment, daysToEarnings, postEarningsDays,
-    earningsGateVerified: earnings?.event_gate_verified === true, earningsPolicy });
+    earningsGateVerified: earnings?.event_gate_verified === true, earningsPolicy,
+    productEntryEligible: productEntry.eligible, productEntryReason: productEntry.reason });
   // 6. 信号冷却
   const signalCooldown = checkSignalCooldown(id, sig.signal);
-  // 持久化每日溢价快照
-  const premiumDate = String(etf?.providerTime||'').replace(/\D/g,'').slice(0,8).replace(/^(\d{4})(\d{2})(\d{2})$/,'$1-$2-$3');
-  recordTrackerPremiumDaily(id, premiumDate, premium, navQuality, liquidityStatus, etfPrice, nav);
   // 个人校准
   const personalCalibration = getPersonalCalibration(pair.etf);
   const personalMinimumShares = personalCalibration && etfPrice > 0
@@ -969,6 +957,8 @@ async function computePair(pair) {
     executionAction = hasPosition ? 'TRIM' : 'AVOID';
   else if (effectiveSignal === 'HOLD' && ['date_mismatch','nav_approximate','low_liquidity','extreme_move'].includes(sig.gate))
     executionAction = 'WATCH';
+  else if (effectiveSignal === 'HOLD' && ['product_unverified','premium_history_insufficient'].includes(sig.gate))
+    executionAction = 'WATCH';
   // 关键数据可用性检查
   const criticalDataReasons = [];
   if (etfPrice == null) criticalDataReasons.push('ETF 报价缺失');
@@ -995,13 +985,32 @@ async function computePair(pair) {
     executionAction = 'WATCH';
     effectiveReason = `信号冷却：${signalCooldown.minutesAgo} 分钟前刚出现反向信号 ${signalCooldown.lastSignal}，冷却 ${signalCooldown.cooldownMinutes} 分钟内禁止翻转`;
   }
+  // A calculated state can be useful after close, but it is not executable.
+  // Keep risk exits visible as pending, while every entry-type action becomes WATCH
+  // until the ETF market reopens and a fresh quote is available.
+  const researchAction = executionAction;
+  const marketOpen = etfMarketStatus.open === true;
+  let marketExecutionStatus = marketOpen ? 'open' : 'market_closed';
+  if (!marketOpen && DashboardActions.isEntry(executionAction)) {
+    executionAction = 'WATCH';
+    effectiveReason = `${effectiveReason}；ETF ${etfMarketStatus.label || '未在正常交易时段'}，该结论仅供研究，等待开盘后重新确认`;
+    marketExecutionStatus = 'market_closed';
+  } else if (!marketOpen && ['TRIM','EXIT'].includes(executionAction)) {
+    exitPending = true;
+    marketExecutionStatus = 'risk_pending_market_open';
+    effectiveReason = `${effectiveReason}；ETF ${etfMarketStatus.label || '未在正常交易时段'}，风险动作待开盘后执行`;
+  }
   // 组装返回
   const signalAvailable = criticalDataReasons.length === 0;
-  const executionLabel = signalAvailable ? DashboardActions.label(executionAction) : (exitPending ? '风险退出待确认' : '数据不足');
+  const executionLabel = !signalAvailable ? (exitPending ? '风险退出待确认' : '数据不足')
+    : (!marketOpen && exitPending ? '风险动作待开盘' : DashboardActions.label(executionAction));
   return {
     id, etf: pair.etf, etf_market: pair.etf_market,
     underlying: pair.underlying || null, underlying_market: pair.underlying_market || null,
     fx_pair: pair.fx_pair || null, leverage: Number(pair.leverage) || 2, annual_cost_pct: pair.annual_cost_pct ?? null, label: pair.label || null, active: 1, sort_order: Number(pair.sort_order) || 0,
+    product_status: pair.product_status || 'provisional', product_direction: pair.product_direction || 'long', tracking_index: pair.tracking_index || null,
+    issuer: pair.issuer || null, rebalance_frequency: pair.rebalance_frequency || 'daily', verification_source: pair.verification_source || null, verified_at: pair.verified_at || null,
+    product_entry_eligible: productEntry.eligible, product_entry_reason: productEntry.reason,
     ts: Date.now(),
     etf_price: etfPrice, etf_name: etf ? etf.name : (pair.label || pair.etf),
     underlying_price: undPrice, underlying_name: und ? und.name : null,
@@ -1013,7 +1022,8 @@ async function computePair(pair) {
     nav: nav != null ? +nav.toFixed(4) : null,
     premium: premium != null ? +premium.toFixed(4) : null,
     signal: effectiveSignal, original_signal: originalSignal, strength: sig.strength, reason: effectiveReason,
-    execution_action: executionAction, execution_label: executionLabel,
+    research_action: researchAction, execution_action: executionAction, execution_label: executionLabel, market_execution_status: marketExecutionStatus,
+    etf_market_state: etfMarketStatus.state, etf_market_session: etfMarketStatus.session, etf_market_label: etfMarketStatus.label,
     signal_available: signalAvailable, exit_pending: exitPending, data_gate: { status: signalAvailable?'pass':(exitPending?'exit_pending':'blocked'), reasons: criticalDataReasons },
     signal_version: 'tracker-execution-layer-v4', signal_gate: sig.gate, nav_quality: sig.navQuality, nav_method: navMethod,
     nav_sessions: navSessions, nav_anchor_date: navAnchorDate, underlying_stale: underlyingStale,
@@ -1105,8 +1115,17 @@ async function refreshTracker() {
         else {rec.execution_action='WATCH';rec.execution_label='数据不足';rec.exit_pending=false;rec.data_gate={status:'blocked',reasons:[error]};}
       }
       trkCache.set(pair.id, rec);
-      const etfMarketState = getMarketStateFor(String(pair.etf_market || 'HK').toUpperCase()).state;
+      const etfMarket = getMarketStateFor(String(pair.etf_market || 'HK').toUpperCase());
+      const etfMarketState = etfMarket.state;
       recordTrackerSignalAudit(rec, etfMarketState);
+      // Formal daily samples are frozen once the ETF's own regular session has
+      // closed.  Pre-open/lunch/post-market or stale intraday observations never
+      // enter threshold calibration or next-day NAV repair statistics.
+      const premiumDate = String(rec.etf_provider_time || '').replace(/\D/g, '').slice(0, 8).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1-$2-$3');
+      if (etfMarket.session === 'closed') {
+        recordTrackerPremiumDaily(pair.id, premiumDate, rec.premium, rec.nav_quality, rec.liquidity_status, rec.etf_price, rec.nav,
+          { finalize:true, finalizedAt:rec.ts, marketState:etfMarket.session });
+      }
       // 信号提醒（Webhook 推送）：ETF 进入目标档位则推送
       const etfMarketOpen = etfMarketState === 'open';
       maybeAlert('etf', 'etf:' + pair.id,
@@ -1116,16 +1135,13 @@ async function refreshTracker() {
         (etfMarketOpen&&!rec.quote_stale&&rec.signal_available!==false)
           || (rec.exit_pending && ['TRIM','EXIT'].includes(rec.execution_action)),
         { pair_id:pair.id, channel:getAlertSettings().feishu?'webhook':'server', market_state:etfMarketOpen?'open':'closed' });
-      const hist = trackerHistory[pair.id] || (trackerHistory[pair.id] = []);
-      hist.push({ ts: rec.ts, etf_price: rec.etf_price, premium: rec.premium, nav: rec.nav, signal: rec.execution_action, signal_gate: rec.signal_gate, nav_quality: rec.nav_quality, underlying_price: rec.underlying_price });
-      if (hist.length > 5000) hist.splice(0, hist.length - 5000);
-      trackerHistoryDirty = true;
+      recordTrackerIntradayHistory(rec, etfMarket.session);
       // computePair includes synchronous technical work; do not starve dashboard
       // HTTP requests when a provider makes one pair unusually slow.
       await yieldTrackerRefresh();
     }
     etfAlertPrimed.v = true; // 首轮刷新完成后，后续信号变化才推送
-    saveTrackerHistory();
+    pruneTrackerIntradayHistory(14);
   } finally {
     trackerRefreshing = false;
     const elapsed = Date.now() - refreshStartedAt;
@@ -1231,7 +1247,9 @@ const server = http.createServer(async (req, res) => {
   else if (p === '/data-health-ui.js') file = path.join(APP_DIR, 'data-health-ui.js');
   else if (p === '/notification-center.js') file = path.join(APP_DIR, 'notification-center.js');
   else if (p === '/radar-v2.js') file = path.join(APP_DIR, 'radar-v2.js');
-  else if (p === '/radar-v2-loadguard.mjs') file = path.join(APP_DIR, 'radar-v2-loadguard.mjs');
+  // Radar V2 的浏览器辅助模块统一以 radar-v2-*.mjs 命名；用受限模式提供，
+  // 避免新增 import 后漏登记白名单，导致整个 ES 模块图因 404 而无法启动。
+  else if (/^\/radar-v2-[a-z0-9-]+\.mjs$/i.test(p)) file = path.join(APP_DIR, p.slice(1));
   else if (p === '/control.js') file = path.join(APP_DIR, 'control.js');
   else if (p === '/stock.js') file = path.join(APP_DIR, 'stock.js');
   else if (p === '/scenario-research.js') file = path.join(APP_DIR, 'scenario-research.js');
@@ -1707,7 +1725,11 @@ const server = http.createServer(async (req, res) => {
     const symbol = (u.searchParams.get('symbol') || '').toUpperCase();
     const forceRefresh = u.searchParams.get('forceRefresh') === '1';
     const { status, body } = await handleCompanyProfilePost({ market, symbol, forceRefresh, generateFn: generateCompanyProfile });
-    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
+    const headers = { 'Content-Type': 'application/json; charset=utf-8' };
+    if (body?.retryable && Number(body?.retry_after_seconds) > 0) {
+      headers['Retry-After'] = String(Math.floor(Number(body.retry_after_seconds)));
+    }
+    res.writeHead(status, headers);
     return res.end(JSON.stringify(body));
   }
 
@@ -2207,9 +2229,9 @@ const server = http.createServer(async (req, res) => {
   }
   if (p === '/tracker/history') {
     const pid = parseInt(u.searchParams.get('pair') || '0', 10);
-    const minutes = parseInt(u.searchParams.get('minutes') || '240', 10);
+    const minutes = Math.min(14 * 24 * 60, Math.max(5, parseInt(u.searchParams.get('minutes') || '240', 10)));
     const since = Date.now() - minutes * 60000;
-    const out = (trackerHistory[pid] || []).filter(h => h.ts >= since);
+    const out = getTrackerIntradayHistory(pid, since);
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(out));
   }
@@ -2238,12 +2260,13 @@ const server = http.createServer(async (req, res) => {
       }
       const etf = String(b.etf || '').trim();
       if (!etf) { res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: 'etf required' })); }
+      if (!(Number(b.leverage) > 0)) { res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: '当前版本仅支持杠杆倍率大于 0 的正向产品' })); }
       const pair = addTrackerPair({
         etf, etf_market: String(b.etf_market || 'HK').trim(),
         underlying: b.underlying ? String(b.underlying).trim() : null,
         underlying_market: b.underlying_market ? String(b.underlying_market).trim() : null,
         fx_pair: b.fx_pair ? String(b.fx_pair).trim() : null,
-        leverage: Number(b.leverage) || 2,
+        leverage: Number(b.leverage),
         label: b.label ? String(b.label).trim() : null,
         active: 1, annual_cost_pct:b.annual_cost_pct==null?null:Math.max(0,Number(b.annual_cost_pct)||0),
       });
@@ -2255,8 +2278,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'DELETE') {
       const pid = parseInt(u.searchParams.get('id') || '0', 10);
       deleteTrackerPair(pid); trackerPairs = getTrackerPairs();
-      delete trackerHistory[pid]; trkCache.delete(pid); trackerHistoryDirty = true;
-      saveTrackerHistory(true);
+      trkCache.delete(pid);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify({ ok: true }));
     }
@@ -2564,8 +2586,8 @@ server.listen(FRONT_PORT, FRONT_HOST, () => {
   }
   refreshTracker();
   setTimeout(()=>backfillKnownTrackerFx().catch(e=>console.log('[tracker-fx] '+e.message)),3000);
-  // Automatic full-database backups are intentionally disabled. Use the manual
-  // backup route only after choosing suitable storage and retention.
+  // 已按部署环境的容量策略停用全量数据库自动备份；手动备份接口仍保留，避免
+  // 64GB 的系统盘被多个 10GB 级 SQLite 副本耗尽。
   // 分时动态刷新：tracker 标的（港股/韩股/美股 ETF + 正股）任一开盘 → 高频 5s；全休市 → 低频 60s
   let _trkTimer = null;
   function scheduleTracker() {
@@ -2592,7 +2614,6 @@ server.listen(FRONT_PORT, FRONT_HOST, () => {
 function flushAll() {
   try { saveQuotesHistory(); } catch {}
   try { saveOptionsCache(); } catch {}
-  try { saveTrackerHistory(true); } catch {}
   // A3 saveAlertLog 已删除（空函数），alertLog 由 recordAlertAudit 持久化到 alert_audit 表
   try { saveAlertSettings(); } catch {}
   try { saveAlertState(); } catch {}

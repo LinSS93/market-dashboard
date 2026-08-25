@@ -43,6 +43,16 @@ function directionText(action) {
 // ctx 包含所有输入 + 派生变量（base/ret/etfRet/navQuality/volDecayAnn 等）
 const BUY_GATES = [
   {
+    name: 'product_unverified',
+    test: (c) => c.input.productEntryEligible === false,
+    reason: (c) => `${c.base.reason}，但${c.input.productEntryReason || '产品定义尚未核验'}，仅保留研究观察，不生成新开仓动作`,
+  },
+  {
+    name: 'premium_history_insufficient',
+    test: (c) => !!c.input.premiumBands && c.input.premiumBands.status !== 'active',
+    reason: (c) => `${c.base.reason}，但收盘封口样本尚不足 60 个交易日，固定阈值仅供研究，不生成新开仓动作`,
+  },
+  {
     name: 'nav_approximate',
     test: (c) => !c.navEntrySafe && c.navQuality === 'cross_market_approx',
     reason: (c) => `${c.base.reason}，但 NAV 质量为 ${c.navQuality}，只可用于估值参考，不允许触发买入`,
@@ -212,6 +222,7 @@ export function evaluateTrackerSignal(input={}) {
   const volDecayAnn = Number(input.volDecayPctAnn);
   const earningsPolicy = normalizeEarningsPolicy(input.earningsPolicy, DEFAULT_EARNINGS_POLICY);
   const earningsGateVerified = input.earningsGateVerified === true;
+  const productEntryEligible = input.productEntryEligible !== false;
 
   // 动态阈值调整：σ_daily 基准 2%，[0.7, 2.0] clamp；σ > 5% 触发 sigmaExtreme
   const sigmaDaily = Number(input.underlyingVolDaily);
@@ -240,7 +251,7 @@ export function evaluateTrackerSignal(input={}) {
     sigmaDaily, volAdj, sigmaExtreme, extremeThreshold, underlyingKillThreshold,
     drawdownKillThreshold, etfKillThreshold, extreme, underlyingKill, etfKill,
     drawdownKill, drawdownKillIsTrim, navEntrySafe, liquidityStatus, lowLiquidity,
-    earningsPolicy, earningsGateVerified,
+    earningsPolicy, earningsGateVerified, productEntryEligible,
   };
 
   // tier 1：kill switch（最高优先级）
@@ -274,7 +285,9 @@ export function evaluateTrackerSignal(input={}) {
   ({ signal, gate, reason } = post);
 
   // 执行层 / 风险层结论
-  const executionConclusion = navQuality === 'cross_market_approx' ? '跨市场 NAV 为近似值，仅供限价参考'
+  const executionConclusion = !productEntryEligible ? (input.productEntryReason || '产品定义待核验，仅用于研究观察')
+    : (input.premiumBands && input.premiumBands.status !== 'active') ? '收盘样本积累中，溢价阈值仅供研究观察'
+    : navQuality === 'cross_market_approx' ? '跨市场 NAV 为近似值，仅供限价参考'
     : !navEntrySafe ? 'NAV 尚未可靠对齐，等待后再交易'
     : lowLiquidity ? '流动性偏低，使用限价并警惕陈旧成交价'
     : (base.signal === 'STRONG_BUY' || base.signal === 'BUY') ? 'ETF 折价，仅在正股买点确认后执行'
@@ -310,6 +323,7 @@ export function evaluateTrackerSignal(input={}) {
     liquidityStatus,
     earningsPolicy,
     earningsGateVerified,
+    productEntryEligible,
     volDecayPctAnn: Number.isFinite(volDecayAnn) ? +volDecayAnn.toFixed(2) : null,
     layers: { direction: directionText(action), risk: riskConclusion, execution: executionConclusion },
   };
