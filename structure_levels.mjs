@@ -12,7 +12,7 @@
 //   - 输出格式统一：{ price, type, label, strength, date }
 //     type: 'resistance'|'support'|'gap_up'|'gap_down'|'poc'|'vah'|'val'
 //     strength: 1-3（触次数或成交量权重）
-//   - 仅展示用，不参与信号引擎决策（computeSwingZones 保持原样）
+//   - 仅展示用，不参与 setup-aware price plan 或信号仲裁
 
 // ── 第一级：pivot 高低点检测 ──────────────────────────────────────────────
 // 经典 pivot point：某根 K 线的 high/low 是左 N 根和右 N 根中的极值。

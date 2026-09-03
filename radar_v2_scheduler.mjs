@@ -15,10 +15,11 @@
 // 只 import Radar V2 运行时，保持边界干净。
 
 import { getAllAdapters, isAfterClose } from './radar_v2_market.mjs';
-import { runScan } from './radar_v2_scanner.mjs';
+import { runScan, reconcileStaleScanJobs } from './radar_v2_scanner.mjs';
 import { getMarketStatus } from './market_calendar.mjs';
-import { getRadarV2Db, getScanJobsNeedingAction, getCompletedScanJob, getLatestScanJob } from './radar_v2_schema.mjs';
+import { getRadarV2Db, getCompletedScanJob, getLatestScanJob } from './radar_v2_schema.mjs';
 import { getRateLimiterState } from './radar_v2_rate_limiter.mjs';
+import { autoAuditProvisionalAssets } from './radar_v2_query_api.mjs';
 
 const CHECK_INTERVAL_MS = 15 * 60 * 1000;    // 检查间隔：15 分钟
 const INTRADAY_INTERVAL_MS = 45 * 60 * 1000; // 盘中扫描间隔：45 分钟
@@ -35,6 +36,43 @@ const MAX_CONCURRENT_MARKETS = 1;
 
 // P1: round-robin 市场轮转起点。每次 check 从不同市场开始，避免 US 总是优先导致 HK/CN 饿死。
 let _roundRobinStart = 0;
+
+// 审计修正（P1 资产审计自动化）：上次自动资产审计时间，节流到每小时一次。
+// 任务幂等（守卫式 upsert）。
+// 部署实测修正（Q07）：资产审计不依赖扫描调度开关（RADAR_V2_SCANNER_ENABLED
+// 默认关闭，挂在 scheduleRadarV2 里会导致审计永不执行）——由
+// startAutoAssetAuditLoop 独立挂载，server 启动即生效。
+// 首轮延迟 120 秒（启动窗口已有物化表重建等负载，立即叠加首轮审计会阻塞
+// /health 导致部署 smoke 误报 FAIL）。autoAudit 内部分批让出事件循环。
+const AUTO_ASSET_AUDIT_INTERVAL_MS = 60 * 60 * 1000;
+const AUTO_ASSET_AUDIT_START_DELAY_MS = 120 * 1000;
+let _lastAutoAuditAt = 0;
+
+function runAutoAssetAuditIfDue(label) {
+  const now = Date.now();
+  if (now - _lastAutoAuditAt < AUTO_ASSET_AUDIT_INTERVAL_MS) return;
+  _lastAutoAuditAt = now;
+  // fire-and-forget：审计分批执行（批间 setImmediate），不阻塞调度循环
+  void Promise.resolve(autoAuditProvisionalAssets()).then((result) => {
+    if (result.ok && result.data && (result.data.promoted > 0 || result.data.demoted > 0)) {
+      console.log(`[radar_v2] ${label}自动资产审计：待分类 ${result.data.candidates}，升级普通股 ${result.data.promoted}，降级非普通股 ${result.data.demoted}`);
+    }
+  }).catch((e) => {
+    console.error('[radar_v2] 自动资产审计失败:', e?.message || e);
+  });
+}
+
+/**
+ * 独立挂载自动资产审计循环（不依赖扫描调度开关）。
+ * server 启动时无条件调用：首轮 120s 延迟 + 每小时周期。
+ */
+export function startAutoAssetAuditLoop() {
+  setTimeout(() => {
+    _lastAutoAuditAt = 0;
+    runAutoAssetAuditIfDue('首轮');
+  }, AUTO_ASSET_AUDIT_START_DELAY_MS);
+  setInterval(() => runAutoAssetAuditIfDue('周期'), AUTO_ASSET_AUDIT_INTERVAL_MS);
+}
 
 // === 进程内状态 ===
 // 当前正在扫描的市场数（用于全局并发控制）
@@ -190,7 +228,20 @@ function check(onRunComplete) {
   const now = Date.now();
   const adapters = getAllAdapters();
 
+  // 0. 审计修正：回收跨日僵尸 running job（幂等）。
+  //    旧调度只恢复当前交易日的 job，历史 running 永远无人处理。
+  try {
+    const rec = reconcileStaleScanJobs();
+    if (rec.ok && rec.reconciled > 0) {
+      console.log(`[radar_v2] 回收跨日 running job ${rec.reconciled} 个:`, JSON.stringify(rec.byMarket));
+    }
+  } catch (e) {
+    console.error('[radar_v2] reconcileStaleScanJobs 失败:', e?.message || e);
+  }
+
   // 1. 盘中 intraday_light 触发（45 分钟间隔）
+  //    审计修正：scanner 内部已是"活跃研究对象单轮快照"（不建 scan_jobs，
+  //    一轮完成即终结 run），不再产生跨日 running 残留
   for (const adapter of adapters) {
     if (_activeMarketCount >= MAX_CONCURRENT_MARKETS) break;
 
@@ -368,6 +419,15 @@ export async function processDailyQueueForTest(onRunComplete) {
  */
 export function scheduleRadarV2({ onRunComplete = null } = {}) {
   const boundCheck = () => check(onRunComplete);
+  // 审计修正：启动即刻回收跨日僵尸 running job（不等首次 check）
+  try {
+    const rec = reconcileStaleScanJobs();
+    if (rec.ok && rec.reconciled > 0) {
+      console.log(`[radar_v2] 启动回收跨日 running job ${rec.reconciled} 个:`, JSON.stringify(rec.byMarket));
+    }
+  } catch (e) {
+    console.error('[radar_v2] 启动 reconcileStaleScanJobs 失败:', e?.message || e);
+  }
   _timer = setInterval(boundCheck, CHECK_INTERVAL_MS);
   setTimeout(boundCheck, FIRST_CHECK_DELAY_MS);
   return { check: boundCheck, stop: stopRadarV2 };

@@ -166,7 +166,7 @@ const seed = db.transaction(() => {
       (run_id, market, symbol, name, score, tier, direction, metrics_json, evidence_json,
        scoring_version, scoring_profile_name, scoring_weights_json, created_at)
     VALUES (?, ?, ?, ?, ?, 'high', 'positive', ?, ?, ?, 'default',
-            '{"technical":0.50,"liquidity":0.25,"reliability":0.25}', ?)
+            '{"technical":0.60,"liquidity":0.40}', ?)
   `);
   const dossier = db.prepare(`
     INSERT INTO radar_v2_dossiers
@@ -203,7 +203,7 @@ const seed = db.transaction(() => {
   for (const item of DEMO_SYMBOLS) {
     member.run(DEMO_UNIVERSES[item.market], item.market, item.symbol, item.name, JSON.stringify({ demo: true }), now);
     const runId = Number(run.run(item.market, now, now, JSON.stringify({ demo: true, source: 'fictional' })).lastInsertRowid);
-    const metrics = { technical: Math.min(95, item.score + 5), liquidity: 76, reliability: 90, note: 'fictional demo data' };
+    const metrics = { technical: Math.min(95, item.score + 5), liquidity: 76, note: 'fictional demo data' };
     const candidateId = Number(candidate.run(
       runId, item.market, item.symbol, item.name, item.score, JSON.stringify(metrics),
       JSON.stringify([{ type: 'demo', content: 'Fictional data for public screenshots only.' }]),

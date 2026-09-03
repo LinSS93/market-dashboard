@@ -1166,6 +1166,36 @@ body.radar-v2-workspace { background:var(--ws-canvas); color:var(--ws-ink); font
   font-weight: 500;
 }
 
+/* 评分待更新：最近一次完整日扫未刷新该标的评分，已退出高置信排序 */
+.radar-v2-workspace .stale-score-tag {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-red);
+  background: var(--ws-red-soft);
+  padding: 1px 6px;
+  border-radius: var(--ws-radius-sm);
+  font-weight: 500;
+}
+
+/* 困境反转正向证据：负面事件与正向证据并存 */
+.radar-v2-workspace .reversal-tag {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-green);
+  background: var(--ws-green-soft);
+  padding: 1px 6px;
+  border-radius: var(--ws-radius-sm);
+  font-weight: 500;
+}
+
+/* 基本面未覆盖（软门槛提示）：高置信组中无基本面档案 */
+.radar-v2-workspace .fundamental-uncovered-tag {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-blue);
+  background: var(--ws-blue-soft);
+  padding: 1px 6px;
+  border-radius: var(--ws-radius-sm);
+  font-weight: 500;
+}
+
 /* 资产审计快捷操作栏（阶段 C：provisional 标的的人工审计入口） */
 .radar-v2-workspace .asset-audit-bar {
   display: flex;
@@ -1278,6 +1308,12 @@ body.radar-v2-workspace { background:var(--ws-canvas); color:var(--ws-ink); font
 .radar-v2-workspace .summary-meta-muted {
   color: var(--ws-muted-soft);
   font-style: italic;
+}
+
+/* 评分待更新（首屏第一层）：最近完整日扫未刷新该标的评分 */
+.radar-v2-workspace .summary-stale {
+  color: var(--ws-red);
+  font-weight: 500;
 }
 
 /* 四问区域 */

@@ -7,8 +7,12 @@
 //   分数截断: risk_review 始终可见 + 有评分标的 composite≥60 进池
 //   P0-5: asset_audit 表优先于名称正则
 //   P0-6: radar_universes 由 V2 schema 自建
-//   P1:   评分查询用 ROW_NUMBER() OVER；primary_driver 按 bucket 选取；
-//         risk_review 置顶 + 有评分按 composite DESC 排序
+//   P1:   评分查询用 ROW_NUMBER() OVER；admission_driver 按 bucket 选取
+//         （真正驱动准入的信号，latest_context 另附非驱动 dossier）；
+//         risk_review 置顶 + cross_confirm 优先 + new_signal 市场轮转
+//   审计修正: queue_as_of 来自最后完整日扫 job（含扫描状态/覆盖率）；
+//         评分未随最近完整日扫刷新 → score_stale，退出高置信排序；
+//         search 服务端搜索覆盖整个候选池
 //
 // 运行：node scripts/radar_v2-queue-api-test.mjs
 
@@ -21,6 +25,8 @@ import {
   restoreSymbol,
   listDismissedSymbols,
   setAssetAudit,
+  getDossiersBySymbol,
+  autoAuditProvisionalAssets,
 } from '../radar_v2_query_api.mjs';
 import { SCORING_PROFILE_VERSION } from '../radar_v2_scoring.mjs';
 
@@ -44,8 +50,9 @@ const TODAY_MS = NOW;
 const OLD_MS = 0; // 远古时间（确保触发老化退出）
 
 const TEST_PROFILE_NAME = 'default';
+// 审计修正 2026.09.02：2 因子契约（可靠度改硬门槛），与 schema default profile 种子一致
 const TEST_WEIGHTS_JSON =
-  '{"technical":0.50,"liquidity":0.25,"reliability":0.25}';
+  '{"technical":0.60,"liquidity":0.40}';
 
 // --- Universe：US + HK 混合（P0-1 市场过滤测试） ---
 db.exec(`
@@ -83,8 +90,12 @@ db.exec(`
     (1, 'US', 'NS9',     'New Signal Nine',       'equity', 1, '{}', ${NOW}),
     (1, 'US', 'NS10',    'New Signal Ten',        'equity', 1, '{}', ${NOW}),
     (1, 'US', 'AUDBOTH', 'Audited Both Channels', 'equity', 1, '{}', ${NOW}),
+    (1, 'US', 'DRIVX',   'Driver Context Corp',   'equity', 1, '{}', ${NOW}),
     (2, 'HK', 'HKCROSS', 'HK Cross Confirm',      'equity', 1, '{}', ${NOW}),
-    (2, 'HK', 'HKNEWSIG','HK New Signal',         'equity', 1, '{}', ${NOW});
+    (2, 'HK', 'HKNEWSIG','HK New Signal',         'equity', 1, '{}', ${NOW}),
+    (2, 'HK', 'HKNS1',   'HK New Signal One',     'equity', 1, '{}', ${NOW}),
+    (2, 'HK', 'HKNS2',   'HK New Signal Two',     'equity', 1, '{}', ${NOW}),
+    (2, 'HK', 'HKNS3',   'HK New Signal Three',   'equity', 1, '{}', ${NOW});
 `);
 
 // --- 插入 dossier 的辅助函数 ---
@@ -199,12 +210,19 @@ for (let i = 1; i <= 10; i++) {
 }
 
 // AUDBOTH：多通道 + 有评分，但无 asset_audit 记录 → provisional
-//   P1 修复：provisional 不再阻断分桶，有评分时按分数竞争 cross_confirm/new_signal，
-//   "资产待审计"提示由 eligibility.common_equity_provisional 独立渲染，不依赖 bucket。
+//   审计修正：provisional 不进 cross_confirm（未确认资产类别不参与高置信排序），
+//   留在 new_signal；"资产待审计"提示由 eligibility.common_equity_provisional 渲染。
 insertDossier('US', 'AUDBOTH', 'event', 'official_disclosure', 'positive',
   'earnings_announcement: Both channels beat', TODAY_MS);
 insertDossier('US', 'AUDBOTH', 'trend', 'trend_breakout', 'positive',
   'trend_breakout: Both MA20 breakout', TODAY_MS);
+
+// DRIVX：正向趋势（较早）+ 最新 neutral 事件 → 验证 admission_driver 选取真正
+// 驱动入池的正向信号，而 latest_context 单列最新的 neutral 事件。
+insertDossier('US', 'DRIVX', 'trend', 'trend_breakout', 'positive',
+  'trend_breakout: MA20 breakout', TODAY_MS - 3600000);
+insertDossier('US', 'DRIVX', 'event', 'official_disclosure', 'neutral',
+  'ROUTINE_DISCLOSURE: Board meeting notice', TODAY_MS);
 
 // --- HK dossiers（P0-1：市场过滤测试） ---
 insertDossier('HK', 'HKCROSS', 'event', 'official_disclosure', 'positive',
@@ -213,6 +231,12 @@ insertDossier('HK', 'HKCROSS', 'trend', 'trend_breakout', 'positive',
   'trend_breakout: HK MA20 breakout', TODAY_MS);
 insertDossier('HK', 'HKNEWSIG', 'event', 'official_disclosure', 'positive',
   'product_launch: HK new product', TODAY_MS);
+
+// HKNS1-3：HK 单通道有评分新信号（分数高于 US NS 系列，用于验证市场轮转配额）
+for (let i = 1; i <= 3; i++) {
+  insertDossier('HK', 'HKNS' + i, 'event', 'official_disclosure', 'positive',
+    'product_launch: HK NS product ' + i, TODAY_MS);
+}
 
 // --- 评分数据（CROSS + NS1-NS10） ---
 const scoreRunId = db.prepare(`
@@ -249,6 +273,8 @@ insertScore('US', 'REVIEWX', 80);
 
 // AUDBOTH：有评分（78）+ 多通道，provisional → P1 后按分数进 cross_confirm
 insertScore('US', 'AUDBOTH', 78);
+// DRIVX：有评分（80）+ 单正向趋势 → new_signal
+insertScore('US', 'DRIVX', 80);
 
 // HKCROSS：有评分（75）+ 多通道 → cross_confirm（验证 HK 市场也进入候选池）
 const hkScoreRunId = db.prepare(`
@@ -262,6 +288,11 @@ db.prepare(`
   ) VALUES (?, 'HK', 'HKCROSS', 75, 'high', 'positive', '{"technical":80}', '[]',
     ?, ?, ?, ?)
 `).run(hkScoreRunId, SCORING_PROFILE_VERSION, TEST_PROFILE_NAME, TEST_WEIGHTS_JSON, NOW);
+
+// HKNS1-3：HK 有评分单通道（89/90/91 + bonus → 封顶 100，高于全部 US new_signal）
+for (let i = 1; i <= 3; i++) {
+  insertScore('HK', 'HKNS' + i, 88 + i);
+}
 
 // --- P0-5: asset_audit 标记 AUDET 为 etf ---
 setAssetAudit('US', 'AUDET', 'etf', { source: 'manual', note: 'test: audited as ETF' });
@@ -281,6 +312,7 @@ setAssetAudit('US', 'NEUTRALX', 'common_stock', { source: 'manual', note: 'test:
 setAssetAudit('US', 'NEUTRALONLY', 'common_stock', { source: 'manual', note: 'test: NEUTRALONLY common stock' });
 setAssetAudit('US', 'NEGRES', 'common_stock', { source: 'manual', note: 'test: NEGRES common stock' });
 setAssetAudit('US', 'REVIEWX', 'common_stock', { source: 'manual', note: 'test: REVIEWX common stock' });
+setAssetAudit('US', 'DRIVX', 'common_stock', { source: 'manual', note: 'test: DRIVX common stock' });
 
 // ============================================================
 // 执行测试
@@ -294,7 +326,14 @@ assert(result.data != null, 'data 非空');
 assert(result.data.items != null, 'items 数组存在');
 assert(result.data.buckets != null, 'buckets 对象存在');
 assert(result.data.queue_as_of != null, 'queue_as_of 返回');
-assert(result.data.queue_as_of.US != null, 'queue_as_of.US 是有效日期: ' + result.data.queue_as_of.US);
+// 审计修正：queue_as_of 是结构化对象（应到交易日/最后完整扫描日/扫描状态/覆盖率）
+assert(result.data.queue_as_of.US != null, 'queue_as_of.US 存在');
+assert(typeof result.data.queue_as_of.US.expected_date === 'string',
+  'queue_as_of.US.expected_date 是日期字符串（应到交易日）');
+assert(result.data.queue_as_of.US.last_complete_date === null,
+  'queue_as_of.US.last_complete_date=null（fixture 无完整日扫 job，不虚构扫描日）');
+assert(result.data.queue_as_of.US.scan_status === 'none',
+  'queue_as_of.US.scan_status=none（应到交易日无扫描 job）');
 
 const items = result.data.items;
 const symbols = items.map((i) => i.symbol);
@@ -376,14 +415,14 @@ if (neutralxItem) {
     'NEUTRALX 有效正向通道数=1');
 }
 
-// --- P1: 未审计资产有评分时按分数分桶，不再无脑进 audit_pending ---
-console.log('\n--- P1: 未审计资产有评分时按分数分桶 ---');
+// --- 审计修正：未审计资产（provisional）不进高置信 ---
+console.log('\n--- 审计修正：未审计资产（provisional）不进高置信 ---');
 assert(audbothItem != null, 'AUDBOTH item 存在');
 if (audbothItem) {
-  // P1 修复：provisional + 有评分(78) + 多通道(2) + composite>=70 → cross_confirm
-  // 旧逻辑会进 audit_pending，导致 cross_confirm 永远空转
-  assert(audbothItem.bucket === 'cross_confirm',
-    'AUDBOTH bucket=cross_confirm（P1：provisional 有评分按分数分桶，不再进 audit_pending），实际: ' + audbothItem.bucket);
+  // 审计修正：provisional + 有评分(78) + 多通道(2) + composite>=70 仍不进 cross_confirm
+  // ——未确认资产类别的对象不参与多通道高置信排序，降级 new_signal 待审计
+  assert(audbothItem.bucket === 'new_signal',
+    'AUDBOTH bucket=new_signal（审计修正：provisional 不进 cross_confirm 高置信），实际: ' + audbothItem.bucket);
   assert(audbothItem.eligibility.common_equity === false,
     'AUDBOTH eligibility.common_equity=false（provisional 标记保留）');
   assert(audbothItem.eligibility.common_equity_provisional === true,
@@ -403,12 +442,17 @@ assert(riskyItem != null, 'RISKY item 存在');
 if (riskyItem) {
   assert(riskyItem.bucket === 'risk_review',
     'RISKY bucket=risk_review（负面方向），实际: ' + riskyItem.bucket);
-  assert(riskyItem.primary_driver.direction === 'negative',
-    'RISKY primary_driver.direction=negative');
-  assert(riskyItem.primary_driver.channel === 'fundamental',
-    'RISKY primary_driver.channel=fundamental');
-  assert(riskyItem.primary_driver.change_type === 'fundamental_leverage_deterioration',
-    'RISKY primary_driver.change_type=fundamental_leverage_deterioration');
+  assert(riskyItem.admission_driver.direction === 'negative',
+    'RISKY admission_driver.direction=negative');
+  assert(riskyItem.admission_driver.channel === 'fundamental',
+    'RISKY admission_driver.channel=fundamental');
+  assert(riskyItem.admission_driver.change_type === 'fundamental_leverage_deterioration',
+    'RISKY admission_driver.change_type=fundamental_leverage_deterioration');
+  // 困境反转：负面入组原因 + 正向证据并存显式化
+  assert(riskyItem.reversal_evidence != null && riskyItem.reversal_evidence.direction === 'positive',
+    'RISKY reversal_evidence.direction=positive（负面+正向并存显式化）');
+  assert(riskyItem.reversal_evidence.channel === 'event',
+    'RISKY reversal_evidence.channel=event');
   assert(riskyItem.action === 'risk',
     'RISKY action=risk，实际: ' + riskyItem.action);
   assert(symbols.filter((symbol) => symbol === 'RISKY').length === 1,
@@ -417,12 +461,23 @@ if (riskyItem) {
 assert(new Set(symbols).size === symbols.length,
   '候选池 items 无重复 market/symbol（防止 risk_review 与高分路径重叠）');
 
-// --- primary_driver 不是例行披露 ---
-console.log('\n--- primary_driver 不是例行披露 ---');
+// --- admission_driver 不是例行披露，且是真正驱动准入的信号 ---
+console.log('\n--- admission_driver 语义（真正驱动准入，最新非驱动事实单列 latest_context） ---');
 for (const it of items) {
-  const factContent = it.primary_driver?.fact?.content || '';
+  const factContent = it.admission_driver?.fact?.content || '';
   assert(!factContent.startsWith('ROUTINE_DISCLOSURE:'),
-    it.symbol + ' primary_driver 不是 ROUTINE_DISCLOSURE: ' + factContent.slice(0, 40));
+    it.symbol + ' admission_driver 不是 ROUTINE_DISCLOSURE: ' + factContent.slice(0, 40));
+}
+// DRIVX：正向趋势（较早）驱动入池，最新 neutral 事件只作为 latest_context
+const drivxItem = items.find((i) => i.symbol === 'DRIVX');
+assert(drivxItem != null, 'DRIVX item 存在（有评分+正向趋势）');
+if (drivxItem) {
+  assert(drivxItem.bucket === 'new_signal', 'DRIVX bucket=new_signal');
+  assert(drivxItem.admission_driver.direction === 'positive' &&
+    drivxItem.admission_driver.channel === 'trend',
+    'DRIVX admission_driver=trend 正向（真正驱动入池），而非最新 neutral 事件');
+  assert(drivxItem.latest_context != null && drivxItem.latest_context.direction === 'neutral',
+    'DRIVX latest_context=neutral 例行披露（最近发生但非驱动）');
 }
 
 // --- P0-3: invalidated 退出条件 ---
@@ -440,8 +495,8 @@ assert(negresItem != null, 'NEGRES 保留当前正向事件证据');
 if (negresItem) {
   assert(negresItem.bucket === 'new_signal',
     'NEGRES 不因已 invalidated 的负面论点进入 risk_review，实际: ' + negresItem.bucket);
-  assert(negresItem.primary_driver.direction === 'positive',
-    'NEGRES primary_driver 来自仍有效的正向事件');
+  assert(negresItem.admission_driver.direction === 'positive',
+    'NEGRES admission_driver 来自仍有效的正向事件');
   assert(negresItem.coverage.channel_count === 1,
     'NEGRES 不把 invalidated 基本面论点计入通道数');
 }
@@ -470,10 +525,38 @@ assert(allMkt.data.items.some((i) => i.market === 'US'),
 assert(allMkt.data.items.some((i) => i.market === 'HK'),
   '不传 market 返回 HK 标的');
 
-// --- 分数截断：risk_review 置顶 + 高分标的按分数降序 ---
-console.log('\n--- 分数截断：risk_review 置顶 + 高分标的按分数降序 ---');
-// US 候选池：1 risk_review（RISKY）+ 2 cross_confirm（CROSS, AUDBOTH）+ 12 new_signal（NS1-NS10, NEUTRALX, NEGRES）= 15 条
-// limit=8 时：RISKY 置顶 + 按 composite_score DESC 取前 7 个高分标的
+// --- 审计修正：new_signal 配额按市场轮转，防止单一市场大池淹没其他市场 ---
+// HKNS1-3 composite 封顶 100，纯分数排序会占满全部 new_signal 名额；
+// 轮转后 US/HK 均应有代表。
+console.log('\n--- 审计修正：new_signal 配额市场轮转 ---');
+const mixedQuota = listResearchQueue({ limit: 8 });
+const mixedNewSignals = mixedQuota.data.items.filter((i) => i.bucket === 'new_signal');
+assert(mixedNewSignals.length > 0, 'limit=8 混合市场时 new_signal 有配额，实际: ' + mixedNewSignals.length);
+assert(mixedNewSignals.some((i) => i.market === 'US') && mixedNewSignals.some((i) => i.market === 'HK'),
+  'new_signal 配额市场轮转：US/HK 均有代表（HKNS 分数更高也不独占）');
+
+// --- 审计修正：服务端搜索覆盖整个候选池（不限于已返回的 limit 条） ---
+console.log('\n--- 审计修正：候选池服务端搜索 ---');
+const searchBeyondLimit = listResearchQueue({ market: 'US', limit: 3, search: 'NS9' });
+assert(searchBeyondLimit.ok && searchBeyondLimit.data.items.some((i) => i.symbol === 'NS9'),
+  '服务端搜索可命中 limit 截断之外的标的（NS9 不在前 3 名）');
+assert(searchBeyondLimit.data.items.every((i) =>
+  (i.symbol || '').toUpperCase().includes('NS9') ||
+  (i.name || '').toUpperCase().includes('NS9')),
+  '搜索结果只包含匹配 symbol/name 的标的');
+const searchByName = listResearchQueue({ market: 'US', limit: 30, search: 'New Signal Nine' });
+assert(searchByName.data.items.some((i) => i.symbol === 'NS9'),
+  '服务端搜索支持按名称匹配（New Signal Nine → NS9）');
+const searchNoMatch = listResearchQueue({ market: 'US', limit: 30, search: '不存在的标的XYZ' });
+assert(searchNoMatch.ok && searchNoMatch.data.items.length === 0,
+  '无匹配搜索返回空 items（total=0）');
+assert(searchNoMatch.data.total === 0, '无匹配搜索 total=0');
+
+// --- 分数截断：risk_review 置顶 + cross_confirm 优先 + new_signal 轮转 ---
+console.log('\n--- 分数截断：risk_review 置顶 + cross_confirm 优先 + new_signal 市场轮转 ---');
+// US 候选池：1 risk_review（RISKY）+ 1 cross_confirm（CROSS；AUDBOTH 为 provisional 不进高置信）
+//   + 14 new_signal（NS1-NS10, NEUTRALX, NEGRES, DRIVX, AUDBOTH）= 16 条
+// limit=8 时：RISKY 置顶 + cross_confirm（CROSS）优先占位 + 剩余 6 个给 new_signal
 const quotaResult = listResearchQueue({ market: 'US', limit: 8 });
 const quotaSymbols = quotaResult.data.items.map((i) => i.symbol);
 assert(quotaResult.data.items.length <= 8,
@@ -487,14 +570,20 @@ assert(quotaSymbols.includes('AUDBOTH'),
 // risk_review 置顶：第一条应为 risk_review bucket（RISKY 或 INVNEG 均可）
 assert(quotaResult.data.items[0].bucket === 'risk_review',
   '第一条为 risk_review（风险置顶），实际 bucket: ' + quotaResult.data.items[0].bucket + ' symbol: ' + quotaResult.data.items[0].symbol);
+// 审计修正：cross_confirm 优先于 new_signal（不再混排被高分单通道挤出首屏）
+const quotaBuckets = quotaResult.data.items.map((i) => i.bucket);
+const firstNewSignalIdx = quotaBuckets.indexOf('new_signal');
+const lastCrossIdx = quotaBuckets.lastIndexOf('cross_confirm');
+assert(firstNewSignalIdx === -1 || lastCrossIdx < firstNewSignalIdx,
+  'cross_confirm 全部位于 new_signal 之前（优先占位），first_new=' + firstNewSignalIdx + ' last_cross=' + lastCrossIdx);
 // 无评分标的不在候选池
 assert(quotaResult.data.buckets.unscored.total === 0,
   'buckets.unscored.total=0（无评分标的不进候选池）');
 assert(quotaResult.data.buckets.audit_pending.total === 0,
   'buckets.audit_pending.total=0（无评分标的不进候选池）');
-// new_signal 在候选池中（NS1-NS10 composite 71-80，全部 ≥60）
-assert(quotaResult.data.buckets.new_signal.total === 12,
-  'buckets.new_signal.total=12（NS1-NS10、NEUTRALX、NEGRES 均满足分数截断）');
+// new_signal 在候选池中（NS1-NS10 composite 71-80，全部 ≥60；AUDBOTH provisional 降级至此）
+assert(quotaResult.data.buckets.new_signal.total === 14,
+  'buckets.new_signal.total=14（NS1-NS10、NEUTRALX、NEGRES、DRIVX、AUDBOTH 均满足分数截断）');
 
 // --- buckets 结构（各 bucket 在候选池中的计数） ---
 console.log('\n--- buckets 结构（各 bucket 在候选池中的计数） ---');
@@ -591,6 +680,233 @@ for (const b of ['risk_review', 'cross_confirm', 'new_signal', 'audit_pending', 
     assert(bk.items === undefined, '空池 buckets.' + b + '.items 不存在（契约一致）');
   }
 }
+
+// --- 审计修正：评分时效（score_stale）与 queue_as_of 真实口径 ---
+// 插入一个"开始时间在未来"的完整日扫 job：所有 fixture 评分（created_at=NOW）
+// 均早于该扫描开始时间 → 全部标记 score_stale，退出 cross_confirm。
+console.log('\n--- 审计修正：评分时效（score_stale）+ queue_as_of 来自最后完整日扫 ---');
+const staleRunInfo = db.prepare(`
+  INSERT INTO radar_v2_runs (market, trigger, status, started_at, completed_at)
+  VALUES ('US', 'scheduled_daily', 'complete', ?, ?)
+`).run(NOW + 3600000, NOW + 3600000);
+db.prepare(`
+  INSERT INTO radar_v2_scan_jobs (
+    market, trigger, scan_mode, trade_date, status, total_symbols,
+    succeeded_count, run_id, created_at, updated_at
+  ) VALUES ('US', 'scheduled_daily', 'official', '2999-01-01', 'complete', 10, 10, ?, ?, ?)
+`).run(staleRunInfo.lastInsertRowid, NOW, NOW);
+
+const staleResult = listResearchQueue({ market: 'US', limit: 30 });
+const staleCross = staleResult.data.items.find((i) => i.symbol === 'CROSS');
+assert(staleCross != null, '评分过期后 CROSS 仍在候选池（分数准入不受影响）');
+if (staleCross) {
+  assert(staleCross.bucket === 'new_signal',
+    '评分过期后 CROSS 降级为 new_signal（不参与高置信排序），实际: ' + staleCross.bucket);
+  assert(staleCross.coverage.score_stale === true,
+    'CROSS coverage.score_stale=true（数据待更新标记）');
+}
+assert(staleResult.data.buckets.cross_confirm.total === 0,
+  'cross_confirm.total=0（全部评分未随最近完整日扫刷新）');
+const staleAsOf = staleResult.data.queue_as_of.US;
+assert(staleAsOf.last_complete_date === '2999-01-01',
+  'queue_as_of.US.last_complete_date 来自最后完整日扫 job（2999-01-01）');
+assert(staleAsOf.scan_status === 'none',
+  'queue_as_of.US.scan_status=none（应到交易日无 job）');
+assert(staleResult.data.items[0].bucket === 'risk_review',
+  '评分过期不影响 risk_review 置顶');
+
+// --- 审计修正：channel_latest 物化表（触发器维护）+ 详情 summary 瘦身 ---
+console.log('\n--- 审计修正：channel_latest 物化 + 详情 summary 瘦身 ---');
+
+// 1. 物化表持有每分区最新非 archived dossier（fixture 直插 SQL → INSERT 触发器路径）
+const matGet = db.prepare(
+  'SELECT dossier_id FROM radar_v2_channel_latest WHERE market = ? AND symbol = ? AND channel = ?'
+);
+const crossEventRow = db.prepare(
+  "SELECT id FROM radar_v2_dossiers WHERE market = 'US' AND symbol = 'CROSS' AND channel = 'event'"
+).get();
+let matRow = matGet.get('US', 'CROSS', 'event');
+assert(matRow != null && matRow.dossier_id === crossEventRow.id,
+  'channel_latest 持有 CROSS event 最新 dossier（INSERT 触发器）');
+
+// 2. 更晚的同通道 dossier 顶替物化行
+const newerCrossId = insertDossier('US', 'CROSS', 'event', 'official_disclosure', 'positive',
+  'earnings_announcement: Q3 beat', TODAY_MS + 1000);
+matRow = matGet.get('US', 'CROSS', 'event');
+assert(matRow.dossier_id === newerCrossId, 'INSERT 触发器：更晚 dossier 顶替物化行');
+
+// 3. 最新条 archived → 物化行回退到较早 active（UPDATE 触发器）
+db.prepare('UPDATE radar_v2_dossiers SET status = ? WHERE id = ?').run('archived', newerCrossId);
+matRow = matGet.get('US', 'CROSS', 'event');
+assert(matRow != null && matRow.dossier_id === crossEventRow.id,
+  'UPDATE 触发器：最新条 archived 后物化行回退到较早档案');
+// 候选池（物化路径）仍包含 CROSS 且 event 通道有效
+const afterMat = listResearchQueue({ market: 'US', limit: 30 });
+assert(afterMat.ok && afterMat.data.items.some((i) => i.symbol === 'CROSS'),
+  '物化路径下 CROSS 仍进入候选池（archived 回退后 event 通道有效）');
+
+// 4. 删除分区最后一个 dossier → 物化行移除（DELETE 触发器）
+db.prepare('DELETE FROM radar_v2_dossiers WHERE id = ?').run(newerCrossId);
+matRow = matGet.get('US', 'CROSS', 'event');
+assert(matRow != null && matRow.dossier_id === crossEventRow.id,
+  'DELETE 触发器：删除已归档条目不影响分区（幂等）');
+db.prepare('DELETE FROM radar_v2_dossiers WHERE id = ?').run(crossEventRow.id);
+matRow = matGet.get('US', 'CROSS', 'event');
+assert(matRow == null, 'DELETE 触发器：分区最后一个 dossier 删除后物化行移除');
+
+// 5. 详情 summary 瘦身：MANYOBS 1 个 dossier + 5 条 observation
+//    （candidates UNIQUE(run_id, market, symbol) → 每个 observation 独立 run）
+insertDossier('US', 'MANYOBS', 'event', 'official_disclosure', 'positive',
+  'product_launch: many obs', TODAY_MS);
+const manyobsDossierId = db.prepare(
+  "SELECT id FROM radar_v2_dossiers WHERE market = 'US' AND symbol = 'MANYOBS' AND channel = 'event'"
+).get().id;
+for (let i = 1; i <= 5; i++) {
+  const obsRunId = db.prepare(`
+    INSERT INTO radar_v2_runs (market, trigger, status, started_at, completed_at)
+    VALUES ('US', 'scheduled_daily', 'complete', ?, ?)
+  `).run(NOW + i, NOW + i).lastInsertRowid;
+  const cid = db.prepare(`
+    INSERT INTO radar_v2_candidates (
+      run_id, market, symbol, score, tier, direction, metrics_json, evidence_json,
+      scoring_version, scoring_profile_name, scoring_weights_json, created_at
+    ) VALUES (?, 'US', 'MANYOBS', ?, 'high', 'positive', '{"technical":80}', '[]',
+      ?, ?, ?, ?)
+  `).run(obsRunId, 70 + i, SCORING_PROFILE_VERSION, TEST_PROFILE_NAME, TEST_WEIGHTS_JSON, NOW + i).lastInsertRowid;
+  db.prepare(`INSERT INTO radar_v2_dossier_observations (dossier_id, candidate_id, observed_at, linked_at)
+    VALUES (?, ?, ?, ?)`).run(manyobsDossierId, cid, NOW + i, NOW + i);
+}
+
+const moSummary = getDossiersBySymbol('US', 'MANYOBS', { mode: 'summary' });
+assert(moSummary.ok, 'summary 模式返回 ok');
+assert(moSummary.data.mode === 'summary', 'summary 模式标记 mode=summary');
+const moGroup = moSummary.data.groups.find((g) => g.channel === 'event');
+assert(moGroup != null && moGroup.dossier_count === 1, 'summary 组内附 dossier_count 全量数');
+const moDossier = moGroup.dossiers[0];
+assert(moDossier.observations.length === 3,
+  'summary 每 dossier 最多 3 条 observation（5→3 保留最新）: ' + moDossier.observations.length);
+assert(moDossier.observations[moDossier.observations.length - 1].observed_at === NOW + 5,
+  'summary 保留的是最新 observation（observed_at=NOW+5）');
+assert(moDossier.evaluations.length === 0 && moDossier.source_refs.length === 0,
+  'summary 不带 evaluations/source_refs（下钻走 dossier-detail 懒加载）');
+
+const moFull = getDossiersBySymbol('US', 'MANYOBS');
+assert(moFull.data.mode === 'full', '默认 mode=full（程序化调用不变）');
+const moFullGroup = moFull.data.groups.find((g) => g.channel === 'event');
+assert(moFullGroup.dossiers[0].observations.length === 5, 'full 模式保留全部 5 条 observation');
+assert(moFullGroup.dossier_count === undefined, 'full 模式不带 dossier_count');
+
+// 6. 基本面软门槛标注：CROSS（event+trend，无 fundamental）→ uncovered；
+//    RISKY（fundamental 负向）→ negative
+console.log('\n--- 审计修正：fundamental_coverage 软门槛标注 ---');
+const fcResult = listResearchQueue({ market: 'US', limit: 30 });
+const fcCross = fcResult.data.items.find((i) => i.symbol === 'CROSS');
+assert(fcCross != null && fcCross.fundamental_coverage === 'uncovered',
+  'CROSS fundamental_coverage=uncovered（event+trend，无基本面档案）');
+const fcRisky = fcResult.data.items.find((i) => i.symbol === 'RISKY');
+assert(fcRisky != null && fcRisky.fundamental_coverage === 'negative',
+  'RISKY fundamental_coverage=negative（fundamental 负向档案）');
+
+// 7. 自动资产审计（审计修正 P1：证据路径 + 市场规则路径双通道自动分类）
+console.log('\n--- 审计修正：自动资产审计（证据 + 市场规则双通道） ---');
+// 清除 score_stale fixture（2999 未来 job），恢复评分新鲜度
+db.prepare("DELETE FROM radar_v2_scan_jobs WHERE trade_date = '2999-01-01'").run();
+
+// event_fact 插入辅助（V2 schema 已建表，含 link_status）
+function insertEventFact(market, symbol, source, opts = {}) {
+  db.prepare(`
+    INSERT INTO radar_v2_event_facts
+      (market, symbol, source, external_id, event_type, direction, confidence,
+       published_at, title, url, metadata_json, link_status, updated_at)
+    VALUES (?, ?, ?, ?, 'earnings_announcement', 'positive', 1.0, ?, ?, NULL, '{}', ?, ?)
+  `).run(market, symbol, source, `ef-${market}-${symbol}-${source}`,
+    NOW, `Test fact ${symbol} ${source}`, opts.link_status || 'accepted', NOW);
+}
+const auditRow = (market, symbol) =>
+  db.prepare('SELECT * FROM radar_v2_asset_audit WHERE market = ? AND symbol = ?').get(market, symbol);
+const insertMember = db.prepare(`INSERT INTO radar_universe_members
+  (universe_id, market, symbol, name, instrument_type, active, metadata_json, updated_at)
+  VALUES (?, ?, ?, ?, 'equity', 1, '{}', ?)`);
+
+// CN universe + 规则矩阵标的
+db.prepare(`INSERT INTO radar_universes (id, market, enabled) VALUES (3, 'CN', 1)`).run();
+insertMember.run(3, 'CN', '600900', '长江电力', NOW);   // A股主板代码段 → common
+insertMember.run(3, 'CN', '510300', '沪深300ETF', NOW);  // 基金代码段 → etf
+insertMember.run(3, 'CN', '830001', '北交所股份', NOW);  // 未知代码段 → 保持 provisional
+// HK 规则矩阵标的
+insertMember.run(2, 'HK', '00823', '领展房产基金', NOW);  // REIT 豁免 → common
+insertMember.run(2, 'HK', '07841', '汇德收购-Z', NOW);    // SPAC → other_non_common
+insertMember.run(2, 'HK', '29890', '中银一八购A', NOW);   // 轮证标记 → warrant
+// US 规则矩阵标的
+insertMember.run(1, 'US', 'MEDIAONLY', 'Media Only Corp', NOW);
+insertMember.run(1, 'US', 'TMFG', 'Motley Fool Global Opportunitie', NOW);   // 基金家族 → etf
+insertMember.run(1, 'US', 'WTFCN', 'Wintrust Financial Corp Series', NOW);  // Series → preferred
+insertMember.run(1, 'US', 'PHAT', 'Phathom Pharmaceuticals Inc', NOW);      // 无标记 → common
+// 证据路径标的
+insertEventFact('US', 'AUDBOTH', 'sec_edgar_rss');
+insertEventFact('US', 'AUDET', 'sec_edgar_rss');
+insertEventFact('US', 'ETFT5', 'sec_edgar_rss');
+insertEventFact('US', 'MEDIAONLY', 'stocktitan');
+
+const audit1 = await autoAuditProvisionalAssets();
+assert(audit1.ok, 'autoAuditProvisionalAssets 返回 ok=true' + (audit1.ok ? '' : ' error: ' + audit1.error));
+assert(audit1.data.promoted >= 1, '至少升级 1 个标的，实际: ' + audit1.data.promoted);
+assert(audit1.data.demoted >= 1, '至少降级 1 个标的，实际: ' + audit1.data.demoted);
+
+// 证据路径：官方披露 → common_stock（优先于名称规则）
+const audbothAudit = auditRow('US', 'AUDBOTH');
+assert(audbothAudit != null && audbothAudit.asset_category === 'common_stock',
+  'AUDBOTH 证据路径升级为 common_stock');
+assert(audbothAudit.source === 'auto_official_disclosure',
+  'AUDBOTH 审计 source=auto_official_disclosure（可审计来源）');
+
+// 人工审计永不被覆盖
+const audetAudit = auditRow('US', 'AUDET');
+assert(audetAudit != null && audetAudit.asset_category === 'etf' && audetAudit.source === 'manual',
+  'AUDET 人工审计 etf 不被自动任务覆盖');
+
+// CN 交易所代码段（确定性）
+assert(auditRow('CN', '600900')?.asset_category === 'common_stock',
+  'CN 600900（主板代码段）→ common_stock');
+assert(auditRow('CN', '510300')?.asset_category === 'etf',
+  'CN 510300（基金代码段）→ etf');
+assert(auditRow('CN', '830001')?.asset_category == null,
+  'CN 830001（北交所未知段）→ 保持 provisional（留给人工）');
+
+// HK 名称标记
+assert(auditRow('HK', '00823')?.asset_category === 'common_stock',
+  'HK 00823 领展房产基金（REIT 豁免）→ common_stock');
+assert(auditRow('HK', '07841')?.asset_category === 'other_non_common',
+  'HK 07841 汇德收购-Z（SPAC）→ other_non_common');
+assert(auditRow('HK', '29890')?.asset_category === 'warrant',
+  'HK 29890（轮证标记 购）→ warrant');
+
+// US 规则
+assert(auditRow('US', 'TMFG')?.asset_category === 'etf',
+  'US TMFG（Motley Fool 基金家族）→ etf');
+assert(auditRow('US', 'WTFCN')?.asset_category === 'preferred',
+  'US WTFCN（Series 优先股）→ preferred');
+assert(auditRow('US', 'PHAT')?.asset_category === 'common_stock',
+  'US PHAT（无基金/结构标记）→ common_stock');
+assert(auditRow('US', 'ETFT5')?.asset_category === 'etf',
+  'US ETFT5（SPDR ETF Trust）→ etf（有官方源事实也按名称规则降级）');
+assert(auditRow('US', 'MEDIAONLY')?.asset_category === 'common_stock',
+  'US MEDIAONLY（仅媒体源证据 + 无名称标记）→ 按名称规则升级 common_stock');
+
+// 升级后 AUDBOTH 重新具备高置信资格（评分已新鲜、多通道、非 provisional）
+const afterAudit = listResearchQueue({ market: 'US', limit: 30 });
+const audbothAfter = afterAudit.data.items.find((i) => i.symbol === 'AUDBOTH');
+assert(audbothAfter != null && audbothAfter.bucket === 'cross_confirm',
+  'AUDBOTH 自动审计后 bucket=cross_confirm（批次 6 限制解除），实际: ' + (audbothAfter && audbothAfter.bucket));
+// 降级标的移出候选池：ETFT5 有评分但已 etf → 不在队列
+assert(!afterAudit.data.items.some((i) => i.symbol === 'ETFT5'),
+  'ETFT5 降级 etf 后移出候选池');
+
+// 幂等：重复执行不再变更
+const audit2 = await autoAuditProvisionalAssets();
+assert(audit2.ok && audit2.data.promoted === 0 && audit2.data.demoted === 0,
+  '重复执行幂等（promoted=0/demoted=0），实际: ' +
+  (audit2.data && audit2.data.promoted) + '/' + (audit2.data && audit2.data.demoted));
 
 // ============================================================
 // 清理

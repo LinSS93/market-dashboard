@@ -1,5 +1,6 @@
 import { OUTCOME_CONTRACT_VERSION, calculateForwardOutcomes, resolveNextSessionExecution } from '../outcome_contract.mjs';
 import { buildCrossSectionalIcAudit } from '../signal_validation.mjs';
+import { scoreVolumePriceCorrelation, resolveReplayStatus } from '../stock_engine.mjs';
 
 function assert(condition, message) {
   if (!condition) throw new Error(`algorithm-contract-check: ${message}`);
@@ -26,5 +27,17 @@ for (let day = 0; day < 6; day += 1) {
 }
 const audit = buildCrossSectionalIcAudit(rows, { minGroupSize: 8, minGroups: 4, purgeDays: 5 });
 assert(audit.status === 'supportive' && audit.stability.status === 'stable_positive' && audit.purgedGroups === 6, 'cross-sectional IC audit must preserve date groups and require stable purged folds');
+
+const distribution = scoreVolumePriceCorrelation(-0.59, -26.1);
+assert(distribution.vote < 0 && distribution.text.includes('抛压'), 'negative correlation with falling prices must be bearish distribution, not a bullish reversal bonus');
+const weakRally = scoreVolumePriceCorrelation(-0.45, 8);
+assert(weakRally.vote < 0 && weakRally.text.includes('上涨缩量'), 'negative correlation in a rising trend must remain an unconfirmed-volume warning');
+const accumulation = scoreVolumePriceCorrelation(0.55, 12);
+assert(accumulation.vote > 0 && accumulation.text.includes('放量上涨'), 'positive correlation with positive momentum remains bullish volume confirmation');
+
+assert(resolveReplayStatus(20, { status:'complete', engineVersion:'old' }, 'current') === 'ready', 'current-engine replay rows make replay ready regardless of old status metadata');
+assert(resolveReplayStatus(0, { status:'complete', engineVersion:'old' }, 'current') === 'stale', 'old-engine replay metadata must never report a new empty engine as ready');
+assert(resolveReplayStatus(0, { status:'complete', engineVersion:'current' }, 'current') === 'empty', 'a completed matching-engine replay with no rows is explicitly empty');
+assert(resolveReplayStatus(0, null, 'current') === 'not_built', 'missing replay metadata is not built');
 
 console.log('algorithm contract checks passed');

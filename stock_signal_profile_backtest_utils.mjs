@@ -3,11 +3,15 @@
 
 export function profileStateSignature(profile) {
   if (!profile?.available) return 'unavailable';
+  // Responsive is deliberately an early view; its internal trend-streak bit is
+  // not a user-visible state and must not create a second pseudo-transition.
+  const isResponsive = profile.role === 'observe' || profile.profileId === 'responsive';
+  const confirmationBit = isResponsive ? 0 : profile.confirmed === true ? 1 : 0;
   return [
     Number(profile.direction) || 0,
     String(profile.signal || 'NEUTRAL'),
     String(profile.status || 'UNKNOWN'),
-    profile.confirmed === true ? 1 : 0,
+    confirmationBit,
   ].join('|');
 }
 
@@ -41,7 +45,7 @@ export function selectNonOverlappingProfileEvents(events = []) {
   let skippedOverlap = 0;
   const lastExitByKey = new Map();
   for (const event of sorted) {
-    const key = [event.symbol, event.market, event.profileId, event.profileVersion, event.horizon].join('|');
+    const key = [event.symbol, event.market, event.profileId, event.profileVersion, event.strategyVersion || 'technical', event.horizon].join('|');
     const lastExitDate = lastExitByKey.get(key);
     if (lastExitDate && String(event.entryDate) <= lastExitDate) {
       skippedOverlap += 1;

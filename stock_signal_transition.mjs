@@ -26,8 +26,12 @@ function normalizedReadiness(value) {
   return status || 'waiting';
 }
 
-function normalizedState(value) {
-  return String(value || 'WATCH').toUpperCase() || 'WATCH';
+function normalizedStage(value) {
+  return String(value || 'DATA_UNAVAILABLE').toUpperCase() || 'DATA_UNAVAILABLE';
+}
+
+function normalizedAction(value) {
+  return String(value || 'NONE').toUpperCase() || 'NONE';
 }
 
 function isReadySetup(snapshot) {
@@ -36,7 +40,8 @@ function isReadySetup(snapshot) {
 }
 
 function isRiskState(snapshot) {
-  return ['risk_off', 'defer', 'validation_blocked', 'unavailable'].includes(snapshot?.readiness)
+  return snapshot?.opportunityStage === 'RISK_OFF'
+    || ['risk_off', 'defer'].includes(snapshot?.readiness)
     || ['risk_off', 'extended'].includes(snapshot?.setupKey);
 }
 
@@ -48,13 +53,12 @@ export function snapshotFromAnalysis(analysis = {}) {
   return {
     asOfDate: analysis?.asOfDate || swing?.validFrom || null,
     daily: analysis?.daily === true,
-    finalState: normalizedState(swing?.state || plan?.action),
+    opportunityStage: normalizedStage(swing?.opportunityStage),
+    executionAction: normalizedAction(swing?.executionAction),
     setupKey: normalizedSetupKey(readiness?.setupKey || setup?.key),
     setupLabel: readiness?.setupLabel || setup?.label || SETUP_META[normalizedSetupKey(readiness?.setupKey || setup?.key)].label,
     readiness: normalizedReadiness(readiness?.status),
     readinessLabel: readiness?.label || null,
-    researchBias: swing?.researchSignal?.key || null,
-    researchLabel: swing?.researchSignal?.label || null,
   };
 }
 
@@ -65,16 +69,20 @@ export function snapshotFromStoredPayload(row = {}) {
   const swing = payload?.swingDecision || {};
   const readiness = swing?.executionReadiness || {};
   const setup = plan?.setup || {};
+  const legacyAction = String(row?.action || swing?.state || '').toUpperCase();
+  const legacyStage = ['PROBE','ADD'].includes(legacyAction) ? 'READY'
+    : ['TRIM','EXIT','AVOID'].includes(legacyAction) ? 'RISK_OFF' : 'NO_SETUP';
+  const mappedAction = legacyAction === 'PROBE' ? 'OPEN' : legacyAction === 'TRIM' ? 'REDUCE'
+    : legacyAction === 'EXIT' ? 'CLOSE' : ['ADD','HOLD'].includes(legacyAction) ? legacyAction : 'NONE';
   return {
     asOfDate: row?.date || null,
     daily: true,
-    finalState: normalizedState(row?.action || swing?.state || plan?.action),
+    opportunityStage: normalizedStage(row?.opportunity_stage || swing?.opportunityStage || legacyStage),
+    executionAction: normalizedAction(row?.execution_action || swing?.executionAction || mappedAction),
     setupKey: normalizedSetupKey(readiness?.setupKey || setup?.key),
     setupLabel: readiness?.setupLabel || setup?.label || SETUP_META[normalizedSetupKey(readiness?.setupKey || setup?.key)].label,
     readiness: normalizedReadiness(readiness?.status),
     readinessLabel: readiness?.label || null,
-    researchBias: swing?.researchSignal?.key || null,
-    researchLabel: swing?.researchSignal?.label || null,
   };
 }
 
@@ -99,6 +107,14 @@ export function describeSignalTransition({ current, previous = null } = {}) {
   }
 
   const before = previous;
+  if (now.opportunityStage === 'DATA_UNAVAILABLE') {
+    return {
+      kind: 'data_unavailable', tone: 'neutral', changed: before.opportunityStage !== 'DATA_UNAVAILABLE',
+      title: '正式数据暂不可用',
+      detail: '这表示当前无法形成同口径判断，不代表技术风险上升，也不会生成交易动作。',
+      nextReview,
+    };
+  }
   if (!isReadySetup(before) && isReadySetup(now)) {
     return {
       kind: 'setup_appeared', tone: 'bull', changed: true,
@@ -139,7 +155,7 @@ export function describeSignalTransition({ current, previous = null } = {}) {
       nextReview,
     };
   }
-  if (before.finalState !== now.finalState || before.readiness !== now.readiness) {
+  if (before.opportunityStage !== now.opportunityStage || before.executionAction !== now.executionAction || before.readiness !== now.readiness) {
     return {
       kind: 'execution_changed', tone: 'watch', changed: true,
       title: '执行状态更新',

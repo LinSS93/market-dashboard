@@ -14,16 +14,40 @@ import { httpGet, fetchQuote } from "./quote.mjs";
 import { getMarketStatus, lastCompletedTradingDate } from "./market_calendar.mjs";
 import { getMarketProfile, marketKlineParams, benchmarkFor as adapterBenchmarkFor } from "./market_adapter.mjs";
 import { getNextEarnings, summarizeEarningsProximity } from "./earnings_calendar.mjs";
-import { DEFAULT_EARNINGS_POLICY } from "./earnings_policy.mjs";
+import { DEFAULT_EARNINGS_POLICY, isEligibleEarningsEvent } from "./earnings_policy.mjs";
 import { estimateTradeFee } from "./personal_calibration.mjs";
 import { evaluateExtendedSessionRisk } from "./extended_session_risk.mjs";
 import { getGroupNewsRisk, normalizeGroupKey, groupLabel } from "./grouping.mjs";
 import { convertAccountSizeFromCny, getMarketCurrency, getFxStatus } from "./fx_rate.mjs";
-import { computeCompositeScore, scoreToState, scoreToResearchBias, SCORING_ENGINE_VERSION } from "./signal_scoring.mjs";
+import { computeCompositeScore, summarizeResearchRankingFactors, SCORING_ENGINE_VERSION } from "./signal_scoring.mjs";
+import {
+  arbitrateStockDecision,
+  buildStockDecisionExplanation,
+  STOCK_OPPORTUNITY_STAGE_META,
+  STOCK_EXECUTION_ACTION_META,
+} from "./stock_decision_arbiter.mjs";
 import { describeSignalTransition, snapshotFromAnalysis, snapshotFromStoredPayload } from "./stock_signal_transition.mjs";
+import { buildSignalCloseFollowup } from "./stock_signal_followup.mjs";
 import { OUTCOME_CONTRACT_VERSION, calculateForwardOutcomes } from "./outcome_contract.mjs";
 import { computeStructureLevels } from "./structure_levels.mjs";
-import { computeSignalProfileBundle, FORMAL_SIGNAL_PROFILE_ID, STOCK_SIGNAL_PROFILE_SCHEMA_VERSION, getSignalProfile, getSignalProfileCatalog } from "./stock_signal_profiles.mjs";
+import {
+  computeSignalProfileBundle,
+  buildSignalProfileChartStudies,
+  balancedRsiBandsForRegime,
+  FORMAL_SIGNAL_PROFILE_ID,
+  PROFILE_VOTE_WEIGHTS,
+  STOCK_SIGNAL_PROFILE_SCHEMA_VERSION,
+  getSignalProfile,
+  getSignalProfileCatalog,
+  profileScoreBand,
+} from "./stock_signal_profiles.mjs";
+import { scaleStockProfileTranches, STOCK_PROFILE_STRATEGY_VERSION } from "./stock_profile_strategy.mjs";
+import { buildStockPricePlan, STOCK_PRICE_PLAN_VERSION } from "./stock_price_plan.mjs";
+import { buildStockStagePricePlan } from "./stock_stage_price_plan.mjs";
+import { createStockProfileStateStore, initializeStockProfileStateSchema } from "./stock_profile_state.mjs";
+import { buildStockOpportunityAssessment } from "./stock_opportunity_model.mjs";
+import { buildStockPersonaVerdicts } from "./stock_persona_verdicts.mjs";
+import { profileStateSignature, selectNonOverlappingProfileEvents } from "./stock_signal_profile_backtest_utils.mjs";
 import {
   initializeMeanReversionLedger,
   recordMeanReversionObservations,
@@ -73,7 +97,7 @@ import {
 import {
   backtestSymbol, policyBacktestDashboard, backtestDashboardSummary, buildSignalFamilyAudit,
   walkForwardSymbol, evaluateActionReliability, getCachedActionReliability,
-  simulatePolicySymbol, buildBacktestSeries,
+  simulatePolicySymbol, buildBacktestSeries, buildBacktestSeriesWithV21,
   auditConditionedMarketPool, marketPoolThresholdAudit,
   scoreThresholdAudit, rollingWalkForwardAudit,
   summarizeReturns, summarizePathStats, simulateTradePath,
@@ -264,6 +288,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(ts);
   CREATE INDEX IF NOT EXISTS idx_stock_snap_ts ON stock_snapshots(ts);
   CREATE INDEX IF NOT EXISTS idx_stock_snap_sym ON stock_snapshots(symbol);
+  CREATE INDEX IF NOT EXISTS idx_stock_snap_sym_ts ON stock_snapshots(symbol, ts DESC);
   CREATE TABLE IF NOT EXISTS tracker_daily (
     date TEXT NOT NULL, symbol TEXT NOT NULL, close REAL, fx_close REAL,
     PRIMARY KEY (date, symbol)
@@ -302,9 +327,10 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     date TEXT NOT NULL, ts INTEGER NOT NULL, symbol TEXT NOT NULL, market TEXT NOT NULL,
     price REAL, raw_signal TEXT, action TEXT, action_label TEXT,
+    opportunity_stage TEXT, execution_action TEXT,
     regime TEXT, setup TEXT, risk TEXT, score REAL, confidence INTEGER, quality TEXT, payload TEXT,
     sample_origin TEXT NOT NULL DEFAULT 'live_frozen', engine_version TEXT, replay_mode TEXT,
-    UNIQUE(date, symbol)
+    UNIQUE(date, symbol, sample_origin, engine_version)
   );
   CREATE INDEX IF NOT EXISTS idx_stock_signal_log_ts ON stock_signal_log(ts);
   CREATE TABLE IF NOT EXISTS stock_signal_outcomes (
@@ -372,7 +398,20 @@ db.exec(`
     first_observed_at INTEGER,
     first_payload TEXT,
     state_signature TEXT,
-    UNIQUE(as_of_date, symbol, market, profile_id, profile_version)
+    strategy_version TEXT,
+    strategy_signature TEXT,
+    opportunity_stage TEXT,
+    execution_action TEXT,
+    decision_label TEXT,
+    decision_tone TEXT,
+    decision_direction INTEGER NOT NULL DEFAULT 0,
+    tranche_pct REAL,
+    recommended_shares INTEGER,
+    valid_sessions INTEGER,
+    confirmation_price REAL,
+    invalidation_price REAL,
+    reassessment_price REAL,
+    UNIQUE(as_of_date, symbol, market, profile_id, profile_version, engine_version, strategy_version)
   );
   CREATE INDEX IF NOT EXISTS idx_stock_profile_shadow_scope
     ON stock_signal_profile_shadows(profile_id, profile_version, market, as_of_date);
@@ -393,6 +432,14 @@ db.exec(`
     evaluated_at INTEGER NOT NULL,
     outcome_contract_version TEXT NOT NULL,
     entry_price_source TEXT,
+    opportunity_stage TEXT,
+    execution_action TEXT,
+    strategy_direction INTEGER NOT NULL DEFAULT 0,
+    strategy_outcome TEXT,
+    strategy_trigger_date TEXT,
+    strategy_exit_price REAL,
+    strategy_return_pct REAL,
+    exposure_return_pct REAL,
     PRIMARY KEY(profile_shadow_id, horizon)
   );
   CREATE INDEX IF NOT EXISTS idx_stock_profile_shadow_outcome
@@ -523,6 +570,9 @@ try { db.prepare("ALTER TABLE stock_trade_events ADD COLUMN confidence TEXT").ru
 try { db.prepare("ALTER TABLE stock_trade_events ADD COLUMN voided_at INTEGER").run(); } catch {}
 try { db.prepare("ALTER TABLE stock_trade_events ADD COLUMN void_reason TEXT").run(); } catch {}
 try { db.prepare("CREATE INDEX IF NOT EXISTS idx_trade_events_external ON stock_trade_events(import_id, external_trade_id)").run(); } catch {}
+
+initializeStockProfileStateSchema(db);
+const stockProfileState = createStockProfileStateStore({ db, getSystemSetting, setSystemSetting });
 try { db.prepare("ALTER TABLE stock_signal_outcomes ADD COLUMN quantity INTEGER").run(); } catch {}
 try { db.prepare("ALTER TABLE stock_signal_outcomes ADD COLUMN cost_pct REAL").run(); } catch {}
 try { db.prepare("ALTER TABLE stock_signal_outcomes ADD COLUMN net_directional_return_pct REAL").run(); } catch {}
@@ -530,6 +580,31 @@ try { db.prepare("ALTER TABLE stock_signal_outcomes ADD COLUMN outcome_contract_
 try { db.prepare("ALTER TABLE stock_signal_outcomes ADD COLUMN entry_price_source TEXT").run(); } catch {}
 try { db.prepare("ALTER TABLE stock_signal_profile_shadows ADD COLUMN price REAL").run(); } catch {}
 try { db.prepare("ALTER TABLE stock_signal_profile_shadows ADD COLUMN state_signature TEXT").run(); } catch {}
+for (const statement of [
+  "ALTER TABLE stock_signal_profile_shadows ADD COLUMN strategy_version TEXT",
+  "ALTER TABLE stock_signal_profile_shadows ADD COLUMN strategy_signature TEXT",
+  "ALTER TABLE stock_signal_profile_shadows ADD COLUMN opportunity_stage TEXT",
+  "ALTER TABLE stock_signal_profile_shadows ADD COLUMN execution_action TEXT",
+  "ALTER TABLE stock_signal_profile_shadows ADD COLUMN decision_label TEXT",
+  "ALTER TABLE stock_signal_profile_shadows ADD COLUMN decision_tone TEXT",
+  "ALTER TABLE stock_signal_profile_shadows ADD COLUMN decision_direction INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE stock_signal_profile_shadows ADD COLUMN tranche_pct REAL",
+  "ALTER TABLE stock_signal_profile_shadows ADD COLUMN recommended_shares INTEGER",
+  "ALTER TABLE stock_signal_profile_shadows ADD COLUMN valid_sessions INTEGER",
+  "ALTER TABLE stock_signal_profile_shadows ADD COLUMN confirmation_price REAL",
+  "ALTER TABLE stock_signal_profile_shadows ADD COLUMN invalidation_price REAL",
+  "ALTER TABLE stock_signal_profile_shadows ADD COLUMN reassessment_price REAL",
+  "ALTER TABLE stock_signal_profile_shadow_outcomes ADD COLUMN opportunity_stage TEXT",
+  "ALTER TABLE stock_signal_profile_shadow_outcomes ADD COLUMN execution_action TEXT",
+  "ALTER TABLE stock_signal_profile_shadow_outcomes ADD COLUMN strategy_direction INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE stock_signal_profile_shadow_outcomes ADD COLUMN strategy_outcome TEXT",
+  "ALTER TABLE stock_signal_profile_shadow_outcomes ADD COLUMN strategy_trigger_date TEXT",
+  "ALTER TABLE stock_signal_profile_shadow_outcomes ADD COLUMN strategy_exit_price REAL",
+  "ALTER TABLE stock_signal_profile_shadow_outcomes ADD COLUMN strategy_return_pct REAL",
+  "ALTER TABLE stock_signal_profile_shadow_outcomes ADD COLUMN exposure_return_pct REAL",
+]) {
+  try { db.prepare(statement).run(); } catch {}
+}
 try { db.prepare("ALTER TABLE stock_signal_shadow_outcomes ADD COLUMN outcome_contract_version TEXT").run(); } catch {}
 try { db.prepare("ALTER TABLE stock_signal_shadow_outcomes ADD COLUMN entry_price_source TEXT").run(); } catch {}
 try { db.prepare("ALTER TABLE signal_execution_journal ADD COLUMN actual_date TEXT").run(); } catch {}
@@ -540,6 +615,144 @@ try { db.prepare("ALTER TABLE stock_signal_log ADD COLUMN engine_version TEXT").
 try { db.prepare("ALTER TABLE stock_signal_log ADD COLUMN replay_mode TEXT").run(); } catch {}
 try { db.prepare("ALTER TABLE stock_signal_log ADD COLUMN first_signal_ts INTEGER").run(); } catch {}
 try { db.prepare("ALTER TABLE stock_signal_log ADD COLUMN first_payload TEXT").run(); } catch {}
+try { db.prepare("ALTER TABLE stock_signal_log ADD COLUMN opportunity_stage TEXT").run(); } catch {}
+try { db.prepare("ALTER TABLE stock_signal_log ADD COLUMN execution_action TEXT").run(); } catch {}
+
+function normalizeSchemaSql(sql) {
+  return String(sql || '').toLowerCase().replace(/[\s`"\[\]]+/g, '');
+}
+
+export function migrateStockSignalLogIdentity(database) {
+  const tableSql = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='stock_signal_log'").get()?.sql;
+  if (normalizeSchemaSql(tableSql).includes('unique(date,symbol,sample_origin,engine_version)')) return;
+  database.transaction(() => {
+    database.exec(`
+      DROP TABLE IF EXISTS stock_signal_log_stage_action_migration;
+      CREATE TABLE stock_signal_log_stage_action_migration (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT NOT NULL, ts INTEGER NOT NULL, symbol TEXT NOT NULL, market TEXT NOT NULL,
+        price REAL, raw_signal TEXT, action TEXT, action_label TEXT,
+        opportunity_stage TEXT, execution_action TEXT,
+        regime TEXT, setup TEXT, risk TEXT, score REAL, confidence INTEGER, quality TEXT, payload TEXT,
+        sample_origin TEXT NOT NULL DEFAULT 'live_frozen', engine_version TEXT, replay_mode TEXT,
+        first_signal_ts INTEGER, first_payload TEXT,
+        UNIQUE(date, symbol, sample_origin, engine_version)
+      );
+      INSERT INTO stock_signal_log_stage_action_migration(
+        id,date,ts,symbol,market,price,raw_signal,action,action_label,opportunity_stage,execution_action,
+        regime,setup,risk,score,confidence,quality,payload,sample_origin,engine_version,replay_mode,first_signal_ts,first_payload
+      )
+      SELECT id,date,ts,symbol,market,price,raw_signal,action,action_label,opportunity_stage,execution_action,
+        regime,setup,risk,score,confidence,quality,payload,
+        COALESCE(NULLIF(sample_origin,''),'live_frozen'),engine_version,replay_mode,first_signal_ts,first_payload
+      FROM stock_signal_log;
+      DROP TABLE stock_signal_log;
+      ALTER TABLE stock_signal_log_stage_action_migration RENAME TO stock_signal_log;
+      CREATE INDEX IF NOT EXISTS idx_stock_signal_log_ts ON stock_signal_log(ts);
+      CREATE INDEX IF NOT EXISTS idx_stock_signal_log_origin ON stock_signal_log(sample_origin, market, date);
+    `);
+  })();
+}
+
+export function migrateProfileShadowIdentity(database) {
+  const tableSql = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='stock_signal_profile_shadows'").get()?.sql;
+  const sourceColumns = new Set(database.prepare("PRAGMA table_info(stock_signal_profile_shadows)").all().map(row => row.name));
+  const hasCurrentIdentity = normalizeSchemaSql(tableSql).includes('unique(as_of_date,symbol,market,profile_id,profile_version,engine_version,strategy_version)');
+  if (hasCurrentIdentity && !sourceColumns.has('decision_state') && !sourceColumns.has('target_price')) return;
+  const legacyStageExpression = sourceColumns.has('decision_state')
+    ? `CASE WHEN decision_state IN ('PROBE','ADD') THEN 'READY' WHEN decision_state IN ('TRIM','EXIT','AVOID') THEN 'RISK_OFF' ELSE 'NO_SETUP' END`
+    : `'NO_SETUP'`;
+  const legacyActionExpression = sourceColumns.has('decision_state')
+    ? `CASE WHEN decision_state='PROBE' THEN 'OPEN' WHEN decision_state='ADD' THEN 'ADD' WHEN decision_state='HOLD' THEN 'HOLD' WHEN decision_state='TRIM' THEN 'REDUCE' WHEN decision_state='EXIT' THEN 'CLOSE' ELSE 'NONE' END`
+    : `'NONE'`;
+  const stageExpression = sourceColumns.has('opportunity_stage')
+    ? `COALESCE(opportunity_stage, ${legacyStageExpression})` : legacyStageExpression;
+  const actionExpression = sourceColumns.has('execution_action')
+    ? `COALESCE(execution_action, ${legacyActionExpression})` : legacyActionExpression;
+  const reassessmentExpression = sourceColumns.has('reassessment_price')
+    ? (sourceColumns.has('target_price') ? 'COALESCE(reassessment_price,target_price)' : 'reassessment_price')
+    : (sourceColumns.has('target_price') ? 'target_price' : 'NULL');
+  database.transaction(() => {
+    database.exec(`
+      DROP TABLE IF EXISTS stock_signal_profile_shadows_stage_action_migration;
+      CREATE TABLE stock_signal_profile_shadows_stage_action_migration (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        as_of_date TEXT NOT NULL, observed_at INTEGER NOT NULL, symbol TEXT NOT NULL, market TEXT NOT NULL,
+        price REAL, profile_id TEXT NOT NULL, profile_version TEXT NOT NULL, profile_role TEXT NOT NULL,
+        raw_signal TEXT NOT NULL, status TEXT NOT NULL, direction INTEGER NOT NULL, score REAL,
+        confirmed INTEGER NOT NULL DEFAULT 0, payload TEXT NOT NULL,
+        sample_origin TEXT NOT NULL DEFAULT 'live_profile_shadow', engine_version TEXT NOT NULL,
+        first_observed_at INTEGER, first_payload TEXT, state_signature TEXT,
+        strategy_version TEXT, strategy_signature TEXT,
+        opportunity_stage TEXT, execution_action TEXT,
+        decision_label TEXT, decision_tone TEXT, decision_direction INTEGER NOT NULL DEFAULT 0,
+        tranche_pct REAL, recommended_shares INTEGER, valid_sessions INTEGER,
+        confirmation_price REAL, invalidation_price REAL, reassessment_price REAL,
+        UNIQUE(as_of_date, symbol, market, profile_id, profile_version, engine_version, strategy_version)
+      );
+      INSERT INTO stock_signal_profile_shadows_stage_action_migration(
+        id,as_of_date,observed_at,symbol,market,price,profile_id,profile_version,profile_role,raw_signal,status,direction,
+        score,confirmed,payload,sample_origin,engine_version,first_observed_at,first_payload,state_signature,
+        strategy_version,strategy_signature,opportunity_stage,execution_action,decision_label,decision_tone,
+        decision_direction,tranche_pct,recommended_shares,valid_sessions,confirmation_price,invalidation_price,reassessment_price
+      )
+      SELECT id,as_of_date,observed_at,symbol,market,price,profile_id,profile_version,profile_role,raw_signal,status,direction,
+        score,confirmed,payload,sample_origin,engine_version,first_observed_at,first_payload,state_signature,
+        strategy_version,strategy_signature,
+        ${stageExpression},
+        ${actionExpression},
+        decision_label,decision_tone,
+        decision_direction,tranche_pct,recommended_shares,valid_sessions,confirmation_price,invalidation_price,
+        ${reassessmentExpression}
+      FROM stock_signal_profile_shadows;
+      DROP TABLE stock_signal_profile_shadows;
+      ALTER TABLE stock_signal_profile_shadows_stage_action_migration RENAME TO stock_signal_profile_shadows;
+      CREATE INDEX IF NOT EXISTS idx_stock_profile_shadow_scope
+        ON stock_signal_profile_shadows(profile_id, profile_version, market, as_of_date);
+    `);
+  })();
+}
+
+export function migrateProfileShadowOutcomes(database) {
+  const columns = new Set(database.prepare("PRAGMA table_info(stock_signal_profile_shadow_outcomes)").all().map(row => row.name));
+  if (!columns.has('decision_state')) return;
+  database.transaction(() => {
+    database.exec(`
+      DROP TABLE IF EXISTS stock_signal_profile_shadow_outcomes_stage_action_migration;
+      CREATE TABLE stock_signal_profile_shadow_outcomes_stage_action_migration (
+        profile_shadow_id INTEGER NOT NULL, horizon INTEGER NOT NULL,
+        entry_date TEXT NOT NULL, exit_date TEXT NOT NULL, entry_price REAL NOT NULL, exit_price REAL NOT NULL,
+        direction INTEGER NOT NULL, gross_return_pct REAL NOT NULL, directional_return_pct REAL NOT NULL,
+        benchmark_return_pct REAL, excess_return_pct REAL, mfe_pct REAL, mae_pct REAL, evaluated_at INTEGER NOT NULL,
+        outcome_contract_version TEXT NOT NULL, entry_price_source TEXT,
+        opportunity_stage TEXT, execution_action TEXT, strategy_direction INTEGER NOT NULL DEFAULT 0,
+        strategy_outcome TEXT, strategy_trigger_date TEXT, strategy_exit_price REAL, strategy_return_pct REAL,
+        exposure_return_pct REAL, PRIMARY KEY(profile_shadow_id, horizon)
+      );
+      INSERT INTO stock_signal_profile_shadow_outcomes_stage_action_migration(
+        profile_shadow_id,horizon,entry_date,exit_date,entry_price,exit_price,direction,gross_return_pct,
+        directional_return_pct,benchmark_return_pct,excess_return_pct,mfe_pct,mae_pct,evaluated_at,
+        outcome_contract_version,entry_price_source,opportunity_stage,execution_action,strategy_direction,
+        strategy_outcome,strategy_trigger_date,strategy_exit_price,strategy_return_pct,exposure_return_pct
+      )
+      SELECT profile_shadow_id,horizon,entry_date,exit_date,entry_price,exit_price,direction,gross_return_pct,
+        directional_return_pct,benchmark_return_pct,excess_return_pct,mfe_pct,mae_pct,evaluated_at,
+        outcome_contract_version,entry_price_source,
+        COALESCE(opportunity_stage,CASE WHEN decision_state IN ('PROBE','ADD') THEN 'READY' WHEN decision_state IN ('TRIM','EXIT','AVOID') THEN 'RISK_OFF' ELSE 'NO_SETUP' END),
+        COALESCE(execution_action,CASE WHEN decision_state='PROBE' THEN 'OPEN' WHEN decision_state='ADD' THEN 'ADD' WHEN decision_state='HOLD' THEN 'HOLD' WHEN decision_state='TRIM' THEN 'REDUCE' WHEN decision_state='EXIT' THEN 'CLOSE' ELSE 'NONE' END),
+        strategy_direction,strategy_outcome,strategy_trigger_date,strategy_exit_price,strategy_return_pct,exposure_return_pct
+      FROM stock_signal_profile_shadow_outcomes;
+      DROP TABLE stock_signal_profile_shadow_outcomes;
+      ALTER TABLE stock_signal_profile_shadow_outcomes_stage_action_migration RENAME TO stock_signal_profile_shadow_outcomes;
+      CREATE INDEX IF NOT EXISTS idx_stock_profile_shadow_outcome
+        ON stock_signal_profile_shadow_outcomes(profile_shadow_id, horizon);
+    `);
+  })();
+}
+
+migrateStockSignalLogIdentity(db);
+migrateProfileShadowIdentity(db);
+migrateProfileShadowOutcomes(db);
 db.prepare("UPDATE stock_signal_log SET sample_origin='live_frozen' WHERE sample_origin IS NULL OR sample_origin=''").run();
 db.prepare("CREATE INDEX IF NOT EXISTS idx_stock_signal_log_origin ON stock_signal_log(sample_origin, market, date)").run();
 db.prepare("CREATE INDEX IF NOT EXISTS idx_stock_watchlist_group_key ON stock_watchlist(market, group_key)").run();
@@ -595,9 +808,9 @@ const getAllBases = db.prepare("SELECT date, price7709_close, price0660_close, f
 const insertStockSnapshot = db.prepare(`INSERT OR REPLACE INTO stock_snapshots(ts,symbol,price,change_pct,volume) VALUES(?,?,?,?,?)`);
 const getStockHistory = db.prepare("SELECT * FROM stock_snapshots WHERE ts >= ? AND symbol = ? ORDER BY ts ASC");
 const getStockLatest = db.prepare("SELECT * FROM stock_snapshots WHERE symbol = ? ORDER BY ts DESC LIMIT 1");
-const insertSignalLog = db.prepare(`INSERT INTO stock_signal_log(date,ts,symbol,market,price,raw_signal,action,action_label,regime,setup,risk,score,confidence,quality,payload,sample_origin,engine_version,replay_mode,first_signal_ts,first_payload)
-  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-  ON CONFLICT(date, symbol) DO UPDATE SET
+const insertSignalLog = db.prepare(`INSERT INTO stock_signal_log(date,ts,symbol,market,price,raw_signal,action,action_label,opportunity_stage,execution_action,regime,setup,risk,score,confidence,quality,payload,sample_origin,engine_version,replay_mode,first_signal_ts,first_payload)
+  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  ON CONFLICT(date, symbol, sample_origin, engine_version) DO UPDATE SET
   ts=excluded.ts, market=excluded.market, price=excluded.price,
   sample_origin=excluded.sample_origin, replay_mode=excluded.replay_mode,
   first_signal_ts=COALESCE(stock_signal_log.first_signal_ts, excluded.ts),
@@ -605,6 +818,8 @@ const insertSignalLog = db.prepare(`INSERT INTO stock_signal_log(date,ts,symbol,
   raw_signal=COALESCE(stock_signal_log.raw_signal, excluded.raw_signal),
   action=COALESCE(stock_signal_log.action, excluded.action),
   action_label=COALESCE(stock_signal_log.action_label, excluded.action_label),
+  opportunity_stage=COALESCE(stock_signal_log.opportunity_stage, excluded.opportunity_stage),
+  execution_action=COALESCE(stock_signal_log.execution_action, excluded.execution_action),
   regime=COALESCE(stock_signal_log.regime, excluded.regime),
   setup=COALESCE(stock_signal_log.setup, excluded.setup),
   risk=COALESCE(stock_signal_log.risk, excluded.risk),
@@ -614,19 +829,25 @@ const insertSignalLog = db.prepare(`INSERT INTO stock_signal_log(date,ts,symbol,
     payload=COALESCE(stock_signal_log.payload, excluded.payload),
     engine_version=COALESCE(stock_signal_log.engine_version, excluded.engine_version)`);
 const insertProfileShadow = db.prepare(`INSERT INTO stock_signal_profile_shadows(
-  as_of_date,observed_at,symbol,market,price,profile_id,profile_version,profile_role,raw_signal,status,direction,score,confirmed,payload,sample_origin,engine_version,first_observed_at,first_payload,state_signature
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  as_of_date,observed_at,symbol,market,price,profile_id,profile_version,profile_role,raw_signal,status,direction,score,confirmed,payload,sample_origin,engine_version,first_observed_at,first_payload,state_signature,
+  strategy_version,strategy_signature,opportunity_stage,execution_action,decision_label,decision_tone,decision_direction,tranche_pct,recommended_shares,valid_sessions,confirmation_price,invalidation_price,reassessment_price
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   ON CONFLICT DO NOTHING`);
 const insertProfileShadowOutcome = db.prepare(`INSERT INTO stock_signal_profile_shadow_outcomes(
-  profile_shadow_id,horizon,entry_date,exit_date,entry_price,exit_price,direction,gross_return_pct,directional_return_pct,benchmark_return_pct,excess_return_pct,mfe_pct,mae_pct,evaluated_at,outcome_contract_version,entry_price_source
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  profile_shadow_id,horizon,entry_date,exit_date,entry_price,exit_price,direction,gross_return_pct,directional_return_pct,benchmark_return_pct,excess_return_pct,mfe_pct,mae_pct,evaluated_at,outcome_contract_version,entry_price_source,
+  opportunity_stage,execution_action,strategy_direction,strategy_outcome,strategy_trigger_date,strategy_exit_price,strategy_return_pct,exposure_return_pct
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   ON CONFLICT(profile_shadow_id,horizon) DO UPDATE SET
     entry_date=excluded.entry_date,exit_date=excluded.exit_date,entry_price=excluded.entry_price,exit_price=excluded.exit_price,
     direction=excluded.direction,gross_return_pct=excluded.gross_return_pct,directional_return_pct=excluded.directional_return_pct,
     benchmark_return_pct=excluded.benchmark_return_pct,excess_return_pct=excluded.excess_return_pct,
     mfe_pct=excluded.mfe_pct,mae_pct=excluded.mae_pct,evaluated_at=excluded.evaluated_at,
-    outcome_contract_version=excluded.outcome_contract_version,entry_price_source=excluded.entry_price_source`);
-const getLatestProfileShadowState = db.prepare(`SELECT state_signature,raw_signal,status,direction,confirmed
+    outcome_contract_version=excluded.outcome_contract_version,entry_price_source=excluded.entry_price_source,
+    opportunity_stage=excluded.opportunity_stage,execution_action=excluded.execution_action,strategy_direction=excluded.strategy_direction,
+    strategy_outcome=excluded.strategy_outcome,strategy_trigger_date=excluded.strategy_trigger_date,
+    strategy_exit_price=excluded.strategy_exit_price,strategy_return_pct=excluded.strategy_return_pct,
+    exposure_return_pct=excluded.exposure_return_pct`);
+const getLatestProfileShadowState = db.prepare(`SELECT state_signature,strategy_signature,raw_signal,status,direction,confirmed
   FROM stock_signal_profile_shadows
   WHERE symbol=? AND market=? AND profile_id=? AND profile_version=?
   ORDER BY as_of_date DESC,id DESC LIMIT 1`);
@@ -906,7 +1127,19 @@ async function fetchStockAll(openMarkets) {
 }
 
 let latestStock = null, latestAnalysis = null;
+let latestAnalysisJson = null, latestAnalysisRevision = 0;
 let polling = false;
+
+function commitLatestAnalysis(value) {
+  latestAnalysis = value;
+  latestAnalysisJson = JSON.stringify(value || {});
+  latestAnalysisRevision = Math.max(Date.now(), latestAnalysisRevision + 1);
+}
+
+function touchLatestAnalysis() {
+  latestAnalysisJson = null;
+  latestAnalysisRevision = Math.max(Date.now(), latestAnalysisRevision + 1);
+}
 
 // A newly added symbol has no cached snapshot yet. Warm it immediately instead
 // of waiting for its next market session, so adding a stock after the close still
@@ -1041,10 +1274,10 @@ function tradingTimeFraction(market) {
 // RSI12 now uses the broker-compatible Wilder/RMA calculation. This changes a
 // decision input and therefore starts a new frozen-signal cohort; do not blend
 // outcomes from the prior simple-RSI engine into this version's reports.
-// v2.2 changes the formal execution-decision contract: composite score now expresses
-// research bias, while the technical plan and safety checks determine whether an
-// entry is executable. Keep its frozen outcomes in a separate validation cohort.
-const SIGNAL_ENGINE_VERSION = "stock-signal-v2026.08.20-scoring-v2.3.0-neutral-low-score";
+// Current contract keeps historical validation as research evidence only.
+// Current data, setup/price confirmation and explicit risk overlays remain the
+// only paths that may block or downgrade an executable technical action.
+const SIGNAL_ENGINE_VERSION = "stock-signal-v2026.09.01-evidence-advisory-v1";
 const COMPATIBLE_SIGNAL_ENGINE_VERSIONS = Object.freeze([SIGNAL_ENGINE_VERSION]);
 const LEGACY_OUTCOME_CONTRACT_VERSION = "legacy-next-close-unversioned-v1";
 // D3: 信号算法版本切换。v1=原9项加权投票；v2=6项市场状态感知投票。
@@ -1336,18 +1569,18 @@ function buildTradePlan(ctx) {
   } else if (signal === "SELL" || regime.key === "breakdown") {
     action = "REDUCE"; actionLabel = "减仓"; actionTone = "bear";
   } else if (setup.key === "extended" || regime.key === "high_accel") {
-    action = "REDUCE"; actionLabel = "不追"; actionTone = "hot";
-  } else if ((setup.key === "trend_pullback" || setup.key === "breakout_follow") && score >= 0.12) {
-    action = signal === "STRONG BUY" ? "ADD" : "BUY";
-    actionLabel = action === "ADD" ? "加仓" : "买入";
+    action = "WATCH"; actionLabel = "不追"; actionTone = "hot";
+  } else if ((setup.key === "trend_pullback" || setup.key === "breakout_follow") && (signal === "BUY" || signal === "STRONG BUY")) {
+    action = "BUY";
+    actionLabel = "买入形态";
     actionTone = "bull";
   } else if (setup.key === "mean_reversion") {
-    if (score >= 0.15 && macdHist != null && macdHist > 0) { action = "BUY"; actionLabel = "试买"; actionTone = "watch"; }
-    else { action = "WAIT"; actionLabel = "等待"; actionTone = "watch"; }
+    if ((signal === "BUY" || signal === "STRONG BUY") && macdHist != null && macdHist > 0) { action = "BUY"; actionLabel = "反弹形态"; actionTone = "watch"; }
+    else { action = "WATCH"; actionLabel = "等待反弹确认"; actionTone = "watch"; }
   } else if (signal === "BUY" || signal === "STRONG BUY") {
     action = "WATCH"; actionLabel = "关注"; actionTone = "watch";
   } else if (signal === "NEUTRAL") {
-    action = "HOLD"; actionLabel = "持有"; actionTone = "neutral";
+    action = "WAIT"; actionLabel = "等待"; actionTone = "neutral";
   }
 
   let relativeNote = null;
@@ -1358,33 +1591,18 @@ function buildTradePlan(ctx) {
     const relWeak = rel20 <= -3 && (rel60 == null || rel60 <= 0);
     const relStrong = rel20 >= 5 && (rel60 == null || rel60 >= 0);
     const bench = relativeStrength.benchmark?.label || "基准";
-    if ((action === "ADD" || action === "BUY") && relWeak) {
-      action = "WATCH"; actionLabel = "关注"; actionTone = "watch";
-      relativeNote = "相对" + bench + "弱于基准，买入动作降为关注。";
-    } else if (action === "HOLD" && signal === "NEUTRAL" && relStrong && dataQuality.level === "ok") {
-      action = "WATCH"; actionLabel = "关注"; actionTone = "watch";
-      relativeNote = "虽然原始信号中性，但相对" + bench + "持续走强，提升为关注。";
-    }
+    if (relWeak) relativeNote = "相对" + bench + "偏弱，已在技术投票中体现。";
+    else if (relStrong) relativeNote = "相对" + bench + "偏强，已在技术投票中体现。";
   }
   if (marketRegime?.available) {
     const bench = marketRegime.benchmark?.label || "基准";
     const marketWeak = marketRegime.key === "risk_off" || marketRegime.key === "downtrend";
-    if ((action === "ADD" || action === "BUY") && marketWeak) {
-      action = "WATCH"; actionLabel = "关注"; actionTone = "watch";
-      marketNote = bench + "处于" + marketRegime.label + "，买入动作降为关注。";
-    } else if (action === "WATCH" && marketRegime.key === "risk_off") {
-      action = "WAIT"; actionLabel = "等待"; actionTone = "watch";
-      marketNote = bench + "处于风险释放阶段，关注动作降为等待。";
-    } else if (action === "ADD" && marketRegime.key === "extended") {
-      action = "BUY"; actionLabel = "买入"; actionTone = "bull";
-      marketNote = bench + "短线过热，加仓动作降为买入。";
-    }
+    marketNote = bench + "处于" + marketRegime.label + "，仅作为技术投票的市场背景，不在计划层重复改写动作。";
   }
 
   let risk = { level: "medium", label: "中", detail: "波动和信号质量处于普通水平。" };
   if (dataQuality.level !== "ok") risk = { level: "high", label: "高", detail: "数据质量不足，信号需要降级使用。" };
-  else if (marketRegime?.key === "risk_off" || marketRegime?.key === "downtrend") risk = { level: "high", label: "高", detail: "对应市场/行业基准走弱，顺势交易失败概率上升。" };
-  else if ((atrPct != null && atrPct > 8) || (volR != null && volR > VR.RISK_EXTREME) || regime.key === "breakdown") risk = { level: "high", label: "高", detail: "波动或放量异常，错误成本较高。" };
+  else if ((atrPct != null && atrPct > 8) || (volR != null && volR > VR.RISK_EXTREME) || regime.key === "breakdown") risk = { level: "high", label: "高", detail: "个股波动、放量或破位风险偏高。" };
   else if ((atrPct != null && atrPct < 4) && (regime.key === "uptrend" || regime.key === "range")) risk = { level: "low", label: "低", detail: "波动较可控，信号执行成本较低。" };
 
   const confidence = Math.max(0, Math.min(100, Math.round(Math.abs(score || 0) * 100 + (setup.key !== "none" ? 12 : 0) - (risk.level === "high" ? 12 : 0))));
@@ -1476,6 +1694,32 @@ function computeVolPriceCorrelation(closes, vols) {
   return num / denom;
 }
 
+// 量价相关性必须保留方向：负相关不等于反转。对当前定义
+// corr(有符号日收益, 成交量) 而言，负相关表示下跌日往往更放量，
+// 至少是分布/抛压警告；只有价格本身先确认反转后才可转成正向证据。
+function scoreVolumePriceCorrelation(volPriceCorr, roc) {
+  if (!Number.isFinite(Number(volPriceCorr))) {
+    return { vote:0, text:'量价相关性中性' };
+  }
+  const c = Number(volPriceCorr);
+  const recentRoc = Number.isFinite(Number(roc)) ? Number(roc) : 0;
+  if (c > 0.3) {
+    const rising = recentRoc > 0;
+    return {
+      vote:rising ? 0.6 : -0.6,
+      text:`量价同向(corr=${c.toFixed(2)})，${rising ? '放量上涨' : '放量下跌'}`,
+    };
+  }
+  if (c < -0.3) {
+    const falling = recentRoc <= 0;
+    return {
+      vote:falling ? -0.4 : -0.2,
+      text:`量价背离(corr=${c.toFixed(2)})，${falling ? '下跌日放量，抛压偏强' : '上涨缩量，动能待确认'}`,
+    };
+  }
+  return { vote:0, text:`量价弱相关(corr=${c.toFixed(2)})` };
+}
+
 // D3: V1 投票算法 —— 原 9 项加权投票，从 computeDailyAnalysis 提取为独立纯函数。
 //   行为与提取前完全一致，确保 SIGNAL_ALGO_VERSION=v1 时无任何变化。
 function computeVotesV1(ctx) {
@@ -1556,24 +1800,24 @@ function computeVotesV2(ctx) {
   const { rsi12, macdHist, prevHist, sma50, sma20Dist, boll, roc, relativeStrength, marketRegime, volPriceCorr, cur, closes, n } = ctx;
   // 市场状态映射
   const regimeKey = marketRegime?.key || 'range';
-  const state = (regimeKey === 'uptrend' || regimeKey === 'extended') ? 'bull'
-    : (regimeKey === 'risk_off' || regimeKey === 'downtrend') ? 'bear' : 'range';
-  const stateLabel = state === 'bull' ? '多头' : state === 'bear' ? '空头' : '震荡';
+  const rsiBands = balancedRsiBandsForRegime(regimeKey);
+  const state = rsiBands.state;
+  const stateLabel = rsiBands.label;
   const votes = []; const reasons = [];
   const push = (key, vote, weight, text) => { votes.push({ key, vote, weight }); reasons.push({ key, vote, weight, text }); };
   // 1) RSI(12) —— 市场状态感知超买超卖阈值
   { let v = 0, txt = "RSI12 中性";
     if (rsi12 != null) {
-      const os = state === 'bull' ? 35 : state === 'bear' ? 20 : 30;    // 超卖线
-      const osSoft = state === 'bull' ? 45 : state === 'bear' ? 30 : 40;
-      const ob = state === 'bull' ? 80 : state === 'bear' ? 65 : 70;    // 超买线
-      const obSoft = state === 'bull' ? 70 : state === 'bear' ? 55 : 60;
+      const os = rsiBands.hardLow;
+      const osSoft = rsiBands.softLow;
+      const ob = rsiBands.hardHigh;
+      const obSoft = rsiBands.softHigh;
       if (rsi12 < os) { v = 1; txt = "RSI12 " + rsi12.toFixed(1) + " 超卖(" + stateLabel + ")"; }
       else if (rsi12 < osSoft) { v = 0.5; txt = "RSI12 " + rsi12.toFixed(1) + " 偏超卖(" + stateLabel + ")"; }
       else if (rsi12 > ob) { v = -1; txt = "RSI12 " + rsi12.toFixed(1) + " 超买(" + stateLabel + ")"; }
       else if (rsi12 > obSoft) { v = -0.5; txt = "RSI12 " + rsi12.toFixed(1) + " 偏超买(" + stateLabel + ")"; }
       else txt = "RSI12 " + rsi12.toFixed(1) + " 中性(" + stateLabel + ")";
-    } push("rsi12", v, 1.0, txt); }
+    } push("rsi12", v, PROFILE_VOTE_WEIGHTS.rsi, txt); }
   // 2) MACD histogram —— 方向+动能，市场状态影响强度判定
   { let v = 0, txt = "MACD 中性";
     if (macdHist != null) {
@@ -1588,7 +1832,7 @@ function computeVotesV2(ctx) {
       }
       if (prevHist <= 0 && macdHist > 0) txt += "（金叉）";
       if (prevHist >= 0 && macdHist < 0) txt += "（死叉）";
-    } push("macd", v, 1.5, txt); }
+    } push("macd", v, PROFILE_VOTE_WEIGHTS.macd, txt); }
   // 3) Price vs MA50 —— 市场状态影响偏离容忍度
   { let v = 0, txt = "价vs MA50 中性";
     if (sma50 != null) {
@@ -1612,7 +1856,7 @@ function computeVotesV2(ctx) {
         else if (distPct < -2) { v = -0.7; txt = "价低于MA50 " + distPct.toFixed(1) + "%"; }
         else { v = -0.4; txt = "价低于MA50 " + distPct.toFixed(1) + "%"; }
       }
-    } push("ma50", v, 1.2, txt); }
+    } push("ma50", v, PROFILE_VOTE_WEIGHTS.trend, txt); }
   // 4) Bollinger %B —— 市场状态影响极值解读
   { let v = 0, txt = "布林 %B 中性";
     if (boll) {
@@ -1629,27 +1873,19 @@ function computeVotesV2(ctx) {
         else if (boll.pctB > 0.8) { v = -0.8; txt = "%B " + boll.pctB.toFixed(2) + " 接近上轨"; }
         else txt = "%B " + boll.pctB.toFixed(2);
       }
-    } push("boll", v, 1.0, txt); }
+    } push("boll", v, PROFILE_VOTE_WEIGHTS.volatility, txt); }
   // 5) Volume-price correlation —— V2 新增维度
   { let v = 0, txt = "量价相关性中性";
     if (volPriceCorr != null) {
-      const c = volPriceCorr;
-      const recentRoc = roc != null ? roc : 0;
-      if (c > 0.3) {
-        v = recentRoc > 0 ? 0.6 : -0.6;
-        txt = "量价同向(corr=" + c.toFixed(2) + ")，" + (recentRoc > 0 ? "放量上涨" : "放量下跌");
-      } else if (c < -0.3) {
-        v = 0.2; // 背离：温和反转信号
-        txt = "量价背离(corr=" + c.toFixed(2) + ")，潜在反转";
-      } else {
-        txt = "量价弱相关(corr=" + c.toFixed(2) + ")";
-      }
-    } push("volprice", v, 0.8, txt); }
+      const scored = scoreVolumePriceCorrelation(volPriceCorr, roc);
+      v = scored.vote;
+      txt = scored.text;
+    } push("volprice", v, PROFILE_VOTE_WEIGHTS.volume, txt); }
   // 6) Relative strength vs benchmark —— 市场状态放大效应
   { const rs = relativeStrengthVote(relativeStrength);
     // 牛市/熊市中相对强弱更关键，放大 1.2 倍（限制在 [-1,1]）
     const amplified = state === 'range' ? rs.vote : Math.max(-1, Math.min(1, rs.vote * 1.2));
-    push("relative", amplified, 1.0, rs.text + "(" + stateLabel + "市场)"); }
+    push("relative", amplified, PROFILE_VOTE_WEIGHTS.relative, rs.text + "(" + stateLabel + "市场)"); }
   return _aggregateVotes(votes, reasons);
 }
 
@@ -1660,11 +1896,7 @@ function _aggregateVotes(votes, reasons) {
   const score = wsum ? sum / wsum : 0;
   const confidence = Math.round(Math.abs(score) * 100);
   let signal;
-  if (score >= 0.5) signal = "STRONG BUY";
-  else if (score >= 0.15) signal = "BUY";
-  else if (score > -0.15) signal = "NEUTRAL";
-  else if (score > -0.5) signal = "SELL";
-  else signal = "STRONG SELL";
+  signal = ({ 2:'STRONG BUY', 1:'BUY', 0:'NEUTRAL', '-1':'SELL', '-2':'STRONG SELL' })[profileScoreBand(score)];
   const indObj = {};
   for (const r of reasons) indObj[r.key] = { vote: r.vote, weight: r.weight, text: r.text };
   return { votes, reasons, indObj, score, confidence, signal };
@@ -1755,7 +1987,7 @@ function computeDailyAnalysis(sym, mkt, rows, options = {}) {
   }
   const dataQuality = buildDataQuality(sym, mkt, rows, volR, atr, referenceDate);
   const tradePlan = buildTradePlan({
-    cur, sma20, sma50, sma200, sma20Dist, roc, rsi, macdHist,
+    cur, sma20, sma50, sma200, sma20Dist, roc, rsi: rsi12, macdHist,
     boll, volR, atr, score, signal, stopLoss, takeProfit, dataQuality, relativeStrength, marketRegime
   });
   // Profile research is opt-in so historical backtests retain their current
@@ -1767,7 +1999,13 @@ function computeDailyAnalysis(sym, mkt, rows, options = {}) {
         closes,
         volumes: vols,
         relativeStrength,
-        formalAnalysis: { score, signal, votes },
+        formalAnalysis: {
+          score, signal, votes, rsi12, marketRegime, volPriceCorr,
+          currentPrice: cur, atr, sma20, sma50, sma200,
+          bollMiddle: boll?.middle ?? null, bollUpper: boll?.upper ?? null,
+          bollLower: boll?.lower ?? null, bollPctB: boll?.pctB ?? null,
+          dataQuality, daily: true, tradePlan,
+        },
       });
     } catch (error) {
       // Research-only profiles must never turn a healthy formal analysis into a
@@ -1777,12 +2015,29 @@ function computeDailyAnalysis(sym, mkt, rows, options = {}) {
         requestedProfileId: FORMAL_SIGNAL_PROFILE_ID,
         effectiveProfileId: FORMAL_SIGNAL_PROFILE_ID,
         selectorEnabled: false,
-        actionPolicy: 'balanced_only',
+        actionPolicy: 'single_active_profile',
         profiles: {},
         error: 'profile_research_unavailable',
       };
       console.error(`[signal-profiles] ${sym} ${error.message}`);
     }
+  }
+
+  // A shared opportunity identity with three confirmation-speed views.  This
+  // remains a shadow explanation layer: the effective profile is still locked
+  // to balanced, while the arbiter already accepts the bundle's effective id.
+  let opportunityModel = null;
+  try {
+    opportunityModel = buildStockOpportunityAssessment({
+      rows,
+      analysis: {
+        rsi6, rsi12, rsi24, sma20, sma50, macdHist, prevHist,
+        bollPctB: boll ? boll.pctB : null,
+        volRatio: volR, relativeStrength, marketRegime, dataQuality,
+      },
+    });
+  } catch (error) {
+    console.error(`[stock-opportunity] ${sym} ${error.message}`);
   }
 
   return {
@@ -1797,6 +2052,7 @@ function computeDailyAnalysis(sym, mkt, rows, options = {}) {
     votes, reasons, indObj,
     score, confidence, signal, stopLoss, takeProfit,
     signalProfiles,
+    opportunityModel,
     dataQuality, tradePlan, relativeStrength, marketRegime, longTermTrend,
     volPriceCorr: volPriceCorr, // D3: V2 量价相关性（V1 为 null）
   };
@@ -1811,6 +2067,7 @@ function analyzeRowsForBacktest(sym, mkt, rows, benchmark = null) {
     benchmark,
     intradayVolAdjust: false,
     includeLongTermTrend: true,
+    includeProfileAnalyses: true,
     referenceDate: rows[rows.length - 1]?.date || null,
   });
   return {
@@ -1818,33 +2075,28 @@ function analyzeRowsForBacktest(sym, mkt, rows, benchmark = null) {
     symbol: a.symbol, market: a.market, asOfDate: a.asOfDate, currentPrice: a.currentPrice,
     score: a.score, signal: a.signal, confidence: a.confidence, tradePlan: a.tradePlan,
     longTermTrend: a.longTermTrend,
-    sma20: a.sma20, sma20Dist: a.sma20Dist, roc: a.roc, rsi: a.rsi, macdHist: a.macdHist, volRatio: a.volRatio,
-    atr: a.atr, relativeStrength: a.relativeStrength, marketRegime: a.marketRegime
+    sma20: a.sma20, sma20Dist: a.sma20Dist, roc: a.roc, rsi: a.rsi, rsi6:a.rsi6, rsi12: a.rsi12, rsi24:a.rsi24,
+    macdHist: a.macdHist, volRatio: a.volRatio, votes: a.votes, volPriceCorr: a.volPriceCorr,
+    atr: a.atr, bollPctB:a.bollPctB, bollUpper:a.bollUpper, bollLower:a.bollLower,
+    avgDollarVolume20d:a.avgDollarVolume20d, dataQuality:a.dataQuality, daily:a.daily !== false,
+    relativeStrength: a.relativeStrength, marketRegime: a.marketRegime,
+    opportunityModel: a.opportunityModel,
+    signalProfiles: a.signalProfiles,
   };
 }
 
 // 信号链 tone 语义（v17 仲裁器架构）：
-//   bull    绿  入场动作（PROBE/ADD）—— 机会已通过所有 blocked 级约束
+//   bull    绿  入场动作（OPEN/ADD）—— 机会已通过所有 blocked 级约束
 //   neutral 灰  持有（HOLD）—— 持仓状态稳定，无主动动作
 //   watch   蓝  自然观察（WATCH）—— 尚未进入高质量买点，无机会可拦截
 //   amber   黄  拦截观察（WATCH/HOLD）—— 机会存在但被 blocked 级约束延后（与 watch 视觉区分）
-//   hot     橙  减仓（TRIM）—— 进入止盈/过热区，主动降低仓位
-//   bear    红  风险退出（EXIT/AVOID）—— 强制清仓或禁止入场
+//   hot     橙  减仓（REDUCE）—— 进入止盈/过热区，主动降低仓位
+//   bear    红  风险退出（CLOSE/RISK_OFF）—— 强制清仓或禁止入场
 // v17 关键变化：
 //   1. 财报/经济门降为 advisory（不改 state，仅提醒），不再吞没入场信号
 //   2. industry/data/forward/freshness/execution-risk 等硬约束拦截时 tone=amber（不再是 watch）
 //   3. 移除 A股观察模式门控（applyMarketObservationGate）
 //   4. auditTrail 字段记录所有约束评估结果，供前端展示
-const SWING_STATE_META = {
-  WATCH: { label: "观察", tone: "watch", urgency: "low" },
-  PROBE: { label: "试仓", tone: "bull", urgency: "medium" },
-  ADD: { label: "加仓", tone: "bull", urgency: "medium" },
-  HOLD: { label: "持有", tone: "neutral", urgency: "low" },
-  TRIM: { label: "减仓", tone: "hot", urgency: "high" },
-  EXIT: { label: "清仓", tone: "bear", urgency: "urgent" },
-  AVOID: { label: "回避", tone: "bear", urgency: "medium" },
-};
-
 function swingPrice(v, market) {
   if (v == null || !isFinite(v)) return null;
   if (market === "KR") return Math.round(v);
@@ -1853,162 +2105,38 @@ function swingPrice(v, market) {
 
 // P2-1: addWeekdays 已移至 indicators.mjs
 
-// B5 拆分：从 buildSwingDecision 抽出的价位区计算。
-//   输入：analysis 关键指标 + plan + 持仓上下文 + 市场旗标
-//   输出：买入区/确认价/失效位/目标价/过热旗标/入场资格
-function computeSwingZones(ctx) {
-  const { analysis, plan, cur, atr, sma20, setupKey, hasPosition, pnlPct, cost, marketWeak, dataOk, riskHigh, validationFatal, reliabilityScore, probability, expectancy } = ctx;
-  let center = sma20 || cur;
-  if (setupKey === "mean_reversion" && analysis.bollLower != null) center = Math.max(analysis.bollLower, cur - atr);
-  if (setupKey === "breakout_follow") center = Math.max(sma20 || cur, cur - 0.5 * atr);
-  let buyLow = center - 0.65 * atr;
-  let buyHigh = center + 0.35 * atr;
-  if (analysis.bollLower != null) buyLow = Math.max(buyLow, analysis.bollLower * 0.985);
-  if (buyLow > buyHigh) [buyLow, buyHigh] = [buyHigh, buyLow];
-  const inBuyZone = cur >= buyLow && cur <= buyHigh;
-  const confirmPrice = Math.max(sma20 || cur, cur + 0.25 * atr);
-  let invalidation = plan.stopLoss != null && plan.stopLoss < cur ? plan.stopLoss : (sma20 ? sma20 - 1.35 * atr : cur - 1.5 * atr);
-  if (analysis.bollLower != null) invalidation = Math.min(invalidation, analysis.bollLower);
-  if (hasPosition && pnlPct != null && pnlPct >= 10 && sma20) invalidation = Math.max(invalidation, Math.max(cost, sma20 - atr));
-  const target1 = Math.max(analysis.bollUpper || 0, buyHigh + 2 * atr, cur + 1.5 * atr);
-  const target2 = target1 + atr;
-  const overheat = (analysis.rsi != null && analysis.rsi >= 72)
-    || (analysis.sma20Dist != null && analysis.sma20Dist >= 10)
-    || (analysis.bollPctB != null && analysis.bollPctB >= 0.95);
-  const entryQualified = dataOk && !riskHigh && !marketWeak && !validationFatal
-    && reliabilityScore >= 35 && (probability == null || probability >= 52)
-    && (expectancy == null || expectancy > 0);
-  const addQualified = entryQualified && reliabilityScore >= 45 && (probability == null || probability >= 54);
-  return { buyLow, buyHigh, inBuyZone, confirmPrice, invalidation, target1, target2, overheat, entryQualified, addQualified };
-}
-
-// B5 拆分：从 buildSwingDecision 抽出的核心状态机。
-//   根据有效动作 + 入场资格 + 持仓状态 + 价位判定 PROBE/ADD/HOLD/TRIM/EXIT/AVOID。
-function resolveSwingState(ctx) {
-  const { effectiveAction, entryQualified, addQualified, inBuyZone, hasPosition, cur, buyHigh, invalidation, sma20, overheat, pnlPct, target1, marketWeak, analysis, dataOk, validationFatal } = ctx;
-  let state = hasPosition ? "HOLD" : "WATCH";
-  let tranchePct = 0;
-  let summary = hasPosition ? "已有仓位，暂按持有条件管理。" : "尚未进入高质量买点，保持观察。";
-  let trigger = "等待价格进入买入区并通过趋势确认。";
-  if (!hasPosition) {
-    if (effectiveAction === "SELL") {
-      // v17：AVOID 仅保留给明确卖出信号（严重风险，禁止入场）
-      // 原 REDUCE / marketWeak+score<0 不再触发 AVOID，降级为 WATCH（偏弱但非严重风险）
-      // state 值由 scoreToState 覆盖，AVOID 赋值为死计算，已移除
-      summary = "明确卖出信号，禁止新开仓。";
-      trigger = "待卖出信号解除且出现反向买入信号后再评估。";
-    } else if ((effectiveAction === "ADD" || effectiveAction === "BUY" || effectiveAction === "WATCH") && entryQualified && inBuyZone) {
-      state = "PROBE"; tranchePct = 25;
-      summary = "进入可试仓区域，先建立计划仓位的 25%。";
-      trigger = "当前位于买入区；收盘不跌破失效位时执行试仓。";
-    } else if (entryQualified) {
-      summary = cur > buyHigh ? "信号合格但价格偏离买入区，等待回踩，不追高。" : "信号合格，等待价格确认后试仓。";
-      trigger = cur > buyHigh ? "回落至买入区后重新确认。" : "站上确认价且量价不转弱后试仓。";
-    } else if (effectiveAction === "REDUCE" || (marketWeak && analysis.score < 0)) {
-      // v17：偏弱但非严重风险 → WATCH（不是 AVOID）；保留明确说明
-      summary = "技术面/市场偏弱，暂不新开；待信号修复后再评估。";
-      trigger = "市场状态修复或个股出现明确买入信号后再评估。";
-    } else if (!dataOk) {
-      summary = "数据质量不足，保持观察。";
-    } else if (validationFatal) {
-      summary = "样本外验证不支持，保持观察。";
-    }
-  } else {
-    if (cur <= invalidation || effectiveAction === "SELL") {
-      state = "EXIT"; tranchePct = 100;
-      summary = "失效条件或清仓信号已触发，优先退出全部仓位。";
-      trigger = "尽快按可成交价格退出；不等待反弹确认。";
-    } else if (effectiveAction === "REDUCE" || (marketWeak && cur < (sma20 || cur + 1))) {
-      state = "TRIM"; tranchePct = 50;
-      summary = "趋势风险上升，建议降低约 50% 现有仓位。";
-      trigger = "执行减仓后，剩余仓位以失效位管理。";
-    } else if ((overheat && pnlPct != null && pnlPct >= 8) || (cur >= target1 && pnlPct != null && pnlPct > 0)) {
-      state = "TRIM"; tranchePct = 25;
-      summary = "价格进入过热/止盈区，建议兑现约 25% 仓位。";
-      trigger = "分批止盈，不一次性猜顶部。";
-    } else if ((effectiveAction === "ADD" || effectiveAction === "BUY" || effectiveAction === "WATCH") && addQualified && inBuyZone) {
-      state = "ADD"; tranchePct = 25;
-      summary = "回踩处于可控区域，可增加计划仓位的 25%。";
-      trigger = "加仓后总风险仍以失效位为上限。";
-    } else {
-      state = "HOLD";
-      summary = pnlPct != null && pnlPct >= 0 ? "持仓结构未破坏，继续持有并等待止盈区。" : "尚未触发清仓条件，维持仓位但不盲目补仓。";
-      trigger = "站上确认价可继续持有；跌破失效位转清仓。";
-    }
+function classifyValidationEvidence(reliability) {
+  const symbolRolling = String(reliability?.rollingAudit?.level || 'unknown');
+  const poolRolling = String(reliability?.poolThresholdAudit?.rollingAudit?.level || 'unknown');
+  const calibration = String(reliability?.calibration?.level || 'unknown');
+  const weakReasons = [];
+  const cautionReasons = [];
+  if (symbolRolling === 'fail') weakReasons.push('该股票的相似信号在后续独立样本中未能稳定重复优势');
+  else if (symbolRolling === 'unstable') cautionReasons.push('该股票的相似信号在不同验证阶段表现不一致');
+  if (poolRolling === 'fail') weakReasons.push('同类股票的相似形态在后续独立样本中未能稳定重复优势');
+  else if (poolRolling === 'unstable') cautionReasons.push('同类股票的相似形态在不同验证阶段表现不一致');
+  // 概率校准会消费上面的滚动结果；滚动已经明确失败时不再重复计一条派生失败。
+  if (calibration === 'fail' && weakReasons.length === 0) {
+    weakReasons.push('综合历史样本后，当前形态的胜率与收益预期不足');
   }
-  return { state, tranchePct, summary, trigger };
-}
-
-// B5 拆分：长期趋势过滤层。基于 SMA120/SMA200 + ROC90 对短期决策做过滤。
-//   长期下行：PROBE→WATCH, ADD→HOLD；持仓反弹至120日线 → TRIM 30%
-//   长期上行：EXIT→TRIM（保留减仓而非清仓）
-//   趋势转换：ADD→HOLD
-function applyLongTermFilter(state, ctx) {
-  const { hasPosition, cur, longTerm, effectiveAction, tranchePct } = ctx;
-  if (!longTerm) return { state, tranchePct, summary: null, trigger: null, adjusted: false, note: null, prevState: state };
-  const longTermBull = longTerm.key === "bull";
-  const longTermBear = longTerm.key === "bear";
-  const longTermTransition = longTerm.key === "transition";
-  let newState = state, newTranche = tranchePct;
-  let summary = null, trigger = null, note = null;
-  const adjusted = false;
-  const prevState = state;
-
-  if (longTermBear) {
-    // 长期下行：新仓禁止入场；已有仓位倾向减仓而非加仓
-    if (state === "PROBE") {
-      newState = "WATCH"; newTranche = 0;
-      summary = "长期趋势下行，短期反弹不构成入场，保持观察。";
-      trigger = "待长期趋势修复（站上120日均线且斜率转正）后再评估。";
-      return { state: newState, tranchePct: newTranche, summary, trigger, adjusted: true, note: "长期下行 → 试仓降级为观察", prevState };
-    }
-    if (state === "ADD") {
-      newState = "HOLD"; newTranche = 0;
-      summary = "长期趋势下行，不加仓；已有仓位择机减仓。";
-      trigger = "若短期转弱或触及止盈区先减仓兑现。";
-      return { state: newState, tranchePct: newTranche, summary, trigger, adjusted: true, note: "长期下行 → 加仓降级为持有", prevState };
-    }
-    if (state === "HOLD" && hasPosition) {
-      // 长期下行中的持仓：价格反弹到120日线附近时主动 TRIM（减仓兑现良机）
-      const sma120Val = longTerm.sma120;
-      if (sma120Val != null && cur >= sma120Val) {
-        newState = "TRIM"; newTranche = 30;
-        summary = "长期趋势下行，价格反弹至120日均线附近，择机减仓兑现。";
-        trigger = "反弹到均线是减仓良机；若后续跌破均线再评估是否清仓。";
-        return { state: newState, tranchePct: newTranche, summary, trigger, adjusted: true, note: "长期下行 · 反弹至均线 → 主动减仓30%", prevState };
-      }
-      if (sma120Val != null && cur > sma120Val * 0.95) {
-        // 价格接近120日线（偏离<5%），提示减仓机会但保持 HOLD
-        return { state: newState, tranchePct: newTranche, summary: null, trigger: null, adjusted: false, note: "长期下行 · 价格接近120日线，关注减仓机会", prevState };
-      }
-      // 价格远低于120日线，深套中保持 HOLD
-      return { state: newState, tranchePct: newTranche, summary: null, trigger: null, adjusted: false, note: "长期下行 → 持有需警惕趋势性风险", prevState };
-    }
-    if (state === "WATCH" && hasPosition && longTerm.sma120 != null && cur >= longTerm.sma120) {
-      // 长期下行 + 持仓 + 价格反弹到均线：WATCH 也升级为 TRIM
-      newState = "TRIM"; newTranche = 30;
-      summary = "长期趋势下行，价格反弹至120日均线附近，择机减仓兑现。";
-      trigger = "反弹到均线是减仓良机；若后续跌破均线再评估是否清仓。";
-      return { state: newState, tranchePct: newTranche, summary, trigger, adjusted: true, note: "长期下行 · 反弹至均线 → 主动减仓30%", prevState };
-    }
-  } else if (longTermBull) {
-    // 长期上行：跌破失效位时不一定清仓，先减仓
-    if (state === "EXIT" && effectiveAction !== "SELL" && hasPosition) {
-      newState = "TRIM"; newTranche = Math.max(tranchePct, 50);
-      summary = "长期趋势仍向上，短期破位先减仓而非清仓。";
-      trigger = "减仓后剩余仓位以失效位管理；若长期趋势转下再清仓。";
-      return { state: newState, tranchePct: newTranche, summary, trigger, adjusted: true, note: "长期上行 → 清仓降级为减仓", prevState };
-    }
-  } else if (longTermTransition) {
-    // 趋势转换：信号从简
-    if (state === "ADD") {
-      newState = "HOLD"; newTranche = 0;
-      summary = "长期趋势处于转换期，不加仓，等方向明确。";
-      trigger = "待 120 日线斜率明确后再决策。";
-      return { state: newState, tranchePct: newTranche, summary, trigger, adjusted: true, note: "趋势转换 → 加仓降级为持有", prevState };
-    }
-  }
-  return { state: newState, tranchePct: newTranche, summary, trigger, adjusted, note, prevState };
+  const insufficient = !reliability
+    || [symbolRolling, poolRolling, calibration].some(level => ['unknown', 'thin'].includes(level));
+  const level = weakReasons.length ? 'weak'
+    : cautionReasons.length ? 'caution'
+      : insufficient ? 'insufficient' : 'supportive';
+  const reasons = weakReasons.length ? weakReasons
+    : cautionReasons.length ? cautionReasons
+      : insufficient ? ['历史验证尚未完成或样本不足，不改变当前技术形态判断'] : [];
+  return {
+    level,
+    label: level === 'weak' ? '历史验证偏弱'
+      : level === 'caution' ? '历史验证不稳定'
+        : level === 'insufficient' ? '历史样本待积累' : '历史验证支持',
+    reasons,
+    symbolRolling,
+    poolRolling,
+    calibration,
+  };
 }
 
 // ── 风险配置（D1 新增）──────────────────────────────────────────────────────
@@ -2017,9 +2145,9 @@ function applyLongTermFilter(state, ctx) {
 const DEFAULT_RISK_CONFIG = Object.freeze({
   accountSize: 100000,        // 账户金额（基准货币）
   riskPerTradePct: 1.0,       // 单笔风险占比 %（0.5-3）
-  trancheProbe: 25,           // PROBE 加仓比例 %（10-50）
+  trancheOpen: 25,            // OPEN 试仓比例 %（10-50）
   trancheAdd: 25,             // ADD 加仓比例 %（10-50）
-  trancheTrim: 30,            // TRIM 减仓比例 %（10-50）
+  trancheReduce: 30,          // REDUCE 减仓比例 %（10-50）
   maxPositionRiskPct: 3.0,    // 单标的最大累计风险 %（1-8）
 });
 
@@ -2027,14 +2155,16 @@ function getRiskConfig() {
   // 优先读 risk_config；若不存在则从旧 risk_budget 迁移
   const cur = getSystemSetting('risk_config', null).value;
   if (cur && typeof cur === 'object') {
-    return {
+    const normalized = {
       accountSize: Number(cur.accountSize) || DEFAULT_RISK_CONFIG.accountSize,
       riskPerTradePct: Number(cur.riskPerTradePct ?? cur.riskPct) || DEFAULT_RISK_CONFIG.riskPerTradePct,
-      trancheProbe: Number(cur.trancheProbe) || DEFAULT_RISK_CONFIG.trancheProbe,
+      trancheOpen: Number(cur.trancheOpen ?? cur.trancheProbe) || DEFAULT_RISK_CONFIG.trancheOpen,
       trancheAdd: Number(cur.trancheAdd) || DEFAULT_RISK_CONFIG.trancheAdd,
-      trancheTrim: Number(cur.trancheTrim) || DEFAULT_RISK_CONFIG.trancheTrim,
+      trancheReduce: Number(cur.trancheReduce ?? cur.trancheTrim) || DEFAULT_RISK_CONFIG.trancheReduce,
       maxPositionRiskPct: Number(cur.maxPositionRiskPct) || DEFAULT_RISK_CONFIG.maxPositionRiskPct,
     };
+    if (!('trancheOpen' in cur) || !('trancheReduce' in cur)) setSystemSetting('risk_config', normalized);
+    return normalized;
   }
   // 旧 risk_budget 兼容
   const legacy = getSystemSetting('risk_budget', null).value;
@@ -2042,9 +2172,9 @@ function getRiskConfig() {
     return {
       accountSize: Number(legacy.accountSize) || DEFAULT_RISK_CONFIG.accountSize,
       riskPerTradePct: Number(legacy.riskPct) || DEFAULT_RISK_CONFIG.riskPerTradePct,
-      trancheProbe: DEFAULT_RISK_CONFIG.trancheProbe,
+      trancheOpen: DEFAULT_RISK_CONFIG.trancheOpen,
       trancheAdd: DEFAULT_RISK_CONFIG.trancheAdd,
-      trancheTrim: DEFAULT_RISK_CONFIG.trancheTrim,
+      trancheReduce: DEFAULT_RISK_CONFIG.trancheReduce,
       maxPositionRiskPct: DEFAULT_RISK_CONFIG.maxPositionRiskPct,
     };
   }
@@ -2059,12 +2189,12 @@ function setRiskConfig(input) {
       ? Number(input.accountSize) : cfg.accountSize,
     riskPerTradePct: Number.isFinite(Number(input.riskPerTradePct)) && Number(input.riskPerTradePct) > 0 && Number(input.riskPerTradePct) <= 10
       ? Number(input.riskPerTradePct) : cfg.riskPerTradePct,
-    trancheProbe: Number.isFinite(Number(input.trancheProbe)) && Number(input.trancheProbe) >= 5 && Number(input.trancheProbe) <= 100
-      ? Number(input.trancheProbe) : cfg.trancheProbe,
+    trancheOpen: Number.isFinite(Number(input.trancheOpen)) && Number(input.trancheOpen) >= 5 && Number(input.trancheOpen) <= 100
+      ? Number(input.trancheOpen) : cfg.trancheOpen,
     trancheAdd: Number.isFinite(Number(input.trancheAdd)) && Number(input.trancheAdd) >= 5 && Number(input.trancheAdd) <= 100
       ? Number(input.trancheAdd) : cfg.trancheAdd,
-    trancheTrim: Number.isFinite(Number(input.trancheTrim)) && Number(input.trancheTrim) >= 5 && Number(input.trancheTrim) <= 100
-      ? Number(input.trancheTrim) : cfg.trancheTrim,
+    trancheReduce: Number.isFinite(Number(input.trancheReduce)) && Number(input.trancheReduce) >= 5 && Number(input.trancheReduce) <= 100
+      ? Number(input.trancheReduce) : cfg.trancheReduce,
     maxPositionRiskPct: Number.isFinite(Number(input.maxPositionRiskPct)) && Number(input.maxPositionRiskPct) > 0 && Number(input.maxPositionRiskPct) <= 20
       ? Number(input.maxPositionRiskPct) : cfg.maxPositionRiskPct,
   };
@@ -2084,7 +2214,7 @@ function getEarningsSummary(symbol, market, policy = getEarningsPolicy()) {
   return summarizeEarningsProximity(row, { maxAgeHours: policy.calendarMaxAgeHours });
 }
 // 分组事件覆盖（原 industry-risk overlay）：刻意独立于技术评分。
-// 高风险事件只能延后新仓，不能升级入场或削弱既有的 TRIM/EXIT 风险动作。
+// 高风险事件只能延后新仓，不能升级入场或削弱既有的 REDUCE/CLOSE 风险动作。
 // v1：risk_group 重命名为 group_key；并支持跨市场关联（Phase 2，由 grouping.mjs 完成）。
 function getGroupRiskOverlay(symbol, market) {
   const safeSymbol = String(symbol || '').trim().toUpperCase();
@@ -2114,6 +2244,81 @@ function groupRiskReason(risk) {
     : first.isPeer ? `同组 ${first.sourceSymbol} 的` : '该标的的';
   const scope = { industry: '同业传播', supply_chain: '供应链传播', macro: '宏观传播', issuer: '公司主体' }[first.riskScope] || '风险传播';
   return `${source}${scope}风险：${first.keyReasoning || first.title || 'LLM 已标记的负面事件'}`;
+}
+
+function applyEventExecutionOverlay(decision, { earnings = null, groupRisk = null, policy = getEarningsPolicy() } = {}) {
+  if (!decision) return decision;
+  const blockers = [];
+  if (isEligibleEarningsEvent(earnings)
+    && Number(earnings.days_to_earnings) <= Number(policy.stockEntryBlackoutDays || 0)) {
+    blockers.push({
+      key:'earnings_blackout', label:'临近已核验财报', severity:'high',
+      reason:`距已核验财报仅 ${earnings.days_to_earnings} 个自然日，暂停新增仓位。`,
+    });
+  }
+  const groupRiskReady = groupRisk?.ok === true && groupRisk?.coverage?.status === 'ready'
+    && groupRisk?.level === 'high' && Array.isArray(groupRisk?.items) && groupRisk.items.length > 0;
+  if (groupRiskReady) {
+    blockers.push({ key:'group_news_risk', label:'分组高风险事件', severity:'high', reason:groupRiskReason(groupRisk) });
+  }
+
+  const entryState = decision.executionAction === 'OPEN' || decision.executionAction === 'ADD';
+  const eventGate = {
+    triggered:entryState && blockers.length > 0,
+    wouldBlockEntry:blockers.length > 0,
+    blockers,
+    policy:{ stockEntryBlackoutDays:Number(policy.stockEntryBlackoutDays || 0) },
+  };
+  if (!eventGate.triggered) return { ...decision, eventGate };
+
+  const hasPosition = decision?.position?.hasPosition === true;
+  const executionAction = hasPosition ? 'HOLD' : 'NONE';
+  const opportunityStage = 'BLOCKED';
+  const meta = executionAction === 'HOLD'
+    ? STOCK_EXECUTION_ACTION_META.HOLD
+    : STOCK_OPPORTUNITY_STAGE_META.BLOCKED;
+  const reason = blockers.map(item => item.reason).join('；');
+  return {
+    ...decision,
+    preEventOpportunityStage:decision.opportunityStage,
+    preEventExecutionAction:decision.executionAction,
+    opportunityStage,
+    executionAction,
+    label:meta.label,
+    tone:meta.tone,
+    urgency:meta.urgency,
+    tranchePct:0,
+    recommendedShares:0,
+    actionable:false,
+    summary:`${reason} 原${decision.label || decision.executionAction}结论仅降级为${meta.label}；不改变减仓或退出规则。`,
+    sharesBasis:null,
+    stateSource:'event_risk_overlay',
+    decisionCode:'EVENT_ENTRY_BLOCKED',
+    eventGate,
+  };
+}
+
+function buildExecutionBlockers(decision) {
+  const items = [];
+  const add = item => {
+    if (!item?.key || items.some(existing => existing.key === item.key)) return;
+    items.push(item);
+  };
+  const readiness = decision?.executionReadiness;
+  if (readiness && readiness.status !== 'ready') {
+    add({ key:`readiness:${readiness.status}`, label:readiness.label || '执行条件未满足', severity:readiness.tone === 'bear' ? 'high' : 'medium', reason:readiness.reason || '' });
+  }
+  if (decision?.chaseGate?.triggered && decision.chaseGate?.enabled !== false) {
+    add({ key:'chase_gate', label:'价格偏离过大', severity:'medium', reason:decision.chaseGate.reason || '' });
+  }
+  if (decision?.extSessionGate?.triggered) {
+    add({ key:'extended_session', label:'盘前盘后风险', severity:'high', reason:decision.extSessionGate.reason || '' });
+  }
+  for (const blocker of decision?.eventGate?.blockers || []) add(blocker);
+  if (decision?.dataGate?.status && decision.dataGate.status !== 'pass') {
+    add({ key:'data_gate', label:'关键数据不可执行', severity:'high', reason:(decision.dataGate.reasons || []).join('；') });
+  }
+  return items;
 }
 // ── API Key 管理（D1 新增）──────────────────────────────────────────────────
 // 存储在 system_settings.api_keys，支持多 provider（DeepSeek/OpenAI/Anthropic 等）。
@@ -2194,20 +2399,20 @@ function deleteApiKey(provider) {
   return true;
 }
 
-// B5 拆分：建议股数计算。PROBE/ADD 用风险预算；TRIM/EXIT 用持仓百分比。
+// B5 拆分：建议股数计算。OPEN/ADD 用风险预算；REDUCE/CLOSE 用持仓百分比。
 // D1 升级为 V2：应用 tranchePct（用户配置）+ 流动性约束 + 累计风险约束。
-function computeRecommendedShares(state, ctx) {
-  const { tranchePct, targetShares, shares, inBuyZone, cur, confirmPrice, invalidation, avgDollarVolume20d, market } = ctx;
+function computeRecommendedShares(executionAction, ctx) {
+  const { tranchePct, targetShares, shares, entryReference, invalidation, avgDollarVolume20d, market } = ctx;
   let recommendedShares = null;
   let sharesBasis = null; // 记录建议股数的依据
-  if (state === "PROBE" || state === "ADD") {
+  if (executionAction === "OPEN" || executionAction === "ADD") {
     if (targetShares > 0 && tranchePct > 0) {
       // 旧逻辑：用户填了计划总股数（仍保留，优先级最高）
       recommendedShares = Math.max(0, Math.min(targetShares - shares, Math.round(targetShares * tranchePct / 100)));
       sharesBasis = "计划仓位 " + tranchePct + "%";
     } else {
       // V2 新逻辑：基于单笔风险金额 × tranchePct，并应用流动性 + 累计风险约束
-      const entryRef = inBuyZone ? cur : (confirmPrice || cur);
+      const entryRef = Number(entryReference);
       const perShareRisk = (invalidation && entryRef && invalidation < entryRef) ? (entryRef - invalidation) : null;
       if (perShareRisk != null && perShareRisk > 0) {
         const cfg = getRiskConfig();
@@ -2215,12 +2420,12 @@ function computeRecommendedShares(state, ctx) {
         const accountSize = convertAccountSizeFromCny(cfg.accountSize, market);
         const accountCurrency = getMarketCurrency(market);
         const riskPerTradePct = cfg.riskPerTradePct;
-        // 用户配置的 tranchePct 覆盖状态机默认值（仅 PROBE/ADD）
-        const userTranchePct = state === "PROBE" ? cfg.trancheProbe : cfg.trancheAdd;
+        // 仲裁器已经绑定用户的试仓/加仓设置；此处只执行该比例。
+        const effectivePct = tranchePct;
         // 每批风险预算 = accountSize × riskPerTradePct% × tranchePct%
-        let riskAmount = accountSize * riskPerTradePct / 100 * userTranchePct / 100;
+        let riskAmount = accountSize * riskPerTradePct / 100 * effectivePct / 100;
         let fullShares = Math.floor(riskAmount / perShareRisk);
-        const basisParts = ["单笔风险 " + riskPerTradePct + "% × " + Math.round(accountSize) + " " + accountCurrency + " × " + userTranchePct + "% / 单股风险 " + perShareRisk.toFixed(2)];
+        const basisParts = ["单笔风险 " + riskPerTradePct + "% × " + Math.round(accountSize) + " " + accountCurrency + " × " + effectivePct + "% / 单股风险 " + perShareRisk.toFixed(2)];
 
         // 流动性约束：建议股数 ≤ 20日均成交额 × 1% / entryRef
         if (avgDollarVolume20d && entryRef && avgDollarVolume20d > 0) {
@@ -2247,28 +2452,38 @@ function computeRecommendedShares(state, ctx) {
         sharesBasis = basisParts.join("；");
       }
     }
-  } else if ((state === "TRIM" || state === "EXIT") && shares > 0 && tranchePct > 0) {
-    // V2：TRIM 用用户配置的 trancheTrim；EXIT 保持 100%
-    const cfg = getRiskConfig();
-    const userTranchePct = state === "TRIM" ? cfg.trancheTrim : 100;
-    recommendedShares = Math.min(shares, Math.max(1, Math.round(shares * userTranchePct / 100)));
-    sharesBasis = "当前持仓 " + userTranchePct + "%";
+  } else if ((executionAction === "REDUCE" || executionAction === "CLOSE") && shares > 0 && tranchePct > 0) {
+    // 仲裁器已经绑定用户的减仓设置；此处只执行，不再产生第二套比例。
+    const effectivePct = executionAction === "CLOSE" ? 100 : tranchePct;
+    recommendedShares = Math.min(shares, Math.max(1, Math.round(shares * effectivePct / 100)));
+    sharesBasis = "当前持仓 " + effectivePct + "%";
   }
   return { recommendedShares, sharesBasis };
 }
 
-// B5 重构：buildSwingDecision 拆为 4 个聚焦辅助函数（zones/state/longTerm/shares），
-//   主函数仅做输入提取 + 编排 + 返回组装。原 ~235 行降至 ~80 行，每段逻辑可独立测试。
-function buildSwingDecision(analysis, reliability, position = null) {
-  const plan = analysis?.tradePlan || null;
-  const market = (analysis?.market || "US").toUpperCase();
-  const cur = analysis?.currentPrice;
-  const atr = analysis?.atr || (cur ? cur * 0.04 : null);
-  const sma20 = analysis?.sma20 || null;
-  const setupKey = plan?.setup?.key || "none";
-  // 形态计划决定执行条件；可靠度只进入综合评分和说明，不能单独反向覆盖技术执行状态。
-  const effectiveAction = plan?.action || "WAIT";
-  const reliabilityAction = reliability?.effectiveAction || null;
+// 价位、仓位和验证事实的只读上下文。这里不生成任何交易动作。
+function buildSwingDecisionContext(analysis, reliability, position = null, { profileId = null } = {}) {
+  const selectedProfileId = String(profileId || analysis?.signalProfiles?.effectiveProfileId || 'balanced').toLowerCase();
+  const plan = analysis?.signalProfiles?.profiles?.[selectedProfileId]?.strategy || analysis?.tradePlan || null;
+  const market = String(analysis?.market || 'US').toUpperCase();
+  const currentPrice = Number(analysis?.currentPrice);
+  const rawAtr = Number(analysis?.atr);
+  const atr = Number.isFinite(rawAtr) && rawAtr > 0 ? rawAtr : null;
+  const profileMetrics = analysis?.signalProfiles?.profiles?.[selectedProfileId]?.metrics || {};
+  const strategyReferenceMa = Number(plan?.pricePlanReferenceMa);
+  const referenceMa = Number.isFinite(strategyReferenceMa) && strategyReferenceMa > 0 ? strategyReferenceMa : null;
+  const selectedRsi = Number(selectedProfileId === 'responsive' ? analysis?.rsi6 : selectedProfileId === 'confirmed' ? analysis?.rsi24 : analysis?.rsi12);
+  const bollLower = Number.isFinite(Number(profileMetrics.bollLower)) ? Number(profileMetrics.bollLower) : null;
+  const bollUpper = Number.isFinite(Number(profileMetrics.bollUpper)) ? Number(profileMetrics.bollUpper) : null;
+  const bollPctB = Number.isFinite(Number(profileMetrics.bollPctB)) ? Number(profileMetrics.bollPctB) : null;
+  const fastDistPct = currentPrice > 0 && referenceMa > 0 ? (currentPrice / referenceMa - 1) * 100 : null;
+  // Keep the current balanced production contract unchanged: its chase gate
+  // continues to use the market background. Shadow personalities use their
+  // own derived regime so their full pipeline remains internally coherent.
+  const profileRegimeKey = selectedProfileId === 'balanced'
+    ? analysis?.marketRegime?.key || null
+    : plan?.regime?.key || analysis?.marketRegime?.key || null;
+  const setupKey = plan?.setup?.key || 'none';
   const reliabilityScore = reliability?.reliabilityScore ?? plan?.confidence ?? 0;
   const probability = reliability?.calibration?.probabilityPct ?? null;
   const expectancy = reliability?.calibration?.expectancyPct ?? null;
@@ -2276,224 +2491,109 @@ function buildSwingDecision(analysis, reliability, position = null) {
   const cost = Math.max(0, Number(position?.cost || 0));
   const targetShares = Math.max(0, Number(position?.target_shares || 0));
   const hasPosition = shares > 0 && cost > 0;
-  const pnlPct = hasPosition && cur ? (cur / cost - 1) * 100 : null;
-  // 市场与数据质量旗标（zone 计算和状态机共用）
-  const marketKey = plan?.marketRegime?.key || null;
-  const marketWeak = marketKey === "risk_off" || marketKey === "downtrend";
-  const dataOk = plan?.dataQuality?.level === "ok" && analysis?.daily !== false;
-  const riskHigh = plan?.risk?.level === "high";
-  const validationFatal = ["fail", "unstable"].includes(reliability?.rollingAudit?.level)
-    || ["fail", "unstable"].includes(reliability?.poolThresholdAudit?.rollingAudit?.level)
-    || (reliability?.calibration?.riskUnitPct === 0);
+  const pnlPct = hasPosition && currentPrice > 0 ? (currentPrice / cost - 1) * 100 : null;
+  const dataOk = plan?.dataQuality?.level === 'ok' && analysis?.daily !== false;
+  const riskHigh = plan?.risk?.level === 'high';
+  const validationEvidence = classifyValidationEvidence(reliability);
+  const valid = currentPrice > 0 && atr > 0 && !!plan;
 
-  if (!cur || !atr || !plan) {
+  if (!valid) {
     return {
-      version: "swing-decision-v1", state: "WATCH", ...SWING_STATE_META.WATCH,
-      summary: "数据不足，暂不形成波段动作。", sourceAction: effectiveAction,
-      position: { hasPosition, shares, cost, pnlPct }, zones: {}, validSessions: 0,
-      reasons: ["价格、ATR 或正式日线计划不足。"], actionable: false,
+      version: 'stock-decision-context-v4-evidence-advisory', profileId: selectedProfileId,
+      valid: false,
+      sourceAction: plan?.action || 'WAIT',
+      position: { hasPosition, shares, targetShares, cost, pnlPct },
+      zones: {},
+      executionContext: {
+        dataOk: false, riskHigh: true, validationEvidence,
+        technicalAction: String(plan?.action || 'WAIT').toUpperCase(),
+        setupKey,
+      },
+      longTermTrend: analysis?.longTermTrend || null,
+      profileStrategy:{ regimeKey:profileRegimeKey, referenceMa },
+      reasons: ['价格、ATR 或正式日线计划不足。'],
     };
   }
 
-  // 1) 价位区与入场资格
-  const zones = computeSwingZones({ analysis, plan, cur, atr, sma20, setupKey, hasPosition, pnlPct, cost, marketWeak, dataOk, riskHigh, validationFatal, reliabilityScore, probability, expectancy });
-  const { buyLow, buyHigh, inBuyZone, confirmPrice, invalidation, target1, target2, overheat, entryQualified, addQualified } = zones;
-
-  // 2) 核心状态机
-  const reasons = [
-    "技术计划：" + effectiveAction + (reliabilityAction ? "；可靠度动作：" + reliabilityAction : "") + "，可靠度 " + reliabilityScore + "%" + (probability != null ? "，校准胜率 " + probability.toFixed(1) + "%" : ""),
-    "市场状态：" + (plan.marketRegime?.label || "基准未知") + "；个股形态：" + (plan.setup?.label || "等待确认"),
-  ];
-  let { state, tranchePct, summary, trigger } = resolveSwingState({
-    effectiveAction, entryQualified, addQualified, inBuyZone, hasPosition, cur, buyHigh, invalidation, sma20, overheat, pnlPct, target1, marketWeak, analysis, dataOk, validationFatal,
+  const overheatRsi = Number(plan?.policy?.overheatRsi) || 72;
+  const overheat = (Number.isFinite(selectedRsi) && selectedRsi >= overheatRsi)
+    || (fastDistPct != null && fastDistPct >= 10)
+    || (bollPctB != null && bollPctB >= 0.95);
+  const pricePlan = buildStockPricePlan({
+    profileId: selectedProfileId,
+    setupKey,
+    currentPrice,
+    atr,
+    referenceMa,
+    bollLower,
+    bollUpper,
+    prior20High: analysis?.opportunityModel?.facts?.prior20High,
+    hasPosition,
+    pnlPct,
+    cost,
+    overheat,
+    policy: plan?.policy?.pricePlan,
   });
-
-  // 3) 长期趋势过滤层（基于 SMA120/SMA200 + ROC90 对短期决策做过滤，不改核心价位计算）
-  const longTerm = analysis?.longTermTrend || null;
-  const ltResult = applyLongTermFilter(state, { hasPosition, cur, longTerm, effectiveAction, tranchePct });
-  if (ltResult.adjusted) {
-    state = ltResult.state;
-    tranchePct = ltResult.tranchePct;
-    if (ltResult.summary) summary = ltResult.summary;
-    if (ltResult.trigger) trigger = ltResult.trigger;
-  }
-  const longTermAdjusted = ltResult.adjusted;
-  const longTermNote = ltResult.note;
-  const prevState = ltResult.prevState;
-
-  // 4) 建议股数
-  const { recommendedShares, sharesBasis } = computeRecommendedShares(state, { tranchePct, targetShares, shares, inBuyZone, cur, confirmPrice, invalidation, avgDollarVolume20d: analysis?.avgDollarVolume20d || null, market });
-
-  // 5) 组装返回
-  const meta = SWING_STATE_META[state];
   const validFrom = analysis.asOfDate || new Date().toISOString().slice(0, 10);
+  const longTerm = analysis?.longTermTrend || null;
   return {
-    version: "swing-decision-v1",
-    state, label: meta.label, tone: meta.tone, urgency: meta.urgency,
-    summary, trigger,
-    actionable: ["PROBE", "ADD", "TRIM", "EXIT"].includes(state),
-    tranchePct, trancheBasis: state === "TRIM" || state === "EXIT" ? "当前持仓" : (targetShares > 0 ? "计划仓位" : "按风险预算"),
-    sharesBasis,
-    sourceAction: effectiveAction,
-    reliabilityScore, probabilityPct: probability, expectancyPct: expectancy,
+    version: 'stock-decision-context-v4-evidence-advisory', profileId: selectedProfileId,
+    valid: true,
+    sourceAction: plan.action || 'WAIT',
+    reliabilityScore,
+    probabilityPct: probability,
+    expectancyPct: expectancy,
+    position: {
+      hasPosition, shares, targetShares,
+      cost: swingPrice(cost, market),
+      currentPrice: swingPrice(currentPrice, market),
+      pnlPct: pnlPct != null ? +pnlPct.toFixed(2) : null,
+      positionType: position?.position_type || 'manual',
+      source: position?.source || 'manual',
+      openedAt: position?.opened_at || null,
+      note: position?.note || null,
+    },
+    zones: {
+      pricePlanVersion: pricePlan.pricePlanVersion,
+      status: pricePlan.status,
+      available: pricePlan.available,
+      reason: pricePlan.reason,
+      anchorType: pricePlan.anchorType,
+      anchorPrice: swingPrice(pricePlan.anchorPrice, market),
+      entryReference: swingPrice(pricePlan.entryReference, market),
+      buyLow: swingPrice(pricePlan.buyLow, market),
+      buyHigh: swingPrice(pricePlan.buyHigh, market),
+      inBuyZone: pricePlan.inBuyZone,
+      confirmation: swingPrice(pricePlan.confirmation, market),
+      invalidation: swingPrice(pricePlan.invalidation, market),
+      reassessment: swingPrice(pricePlan.reassessment, market),
+      secondaryReassessment: swingPrice(pricePlan.secondaryReassessment, market),
+      rewardRisk: pricePlan.rewardRisk == null ? null : +pricePlan.rewardRisk.toFixed(2),
+      overheat: pricePlan.overheat,
+    },
     executionContext: {
-      dataOk, riskHigh, validationFatal, marketWeak,
-      technicalAction: String(plan?.action || 'WAIT').toUpperCase(),
+      dataOk, riskHigh, validationEvidence,
+      technicalAction: String(plan.action || 'WAIT').toUpperCase(),
       setupKey,
     },
-    position: {
-      hasPosition, shares, targetShares, cost: swingPrice(cost, market), currentPrice: swingPrice(cur, market),
-      pnlPct: pnlPct != null ? +pnlPct.toFixed(2) : null,
-      positionType: position?.position_type || 'manual', source: position?.source || 'manual',
-      openedAt: position?.opened_at || null, note: position?.note || null,
-    },
-    recommendedShares,
-    zones: {
-      buyLow: swingPrice(buyLow, market), buyHigh: swingPrice(buyHigh, market), inBuyZone,
-      confirmation: swingPrice(confirmPrice, market), invalidation: swingPrice(invalidation, market),
-      target1: swingPrice(target1, market), target2: swingPrice(target2, market), overheat,
-      // 买入区与可靠度资格保留为用户决策参考；不作为二次硬门控。
-      entryQualified, addQualified,
-    },
-    validFrom, validUntil: addWeekdays(validFrom, 3), validSessions: 3,
-    reasons,
     longTermTrend: longTerm ? {
       key: longTerm.key, label: longTerm.label, tone: longTerm.tone, detail: longTerm.detail,
-      sma120: longTerm.sma120, sma200: longTerm.sma200, roc90: longTerm.roc90, slope120: longTerm.slope120,
-      votes: longTerm.votes || [],
-      adjusted: longTermAdjusted, note: longTermNote, prevState,
-  } : null,
+      sma120: longTerm.sma120, sma200: longTerm.sma200, roc90: longTerm.roc90,
+      slope120: longTerm.slope120, votes: longTerm.votes || [],
+    } : null,
+    profileStrategy:{
+      regimeKey:profileRegimeKey, pricePlanVersion:STOCK_PRICE_PLAN_VERSION,
+      referenceMa:swingPrice(referenceMa, market), bollLower:swingPrice(bollLower, market), bollUpper:swingPrice(bollUpper, market),
+    },
+    validFrom,
+    validUntil: addWeekdays(validFrom, Number(plan?.policy?.validSessions) || 3),
+    validSessions: Number(plan?.policy?.validSessions) || 3,
+    reasons: [
+      `技术计划：${plan.action || 'WAIT'}，可靠度 ${reliabilityScore}%`,
+      `个股形态：${plan.setup?.label || '等待确认'}`,
+    ],
   };
 }
-
-// 综合评分是研究倾向，不是独立的执行许可。这里检查技术计划、数据质量、
-// 高风险形态与样本外验证；不重新引入买入区或低可靠度的二次开仓门槛。
-function getExecutionReadiness(analysis, baseDecision, hasPosition) {
-  const plan = analysis?.tradePlan || {};
-  const technicalAction = String(plan.action || 'WAIT').toUpperCase();
-  const setupKey = String(plan.setup?.key || 'none').toLowerCase();
-  const setupLabel = plan.setup?.label || '等待确认';
-  const dataQuality = String(plan.dataQuality?.level || '').toLowerCase();
-  const executionContext = baseDecision?.executionContext || {};
-  const readySetups = new Set(['trend_pullback', 'breakout_follow', 'mean_reversion']);
-
-  if (!plan.action || dataQuality !== 'ok' || analysis?.daily === false) {
-    return {
-      status: 'unavailable', label: '执行条件待数据确认', tone: 'watch',
-      technicalAction, setupKey, setupLabel,
-      reason: '技术计划或正式日线数据尚未就绪。',
-    };
-  }
-  // 明确破位/卖出优先于验证说明：即使验证样本也不足，仍要如实保留技术风险状态。
-  if (technicalAction === 'SELL' || setupKey === 'risk_off') {
-    return {
-      status: 'risk_off', label: '技术面偏空', tone: 'bear',
-      technicalAction, setupKey, setupLabel,
-      reason: `技术计划为${plan.actionLabel || technicalAction} / ${setupLabel}，不新增仓位。`,
-    };
-  }
-  if (technicalAction === 'REDUCE' || setupKey === 'extended') {
-    return {
-      status: 'defer', label: '暂不追价', tone: 'watch',
-      technicalAction, setupKey, setupLabel,
-      reason: `技术计划为${plan.actionLabel || technicalAction} / ${setupLabel}，暂不新增仓位。`,
-    };
-  }
-  if (executionContext.validationFatal === true) {
-    return {
-      status: 'validation_blocked', label: '验证未通过', tone: 'bear',
-      technicalAction, setupKey, setupLabel,
-      reason: '样本外验证未通过或不稳定，暂停新增仓位。',
-    };
-  }
-  if (executionContext.riskHigh === true) {
-    return {
-      status: 'defer', label: '高风险，暂缓执行', tone: 'watch',
-      technicalAction, setupKey, setupLabel,
-      reason: '技术计划风险评估为高，暂不新增仓位。',
-    };
-  }
-  if (['BUY', 'ADD'].includes(technicalAction) && readySetups.has(setupKey)) {
-    return {
-      status: 'ready', label: '形态已确认', tone: 'bull',
-      technicalAction, setupKey, setupLabel,
-      reason: `技术计划为${plan.actionLabel || technicalAction} / ${setupLabel}，已具备执行形态。`,
-    };
-  }
-  return {
-    status: 'waiting', label: '等待形态确认', tone: 'watch',
-    technicalAction, setupKey, setupLabel,
-    reason: `技术计划为${plan.actionLabel || technicalAction} / ${setupLabel}，尚未形成执行形态。`,
-  };
-}
-
-// 最终状态合并：安全与技术执行层优先，综合评分只在技术形态就绪时决定新增仓位强弱。
-// baseDecision 的 entryQualified / inBuyZone 仍保留为用户参考，绝不在这里恢复为硬门控。
-function resolveFinalSwingState({ analysis, baseDecision, scoreState, scoreResult, hasPosition }) {
-  const readiness = getExecutionReadiness(analysis, baseDecision, hasPosition);
-  const researchSignal = scoreToResearchBias(scoreResult?.compositeScore);
-  const scoreSnapshot = {
-    state: scoreState?.state || null,
-    label: scoreState?.label || null,
-    tranchePct: scoreState?.tranchePct ?? 0,
-    reason: scoreState?.reason || null,
-  };
-  const decorate = (next, stateSource) => ({
-    ...next,
-    stateSource,
-    researchSignal,
-    executionReadiness: readiness,
-    scoringState: scoreSnapshot,
-  });
-
-  // 技术止损、止盈减仓等已有仓位管理不能被评分反向覆盖。
-  if (['EXIT', 'TRIM'].includes(baseDecision?.state)) {
-    return decorate({
-      ...scoreState,
-      state: baseDecision.state,
-      label: baseDecision.label,
-      tone: baseDecision.tone,
-      urgency: baseDecision.urgency,
-      tranchePct: baseDecision.tranchePct,
-      reason: baseDecision.summary,
-    }, 'technical_execution');
-  }
-
-  // scoreToState 已识别的安全网、临界执行风险、市场风险或盘后风险必须保留。
-  if (['EXIT', 'TRIM'].includes(scoreState?.state)) return decorate(scoreState, 'risk_gate');
-
-  if (!hasPosition && readiness.status === 'risk_off') {
-    return decorate({
-      ...scoreState,
-      state: 'AVOID', label: SWING_STATE_META.AVOID.label, tone: SWING_STATE_META.AVOID.tone,
-      urgency: SWING_STATE_META.AVOID.urgency, tranchePct: 0,
-      reason: `${readiness.reason} 综合评分${researchSignal.label}仅用于研究排序。`,
-    }, 'technical_execution');
-  }
-
-  // 弱研究倾向本身保持回避；它不会被形态状态抬高成新增仓位。
-  if (!hasPosition && scoreState?.state === 'AVOID') return decorate(scoreState, 'research_score');
-
-  const wantsNewExposure = !hasPosition
-    ? scoreState?.state === 'PROBE'
-    : scoreState?.state === 'ADD';
-  if (wantsNewExposure && readiness.status !== 'ready') {
-    const fallbackState = hasPosition ? 'HOLD' : 'WATCH';
-    const meta = SWING_STATE_META[fallbackState];
-    return decorate({
-      ...scoreState,
-      state: fallbackState,
-      label: meta.label,
-      tone: meta.tone,
-      urgency: meta.urgency,
-      tranchePct: 0,
-      reason: `研究倾向${researchSignal.label}（综合评分 ${researchSignal.score.toFixed(3)}），但${readiness.reason}${hasPosition ? '维持持有，不新增仓位。' : '保持观察。'}`,
-    }, 'technical_execution');
-  }
-
-  return decorate(scoreState, 'research_score');
-}
-
 // 活跃杠杆 ETF pair 缓存：避免每股票每 60s 都 SELECT tracker_pairs 表。
 // 失效时机：addTrackerPair / deleteTrackerPair / importTrackerPairs / migrateLegacyTrackerPairs
 let _activeEtfPairCache = null; // { etfUpper: pair, ... }
@@ -2517,38 +2617,106 @@ function applyLeveragedEtfRiskOverlay(decision, analysis, position = null) {
   const shares = Math.max(0, Number(position?.shares || 0));
   const hasPosition = shares > 0;
   const underlying = latestAnalysis?.[pair.underlying] || null;
-  const underlyingAction = underlying?.swingDecision?.state || underlying?.reliability?.effectiveAction
+  const underlyingAction = underlying?.swingDecision?.executionAction
     || underlying?.tradePlan?.action || underlying?.signal || null;
+  const underlyingStage = underlying?.swingDecision?.opportunityStage || null;
   const reliabilityScore = underlying?.swingDecision?.reliabilityScore ?? underlying?.reliability?.reliabilityScore
     ?? underlying?.tradePlan?.confidence ?? underlying?.confidence ?? null;
   const bars = db.prepare("SELECT close FROM stock_kline WHERE symbol=? AND close IS NOT NULL ORDER BY date DESC LIMIT 2").all(pair.underlying);
   const underlyingReturnPct = bars.length >= 2 && bars[1].close > 0 ? (bars[0].close / bars[1].close - 1) * 100 : null;
   const hardExit = Number.isFinite(underlyingReturnPct) && underlyingReturnPct <= -10
-    || ["EXIT", "SELL", "STRONG_SELL"].includes(underlyingAction);
-  const reduce = ["AVOID", "TRIM", "REDUCE"].includes(underlyingAction)
+    || ["CLOSE", "SELL", "STRONG_SELL"].includes(underlyingAction);
+  const reduce = underlyingStage === 'RISK_OFF' || ["REDUCE"].includes(underlyingAction)
     || (reliabilityScore != null && reliabilityScore < 20 && underlyingReturnPct != null && underlyingReturnPct < 0);
-  if (!hardExit && !reduce) return { ...decision, leveragedEtfRisk: { underlying:pair.underlying, underlyingAction, reliabilityScore, underlyingReturnPct } };
+  if (!hardExit && !reduce) return { ...decision, leveragedEtfRisk: { underlying:pair.underlying, underlyingStage, underlyingAction, reliabilityScore, underlyingReturnPct } };
 
-  const state = hasPosition ? (hardExit ? "EXIT" : "TRIM") : "AVOID";
+  const executionAction = hasPosition ? (hardExit ? "CLOSE" : "REDUCE") : "NONE";
+  const opportunityStage = 'RISK_OFF';
   const tranchePct = hasPosition ? (hardExit ? 100 : 50) : 0;
-  const meta = SWING_STATE_META[state];
+  const meta = executionAction === 'NONE'
+    ? STOCK_OPPORTUNITY_STAGE_META.RISK_OFF
+    : STOCK_EXECUTION_ACTION_META[executionAction];
   const reason = hardExit
     ? (underlyingReturnPct != null && underlyingReturnPct <= -10
       ? `底层正股单日下跌 ${underlyingReturnPct.toFixed(2)}%，触发杠杆 ETF 极端风险退出规则。`
       : `底层正股动作 ${underlyingAction}，触发杠杆 ETF 退出规则。`)
     : `底层正股动作 ${underlyingAction}${reliabilityScore != null ? `，可靠度 ${reliabilityScore}%` : ""}；杠杆 ETF 应减仓并禁止新增。`;
   return {
-    ...decision, state, label:meta.label, tone:meta.tone, urgency:meta.urgency,
+    ...decision, opportunityStage, executionAction, label:meta.label, tone:meta.tone, urgency:meta.urgency,
     summary:hasPosition ? (hardExit ? "杠杆风险规则已触发，退出优先。" : "底层趋势要求回避，建议降低杠杆 ETF 仓位。") : "底层风险未解除，禁止新开杠杆 ETF 仓位。",
-    trigger:hasPosition ? "按下一可成交时段执行；溢折价仅用于优化限价，不改变方向。" : "等待底层正股脱离 AVOID 并重新确认趋势。",
+    trigger:hasPosition ? "按下一可成交时段执行；溢折价仅用于优化限价，不改变方向。" : "等待底层正股脱离风险回避阶段并重新确认趋势。",
     actionable:hasPosition, tranchePct, trancheBasis:"当前持仓",
     recommendedShares:hasPosition ? Math.min(shares, Math.max(1, Math.round(shares * tranchePct / 100))) : 0,
     sharesBasis:hasPosition ? ("杠杆风险 · 当前持仓 " + tranchePct + "%") : null,
     zones:{ ...decision.zones, buyLow:null, buyHigh:null, inBuyZone:false },
     reasons:[reason, ...(decision.reasons || [])],
     riskOverride:true,
-    leveragedEtfRisk:{ underlying:pair.underlying, underlyingAction, reliabilityScore, underlyingReturnPct, hardExit },
+    stateSource:'leveraged_etf_risk_overlay',
+    decisionCode:hardExit ? 'LEVERAGED_ETF_HARD_EXIT' : 'LEVERAGED_ETF_RISK_REDUCE',
+    leveragedEtfRisk:{ underlying:pair.underlying, underlyingStage, underlyingAction, reliabilityScore, underlyingReturnPct, hardExit },
   };
+}
+
+function buildPersonaDecision({ analysis, profileId, reliability, position, market, liveQuote, scoreResult, executionRisk, riskConfig, earnings, groupRisk }) {
+  const decisionContext = buildSwingDecisionContext(analysis, reliability, position, { profileId });
+  let extSessionRisk = null;
+  if (market === 'US' && _extCache?.data) {
+    const extQuote = _extCache.data[analysis.symbol] || null;
+    if (extQuote && extQuote.extPrice != null) {
+      try {
+        extSessionRisk = evaluateExtendedSessionRisk({ symbol:analysis.symbol, quote:extQuote, decision:decisionContext, position });
+      } catch { extSessionRisk = null; }
+    }
+  }
+  const tranchePolicy = scaleStockProfileTranches({
+    OPEN: riskConfig.trancheOpen,
+    ADD: riskConfig.trancheAdd,
+    REDUCE: riskConfig.trancheReduce,
+  }, profileId);
+  const arbitration = arbitrateStockDecision({
+    analysis, context:decisionContext, scoreResult, executionRisk, extSessionRisk,
+    tranchePolicy, profileId,
+  });
+  let decision = {
+    ...decisionContext,
+    ...arbitration,
+    version: 'swing-decision-v4-evidence-advisory',
+    summary: arbitration.reason,
+    actionable: ['OPEN', 'ADD', 'REDUCE', 'CLOSE'].includes(arbitration.executionAction),
+    trancheBasis: ['REDUCE', 'CLOSE'].includes(arbitration.executionAction) ? '当前持仓' : '按风险预算',
+    compositeScore: scoreResult.compositeScore,
+    technicalEdge: scoreResult.technicalEdge,
+    qualityMultiplier: scoreResult.qualityMultiplier,
+    scoreFactors: scoreResult.factors,
+    scoreWeights: scoreResult.weights,
+    scoreRegime: scoreResult.regime,
+    extSessionRisk,
+  };
+  decision = applyLeveragedEtfRiskOverlay(decision, analysis, position);
+  const { recommendedShares, sharesBasis } = computeRecommendedShares(decision.executionAction, {
+    tranchePct: decision.tranchePct,
+    targetShares: Math.max(0, Number(position?.target_shares || 0)),
+    shares: Math.max(0, Number(position?.shares || 0)),
+    entryReference: decisionContext.zones?.entryReference,
+    invalidation: decisionContext.zones?.invalidation,
+    avgDollarVolume20d: analysis?.avgDollarVolume20d || null,
+    market,
+  });
+  decision.recommendedShares = recommendedShares;
+  decision.sharesBasis = sharesBasis ? `${sharesBasis} | ${decision.summary}` : decision.summary;
+  decision = applyCriticalDataGate(decision, { result:analysis, quote:liveQuote, market });
+  decision.scoreFactors = scoreResult.factors;
+  decision.compositeScore = scoreResult.compositeScore;
+  decision.scoreWeights = scoreResult.weights;
+  decision.scoringEngine = SCORING_ENGINE_VERSION;
+  decision = applyEventExecutionOverlay(decision, { earnings, groupRisk });
+  decision.stagePlan = buildStockStagePricePlan({
+    decision,
+    strategy: analysis?.signalProfiles?.profiles?.[profileId]?.strategy || null,
+  });
+  decision.executionBlockers = buildExecutionBlockers(decision);
+  decision.explanation = buildStockDecisionExplanation(decision);
+  return decision;
 }
 
 function attachReliability(result, sym, mkt) {
@@ -2556,149 +2724,50 @@ function attachReliability(result, sym, mkt) {
   const liveQuote = quote ? { name: quote.name || null, price: Number.isFinite(Number(quote.price)) ? Number(quote.price) : null, quoteTs: quote.quoteTs || latestStock?.ts || null, observationId: quote.observationId || null, providerTime: quote.providerTime || null, providerDate: providerTradeDate(quote.providerTime, mkt) || null, providerLagMinutes:quote.providerLagMinutes??null, isRealtime:!!quote.isRealtime, stale: !!quote.stale, source: quote.source || null, error:quote.error||null } : null;
   if (!result || result.error || !result.tradePlan) {
     const swingDecision = applyCriticalDataGate(null, { result, quote: liveQuote, market:mkt });
-    return { ...(result || { symbol:sym, market:mkt, error:'analysis unavailable' }), swingDecision, liveQuote, priceRisk: [] };
+    const personaVerdicts = buildStockPersonaVerdicts({ signalProfiles:result?.signalProfiles, opportunityModel:result?.opportunityModel, swingDecision });
+    return { ...(result || { symbol:sym, market:mkt, error:'analysis unavailable' }), swingDecision, personaVerdicts, liveQuote, priceRisk: [] };
   }
   const ev = getCachedActionReliability(sym, mkt, result);
-  if (!ev) {
-    const swingDecision = applyCriticalDataGate(null, { result, quote: liveQuote, market:mkt, extraReasons:['可靠度校验尚未完成'] });
-    swingDecision.scoreFactors = [];
-    swingDecision.compositeScore = null;
-    return { ...result, swingDecision, liveQuote, priceRisk: [] };
-  }
   const position = { symbol: sym, shares: 0, cost: 0, ...computePositionFromEvents(sym) };
-
-  // 基础计划保留价位与长期趋势；最终状态由技术执行、风险门控与研究评分合并决定。
-  const baseDecision = applyLeveragedEtfRiskOverlay(buildSwingDecision(result, ev, position), result, position);
-
-  // v1.4.3: 盘后风险软门控 —— 美股读取 _extCache 计算盘前/盘后破位风险
-  // 数据来源：_extCache（30s 刷新，由 /stock/extended 接口维护）
-  // 触发条件：盘后价 < buyLow/confirmation/invalidation → blocksEntry=true
-  // 效果：scoreToState 内 PROBE/ADD 降级为 WATCH/HOLD
-  let extSessionRisk = null;
-  if (mkt === 'US' && _extCache?.data) {
-    const extQuote = _extCache.data[sym] || null;
-    if (extQuote && extQuote.extPrice != null) {
-      try {
-        extSessionRisk = evaluateExtendedSessionRisk({
-          symbol: sym,
-          quote: extQuote,
-          decision: baseDecision,
-          position,
-        });
-      } catch { extSessionRisk = null; }
-    }
-  }
-
-  // Execution risk (retained as scoring factor input)
-  const priceRisk = computePriceRisk(result, position);
-  const executionRisk = computeExecutionRiskScore({ result, swingDecision: baseDecision, priceRisk });
-
-  // v2.1 修复：杠杆 ETF 风险覆盖（riskOverride）优先级最高，跳过 scoreToState
-  // 否则 scoreToState 会用 ETF 自身 exposure 覆盖掉 overlay 的 EXIT/TRIM/AVOID，
-  // 导致"底层暴跌该退出"时却显示"试仓"
-  if (baseDecision.riskOverride) {
-    const scoredDecision = {
-      ...baseDecision,
-      originalState: baseDecision.state,
-      originalLabel: baseDecision.label,
-      actionable: ['PROBE', 'ADD', 'TRIM', 'EXIT', 'AVOID'].includes(baseDecision.state),
-      compositeScore: null,
-      scoreFactors: [],
-      scoreWeights: null,
-      scoreRegime: result.marketRegime?.key || null,
-      safetyNet: false,
-      chaseGate: null,
-      extSessionGate: null,
-      extSessionRisk: extSessionRisk,
-    };
-    delete scoredDecision.displayLabel;
-    delete scoredDecision.scoreTier;
-    delete scoredDecision.conflictWarning;
-    return { ...result, swingDecision: scoredDecision, liveQuote, priceRisk };
-  }
-
-  // v2.0: 乘法方向门 exposure = technicalEdge × qualityMultiplier
-  // 长期趋势因子：数据源为 computeLongTermTrend 输出（已在 analyzeStock 中填充到 result.longTermTrend）
-  const scoreResult = computeCompositeScore({ analysis: result, reliability: ev, executionRisk, longTermTrend: result.longTermTrend });
-  const hasPosition = Number(position?.shares) > 0 && Number(position?.cost) > 0;
-  const pnlPct = hasPosition && result.currentPrice ? (result.currentPrice / Number(position.cost) - 1) * 100 : null;
-  const stateResult = scoreToState(scoreResult.compositeScore, {
-    hasPosition,
-    cur: result.currentPrice,
-    invalidation: baseDecision.zones?.invalidation,
-    pnlPct,
-    overheat: !!baseDecision.zones?.overheat,
-    sma20: result.sma20,
-    atr: result.atr,
-    marketRegime: result.marketRegime?.key || null,
-    extSessionRisk,
-    executionRiskScore: executionRisk?.score ?? null,
-  });
-
-  // 综合评分产生研究倾向；最终执行状态由技术形态、风险门控和评分共同裁决。
-  const finalStateResult = resolveFinalSwingState({
-    analysis: result,
-    baseDecision,
-    scoreState: stateResult,
-    scoreResult,
-    hasPosition,
-  });
-  const scoredDecision = {
-    ...baseDecision,
-    originalState: baseDecision.state,
-    originalLabel: baseDecision.label,
-    state: finalStateResult.state,
-    label: finalStateResult.label,
-    tone: finalStateResult.tone,
-    urgency: finalStateResult.urgency,
-    tranchePct: finalStateResult.tranchePct,
-    summary: finalStateResult.reason,
-    actionable: ['PROBE', 'ADD', 'TRIM', 'EXIT', 'AVOID'].includes(finalStateResult.state),
-    compositeScore: scoreResult.compositeScore,
-    scoreFactors: scoreResult.factors,
-    scoreWeights: scoreResult.weights,
-    scoreRegime: scoreResult.regime,
-    safetyNet: finalStateResult.safetyNet || false,
-    chaseGate: finalStateResult.chaseGate || null,
-    extSessionGate: finalStateResult.extSessionGate || null,
-    extSessionRisk: extSessionRisk,
-    stateSource: finalStateResult.stateSource,
-    researchSignal: finalStateResult.researchSignal,
-    executionReadiness: finalStateResult.executionReadiness,
-    scoringState: finalStateResult.scoringState,
+  const selection = stockProfileState.resolveForPosition(sym, position);
+  const selectedProfiles = Object.fromEntries(Object.entries(result.signalProfiles?.profiles || {}).map(([id, profile]) => [id, {
+    ...profile,
+    formalActionEligible: id === selection.effectiveProfileId,
+  }]));
+  const signalProfiles = {
+    ...(result.signalProfiles || {}),
+    profiles: selectedProfiles,
+    requestedProfileId: selection.requestedProfileId,
+    effectiveProfileId: selection.effectiveProfileId,
+    selectorEnabled: selection.selectorEnabled,
+    actionPolicy: 'single_active_profile',
+    lockedByPosition: selection.lockedByPosition,
+    positionBinding: selection.binding || null,
+    preference: selection.preference,
   };
-  // v2.1: 合并 tier 后 displayLabel 已废弃，清除 baseDecision 遗留
-  delete scoredDecision.displayLabel;
-  delete scoredDecision.scoreTier;
-  delete scoredDecision.conflictWarning;
-
-  // 最终执行状态决定建议股数；买入区与可靠度仍作为分析信息展示，由用户自行判断是否执行。
-  const { recommendedShares, sharesBasis } = computeRecommendedShares(scoredDecision.state, {
-    tranchePct: scoredDecision.tranchePct,
-    targetShares: Math.max(0, Number(position?.target_shares || 0)),
-    shares: Math.max(0, Number(position?.shares || 0)),
-    inBuyZone: !!baseDecision.zones?.inBuyZone,
-    cur: result.currentPrice,
-    confirmPrice: baseDecision.zones?.confirmation,
-    invalidation: baseDecision.zones?.invalidation,
-    avgDollarVolume20d: result?.avgDollarVolume20d || null,
-    market: String(mkt || result?.market || 'US').toUpperCase(),
-  });
-  scoredDecision.recommendedShares = recommendedShares;
-  scoredDecision.sharesBasis = sharesBasis ? (sharesBasis + ' | ' + scoredDecision.summary) : scoredDecision.summary;
-
-  // Safety net: critical data gate (stale quotes, missing data)
-  const finalDecision = applyCriticalDataGate(scoredDecision, { result, quote: liveQuote, market:mkt });
-
-  finalDecision.scoreFactors = scoreResult.factors;
-  finalDecision.compositeScore = scoreResult.compositeScore;
-  finalDecision.scoreWeights = scoreResult.weights;
-  finalDecision.scoringEngine = SCORING_ENGINE_VERSION;
-
+  const decisionAnalysis = { ...result, signalProfiles };
+  const baselineContext = buildSwingDecisionContext(decisionAnalysis, ev, position, { profileId:selection.effectiveProfileId });
+  const priceRisk = computePriceRisk(decisionAnalysis, position);
+  const executionRisk = computeExecutionRiskScore({ result:decisionAnalysis, swingDecision:baselineContext, priceRisk });
+  const scoreResult = computeCompositeScore({ analysis:decisionAnalysis, reliability: ev, executionRisk });
+  const riskConfig = getRiskConfig();
   const earnings = getEarningsSummary(sym, mkt);
   const groupRisk = getGroupRiskOverlay(sym, mkt);
+  const profileDecisions = {};
+  for (const profileId of ['responsive', 'balanced', 'confirmed']) {
+    profileDecisions[profileId] = buildPersonaDecision({
+      analysis:decisionAnalysis, profileId, reliability:ev, position, market:mkt,
+      liveQuote, scoreResult, executionRisk, riskConfig, earnings, groupRisk,
+    });
+  }
+  const finalDecision = profileDecisions[selection.effectiveProfileId] || profileDecisions.balanced;
+  const personaVerdicts = buildStockPersonaVerdicts({
+    signalProfiles,
+    profileDecisions,
+    activeProfileId: selection.effectiveProfileId,
+  });
 
-  return { ...result, reliability: ev, swingDecision: finalDecision, executionRisk, liveQuote, priceRisk, earnings, groupRisk };
+  return { ...result, signalProfiles, profileDecisions, reliability: ev, swingDecision: finalDecision, personaVerdicts, executionRisk, liveQuote, priceRisk, earnings, groupRisk };
 }
 // D7: 执行风险分 R 计算 —— 综合多维度风险信号输出 0-100 分。
 // v2.0 去重（2026-07-28）：移除与质量乘数因子重复计分的维度，仅保留独立执行风险。
@@ -2710,10 +2779,7 @@ function attachReliability(result, sym, mkt) {
 //   1) ATR% 波动率（>8% 加 20，>5% 加 10）
 //   2) priceRisk 数组（每条 high 加 15、mid 加 8）
 //   3) 持仓浮亏（pnlPct<=-30 加 15，<=-15 加 8）
-// 已移除（与质量乘数因子重复计分）：
-//   - 市场状态 → marketQuality 因子（signal_scoring.mjs）
-//   - 可靠度校准 → reliabilityFactor 因子
-//   - 量价相关性极端 → technicalEdge（技术投票）
+// 市场状态、可靠度和量价相关性不在这里重复计风险分。
 function computeExecutionRiskScore({ result, swingDecision, priceRisk }) {
   const parts = [];
   let score = 0;
@@ -2742,7 +2808,7 @@ function computeExecutionRiskScore({ result, swingDecision, priceRisk }) {
   }
 
   score = Math.max(0, Math.min(100, score));
-  // 风险等级映射（与 signal_scoring.mjs CRITICAL_EXECUTION_RISK=55 对齐）
+  // 风险等级映射（与 stock_decision_arbiter.mjs 的临界线 55 对齐）
   let level = 'low';
   if (score >= 55) level = 'critical';
   else if (score >= 40) level = 'high';
@@ -2752,12 +2818,12 @@ function computeExecutionRiskScore({ result, swingDecision, priceRisk }) {
     score,
     level,
     parts,
-    thresholds: { downgrade: 55, forceExit: 70 },
+    thresholds: { downgrade: 55, forceExit: 55 },
   };
 }
 // 价格走势型风险（基于 K 线和技术指标 + 持仓浮亏）—— 补足事件型风险雷达的盲区。
 // P1-3：从 app/stock.html 下沉到后端，在 attachReliability 中统一计算后随 /stock-analysis 返回。
-// v2.0 去重（2026-07-28）：移除"长期趋势熊市"维度（与 longTermTrendFactor 重复计分）。
+// 长期趋势已由最终仲裁器使用，不在价格风险列表重复计分。
 // 阈值与前端原实现 1:1 对齐（roc<=-20/-10、距SMA200<=-30/-15%、浮亏<=-30/-15%）。
 function computePriceRisk(ai, position) {
   if (!ai || !ai.currentPrice) return [];
@@ -2810,27 +2876,33 @@ function applyCriticalDataGate(decision, { result = null, quote = null, market =
     signalAvailable:true,
     dataGate:{ status:'pass', affected:false, checkedAt:Date.now() },
   };
-  // 数据异常必须阻断新开仓；但已有仓位的 TRIM/EXIT 不能被静默抹成观察。
+  // 数据异常必须阻断新开仓；但已有仓位的 REDUCE/CLOSE 不能被静默抹成无动作。
   // 此时不提供可直接执行的实时委托，而是保留“风险退出待报价确认”供提醒与人工复核。
-  const riskExit = ['TRIM', 'EXIT'].includes(decision?.state) && Number(decision?.position?.shares) > 0;
+  const riskExit = ['REDUCE', 'CLOSE'].includes(decision?.executionAction) && Number(decision?.position?.shares) > 0;
   if (riskExit) {
-    const exitMeta = SWING_STATE_META[decision.state];
+    const exitMeta = STOCK_EXECUTION_ACTION_META[decision.executionAction];
     return {
       ...decision,
-      label: exitMeta?.label || decision?.label || decision.state,
+      label: exitMeta?.label || decision?.label || decision.executionAction,
       actionable:false,
       notifyEligible:true,
       exitPending:true,
       signalAvailable:false,
-      summary:`风险退出待报价确认：${uniqueReasons.join('；')}。保留${decision.state === 'EXIT' ? '清仓' : '减仓'}提醒，获得有效报价后执行。`,
+      stateSource:'critical_data_gate_exit_pending',
+      decisionCode:'CRITICAL_DATA_EXIT_PENDING',
+      summary:`风险退出待报价确认：${uniqueReasons.join('；')}。保留${decision.executionAction === 'CLOSE' ? '清仓' : '减仓'}提醒，获得有效报价后执行。`,
       dataGate:{ status:'exit_pending', affected:true, reasons:uniqueReasons, checkedAt:Date.now() },
     };
   }
   return {
     ...(decision || {}),
-    originalState:decision?.originalState || decision?.state || null,
+    originalOpportunityStage:decision?.originalOpportunityStage || decision?.opportunityStage || null,
+    originalExecutionAction:decision?.originalExecutionAction || decision?.executionAction || null,
     originalLabel:decision?.originalLabel || decision?.label || null,
-    state:'WATCH',
+    opportunityStage:'DATA_UNAVAILABLE',
+    executionAction:'NONE',
+    stateSource:'critical_data_gate',
+    decisionCode:'CRITICAL_DATA_UNAVAILABLE',
     label:'数据不足',
     statusModifier:'停止出信号',
     tone:'watch',
@@ -2891,7 +2963,9 @@ function logSignalSnapshot(results) {
       const payloadJson = JSON.stringify({ engineVersion: SIGNAL_ENGINE_VERSION, forwardProtocolVersion: OUTCOME_CONTRACT_VERSION, sampleOrigin: LIVE_FROZEN_ORIGIN, tradePlan: p, swingDecision: finalDecision, reliability: a.reliability || null, signal: a.signal, reasons: a.reasons || [] });
       insertSignalLog.run(
         a.asOfDate, now, symbol, a.market || "US", a.currentPrice || null, a.signal || null,
-        finalDecision?.state || p.action || null, finalDecision?.label || p.actionLabel || null, p.regime?.label || null, p.setup?.label || null,
+        finalDecision?.executionAction || 'NONE', finalDecision?.label || p.actionLabel || null,
+        finalDecision?.opportunityStage || 'DATA_UNAVAILABLE', finalDecision?.executionAction || 'NONE',
+        p.regime?.label || null, p.setup?.label || null,
         p.risk?.label || null, a.score || 0, p.confidence || a.confidence || 0,
         p.dataQuality?.label || null, payloadJson,
         LIVE_FROZEN_ORIGIN, SIGNAL_ENGINE_VERSION, null,
@@ -2931,6 +3005,17 @@ function logSignalSnapshot(results) {
 // Profile shadows are frozen only once the result's daily bar is the market's
 // completed session. In-progress daily bars and historical replay never enter
 // this ledger, so profile research cannot contaminate formal live samples.
+function profileStrategySignature(profile, decision) {
+  if (!decision?.opportunityStage || !decision?.executionAction) return 'unavailable';
+  return [
+    decision.profileStrategyVersion || profile?.strategy?.strategyVersion || 'unknown',
+    String(decision.opportunityStage),
+    String(decision.executionAction),
+    String(decision.executionReadiness?.status || 'unknown'),
+    String(decision.stateSource || 'stock_decision_arbiter'),
+  ].join('|');
+}
+
 export function recordSignalProfileSnapshots(results, observedAt = Date.now(), {
   completedDateForMarket = lastCompletedTradingDate,
 } = {}) {
@@ -2946,35 +3031,51 @@ export function recordSignalProfileSnapshots(results, observedAt = Date.now(), {
         if (!profile?.available || !profile.profileId || !profile.profileVersion) continue;
         const config = getSignalProfile(profile.profileId);
         if (!config || config.version !== profile.profileVersion) continue;
+        const decision = analysis.profileDecisions?.[profile.profileId] || null;
+        if (!decision?.opportunityStage || !decision?.executionAction || !decision.profileStrategyVersion) continue;
         // Profile outcomes are event research, not a daily mark-to-market of
         // the same conclusion. Keep the initial state as a zero-direction
-        // baseline; after that, freeze only a meaningful state change.
-        const signature = [
-          Number(profile.direction || 0),
-          String(profile.signal || 'NEUTRAL'),
-          String(profile.status || 'NEUTRAL'),
-          profile.confirmed ? 1 : 0,
-        ].join('|');
+        // baseline; after that, freeze a technical or full-strategy change.
+        const signature = profileStateSignature(profile);
+        const strategySignature = profileStrategySignature(profile, decision);
         const prior = getLatestProfileShadowState.get(symbol, market, profile.profileId, profile.profileVersion);
         const priorSignature = prior?.state_signature || (prior
           ? [Number(prior.direction || 0), String(prior.raw_signal || 'NEUTRAL'), String(prior.status || 'NEUTRAL'), prior.confirmed ? 1 : 0].join('|')
           : null);
-        if (priorSignature === signature) continue;
+        const priorStrategySignature = prior?.strategy_signature || null;
+        if (priorSignature === signature && priorStrategySignature === strategySignature) continue;
         const isBaseline = !priorSignature;
+        const technicalChanged = !isBaseline && priorSignature !== signature;
+        const strategyChanged = !isBaseline && priorStrategySignature !== strategySignature;
+        const eventKind = isBaseline ? 'baseline'
+          : technicalChanged ? 'state_transition' : 'strategy_transition';
+        const decisionDirection = isBaseline ? 0 : signalDirection(decision.executionAction);
+        const zones = decision.zones || {};
         const payload = JSON.stringify({
           schemaVersion: STOCK_SIGNAL_PROFILE_SCHEMA_VERSION,
           profile,
           profileConfig: config,
+          profileDecision: decision,
+          profileStrategyVersion: decision.profileStrategyVersion,
           formalProfileId: FORMAL_SIGNAL_PROFILE_ID,
           source: 'live_completed_daily',
-          eventKind: isBaseline ? 'baseline' : 'state_transition',
+          eventKind,
+          technicalChanged,
+          strategyChanged,
         });
         const info = insertProfileShadow.run(
           analysis.asOfDate, observedAt, symbol, market, Number(analysis.currentPrice || 0) || null,
           profile.profileId, profile.profileVersion, profile.role,
-          profile.signal || 'NEUTRAL', profile.status || 'NEUTRAL', isBaseline ? 0 : Number(profile.direction || 0),
+          profile.signal || 'NEUTRAL', profile.status || 'NEUTRAL', isBaseline || priorSignature === signature ? 0 : Number(profile.direction || 0),
           profile.score == null ? null : Number(profile.score), profile.confirmed ? 1 : 0,
           payload, 'live_profile_shadow', SIGNAL_ENGINE_VERSION, observedAt, payload, signature,
+          decision.profileStrategyVersion, strategySignature,
+          decision.opportunityStage, decision.executionAction, decision.label || decision.executionAction, decision.tone || 'watch', decisionDirection,
+          Number(decision.tranchePct) || 0, Number(decision.recommendedShares) || 0,
+          Number(decision.validSessions) || null,
+          Number.isFinite(Number(zones.confirmation)) ? Number(zones.confirmation) : null,
+          Number.isFinite(Number(zones.invalidation)) ? Number(zones.invalidation) : null,
+          Number.isFinite(Number(zones.reassessment)) ? Number(zones.reassessment) : null,
         );
         inserted += info.changes;
       }
@@ -2985,13 +3086,13 @@ export function recordSignalProfileSnapshots(results, observedAt = Date.now(), {
 }
 
 function signalDirection(action) {
-  if (['PROBE', 'ADD', 'BUY'].includes(action)) return 1;
-  if (['TRIM', 'EXIT', 'AVOID', 'SELL', 'REDUCE'].includes(action)) return -1;
+  if (['OPEN', 'ADD', 'PROBE', 'BUY'].includes(action)) return 1;
+  if (['REDUCE', 'CLOSE', 'TRIM', 'EXIT', 'AVOID', 'SELL'].includes(action)) return -1;
   return 0;
 }
 
 function signalExecutionCost(signal, entryPrice, exitPrice) {
-  if (!['PROBE', 'ADD', 'BUY'].includes(signal.action)) return { quantity: 0, costPct: 0 };
+  if (!['OPEN', 'ADD', 'PROBE', 'BUY'].includes(signal.action)) return { quantity: 0, costPct: 0 };
   let payload = {};
   try { payload = JSON.parse(signal.payload || '{}'); } catch {}
   const suggested = Number(payload.swingDecision?.recommendedShares || 0);
@@ -3132,10 +3233,76 @@ function scheduleProfileShadowAccrual(force = false) {
   return profileShadowAccrualPromise;
 }
 
+export function evaluateProfileStrategyPath(signal, bars, entry, horizon) {
+  const action = String(signal.execution_action || '').toUpperCase();
+  const direction = Number(signal.decision_direction) || 0;
+  const lastIndex = entry.entryIndex + horizon - 1;
+  if (['REDUCE', 'CLOSE'].includes(action) && direction < 0) {
+    const exit = bars[lastIndex];
+    const exitPrice = Number(exit?.close);
+    if (!exit || !Number.isFinite(exitPrice) || !(entry.price > 0)) {
+      return { outcome:'unresolved', triggerDate:null, exitPrice:null, returnPct:null };
+    }
+    const avoidedReturnPct = -((exitPrice / entry.price - 1) * 100);
+    return {
+      outcome: avoidedReturnPct > 0 ? 'risk_avoided' : avoidedReturnPct < 0 ? 'opportunity_cost' : 'unresolved',
+      triggerDate: exit.date || null,
+      exitPrice: +exitPrice.toFixed(6),
+      returnPct: +avoidedReturnPct.toFixed(6),
+    };
+  }
+  if (!['OPEN', 'ADD'].includes(action) || direction <= 0) {
+    return { outcome:'not_applicable', triggerDate:null, exitPrice:null, returnPct:null };
+  }
+  const stop = Number(signal.invalidation_price);
+  const target = Number(signal.reassessment_price);
+  if (!(stop > 0) || !(target > 0) || !(target > stop)) {
+    return { outcome:'levels_unavailable', triggerDate:null, exitPrice:null, returnPct:null };
+  }
+  for (let index = entry.entryIndex; index <= lastIndex; index += 1) {
+    const bar = bars[index];
+    if (!bar) break;
+    const open = Number(bar.open);
+    const high = Number(bar.high);
+    const low = Number(bar.low);
+    const stopHit = Number.isFinite(low) && low <= stop;
+    const targetHit = Number.isFinite(high) && high >= target;
+    let outcome = null;
+    let exitPrice = null;
+    if (stopHit && targetHit) {
+      if (Number.isFinite(open) && open <= stop) { outcome = 'invalidated'; exitPrice = open; }
+      else if (Number.isFinite(open) && open >= target) { outcome = 'reassessment_hit'; exitPrice = open; }
+      else return { outcome:'ambiguous_same_session', triggerDate:bar.date, exitPrice:null, returnPct:null };
+    } else if (stopHit) {
+      outcome = 'invalidated';
+      exitPrice = Number.isFinite(open) && open < stop ? open : stop;
+    } else if (targetHit) {
+      outcome = 'reassessment_hit';
+      exitPrice = Number.isFinite(open) && open > target ? open : target;
+    }
+    if (outcome) {
+      return {
+        outcome,
+        triggerDate: bar.date,
+        exitPrice: +exitPrice.toFixed(6),
+        returnPct: +((exitPrice / entry.price - 1) * 100).toFixed(6),
+      };
+    }
+  }
+  const exit = bars[lastIndex];
+  const exitPrice = Number(exit?.close);
+  return {
+    outcome:'unresolved', triggerDate:exit?.date || null,
+    exitPrice:Number.isFinite(exitPrice) ? +exitPrice.toFixed(6) : null,
+    returnPct:Number.isFinite(exitPrice) ? +((exitPrice / entry.price - 1) * 100).toFixed(6) : null,
+  };
+}
+
 async function evaluateProfileShadowOutcomes({ limit = 300 } = {}) {
   const signals = db.prepare(`SELECT s.* FROM stock_signal_profile_shadows s
     WHERE s.sample_origin='live_profile_shadow'
-      AND s.direction <> 0
+      AND (s.direction <> 0 OR s.decision_direction <> 0)
+      AND (s.profile_id <> 'confirmed' OR s.confirmed=1)
       AND (SELECT COUNT(*) FROM stock_signal_profile_shadow_outcomes o
         WHERE o.profile_shadow_id=s.id AND o.outcome_contract_version=?) < 5
     ORDER BY s.as_of_date,s.symbol,s.profile_id
@@ -3171,12 +3338,20 @@ async function evaluateProfileShadowOutcomes({ limit = 300 } = {}) {
         if (!entry || !exit || gross == null || directional == null || !Number.isFinite(Number(exit.close))) continue;
         const benchmarkReturn = benchmarkReturnPct(benchmark, entry.date, exit.date, { entryAtOpen: true });
         const excess = benchmarkReturn == null ? null : Number(directional) - Number(benchmarkReturn) * Number(signal.direction);
+        const strategy = evaluateProfileStrategyPath(signal, bars, entry, horizon);
+        const executionAction = String(signal.execution_action || '').toUpperCase();
+        const strategyExposure = executionAction === 'CLOSE'
+          ? 1
+          : Math.max(0, Number(signal.tranche_pct) || 0) / 100;
         const info = insertProfileShadowOutcome.run(
           signal.id, horizon, entry.date, exit.date, entry.price, exit.close, signal.direction,
           +Number(gross).toFixed(6), +Number(directional).toFixed(6),
           benchmarkReturn == null ? null : +Number(benchmarkReturn).toFixed(6),
           excess == null ? null : +Number(excess).toFixed(6),
           forward.mfePct, forward.maePct, Date.now(), OUTCOME_CONTRACT_VERSION, entry.priceSource,
+          signal.opportunity_stage || null, signal.execution_action || null, Number(signal.decision_direction) || 0,
+          strategy.outcome, strategy.triggerDate, strategy.exitPrice, strategy.returnPct,
+          strategy.returnPct == null ? null : +(strategy.returnPct * strategyExposure).toFixed(6),
         );
         updated += info.changes;
       }
@@ -3196,83 +3371,329 @@ async function evaluateProfileShadowOutcomes({ limit = 300 } = {}) {
 // executable decision. Performance numbers remain hidden by the browser until
 // a profile/horizon has at least this many recorded outcomes.
 const PROFILE_LAB_MIN_OUTCOME_SAMPLES = 30;
+function averageProfileMetric(rows, key) {
+  const values = rows.map(row => row[key] == null ? null : Number(row[key]))
+    .filter(value => value != null && Number.isFinite(value));
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+}
+
+function summarizeProfileOutcomeRows(rows) {
+  const count = rows.length;
+  const wins = rows.filter(row => Number(row.directionalReturn) > 0).length;
+  const adequate = count >= PROFILE_LAB_MIN_OUTCOME_SAMPLES;
+  const comparableExcessCount = rows.filter(row => row.excessReturn != null && Number.isFinite(Number(row.excessReturn))).length;
+  return {
+    count, adequate, wins, comparableExcessCount,
+    winRatePct: adequate ? +(wins / count * 100).toFixed(1) : null,
+    averageDirectionalReturnPct: adequate ? roundNumber(averageProfileMetric(rows, 'directionalReturn'), 3) : null,
+    averageExcessReturnPct: adequate && comparableExcessCount >= PROFILE_LAB_MIN_OUTCOME_SAMPLES
+      ? roundNumber(averageProfileMetric(rows.filter(row => Number.isFinite(Number(row.excessReturn))), 'excessReturn'), 3) : null,
+    averageMfePct: adequate ? roundNumber(averageProfileMetric(rows, 'mfePct'), 3) : null,
+    averageMaePct: adequate ? roundNumber(averageProfileMetric(rows, 'maePct'), 3) : null,
+    latestExitDate: rows.reduce((latest, row) => !latest || String(row.exitDate) > latest ? String(row.exitDate) : latest, null),
+  };
+}
+
+function summarizeProfileStrategyRows(rows) {
+  const count = rows.length;
+  const adequate = count >= PROFILE_LAB_MIN_OUTCOME_SAMPLES;
+  const countOutcome = value => rows.filter(row => row.strategyOutcome === value).length;
+  const reassessmentHits = countOutcome('reassessment_hit');
+  const invalidations = countOutcome('invalidated');
+  const unresolved = countOutcome('unresolved');
+  const ambiguous = countOutcome('ambiguous_same_session');
+  const returns = rows.map(row => row.strategyReturnPct)
+    .filter(value => value != null && Number.isFinite(Number(value)));
+  const exposureReturns = rows.map(row => row.exposureReturnPct)
+    .filter(value => value != null && Number.isFinite(Number(value)));
+  return {
+    count, adequate, reassessmentHits, invalidations, unresolved, ambiguous,
+    reassessmentHitRatePct: adequate ? +(reassessmentHits / count * 100).toFixed(1) : null,
+    invalidationRatePct: adequate ? +(invalidations / count * 100).toFixed(1) : null,
+    averageStrategyReturnPct: adequate && returns.length >= PROFILE_LAB_MIN_OUTCOME_SAMPLES
+      ? +(returns.reduce((sum, value) => sum + Number(value), 0) / returns.length).toFixed(3) : null,
+    averageExposureReturnPct: adequate && exposureReturns.length >= PROFILE_LAB_MIN_OUTCOME_SAMPLES
+      ? +(exposureReturns.reduce((sum, value) => sum + Number(value), 0) / exposureReturns.length).toFixed(3) : null,
+  };
+}
+
+function summarizeProfileDefensiveRows(rows) {
+  const count = rows.length;
+  const adequate = count >= PROFILE_LAB_MIN_OUTCOME_SAMPLES;
+  const countOutcome = value => rows.filter(row => row.strategyOutcome === value).length;
+  const riskAvoided = countOutcome('risk_avoided');
+  const opportunityCost = countOutcome('opportunity_cost');
+  const unresolved = countOutcome('unresolved');
+  const returns = rows.map(row => row.strategyReturnPct)
+    .filter(value => value != null && Number.isFinite(Number(value)));
+  const exposureReturns = rows.map(row => row.exposureReturnPct)
+    .filter(value => value != null && Number.isFinite(Number(value)));
+  return {
+    count, adequate, riskAvoided, opportunityCost, unresolved,
+    riskAvoidedRatePct: adequate ? +(riskAvoided / count * 100).toFixed(1) : null,
+    averageProtectionReturnPct: adequate && returns.length >= PROFILE_LAB_MIN_OUTCOME_SAMPLES
+      ? +(returns.reduce((sum, value) => sum + Number(value), 0) / returns.length).toFixed(3) : null,
+    averageExposureProtectionPct: adequate && exposureReturns.length >= PROFILE_LAB_MIN_OUTCOME_SAMPLES
+      ? +(exposureReturns.reduce((sum, value) => sum + Number(value), 0) / exposureReturns.length).toFixed(3) : null,
+  };
+}
+
+function roundNumber(value, digits = 3) {
+  return Number.isFinite(Number(value)) ? +Number(value).toFixed(digits) : null;
+}
+
 export function getSignalProfileResearchDashboard({ market = null } = {}) {
   const normalizedMarket = market ? String(market).toUpperCase() : null;
   const marketClause = normalizedMarket ? ' AND s.market=?' : '';
   const params = normalizedMarket ? [normalizedMarket] : [];
-  const profiles = db.prepare(`SELECT s.profile_id,s.profile_version,s.profile_role,
-      COUNT(*) AS observations,
-      SUM(CASE WHEN s.direction=0 THEN 1 ELSE 0 END) AS baselines,
-      SUM(CASE WHEN s.direction<>0 THEN 1 ELSE 0 END) AS transitions,
-      COUNT(DISTINCT s.symbol) AS symbols,
-      COUNT(DISTINCT s.market) AS markets,
-      MAX(s.as_of_date) AS latest_as_of_date
-    FROM stock_signal_profile_shadows s
+  const catalog = getSignalProfileCatalog();
+  const currentProfileVersionById = new Map(catalog.map(profile => [profile.id, profile.version]));
+  const tableExists = name => Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name));
+  const excludedSymbols = new Set();
+  if (tableExists('tracker_pairs')) {
+    for (const row of db.prepare('SELECT etf FROM tracker_pairs WHERE active=1 AND ABS(leverage)>=2').all()) excludedSymbols.add(String(row.etf || '').toUpperCase());
+  }
+  if (tableExists('radar_v2_asset_audit')) {
+    for (const row of db.prepare("SELECT symbol FROM radar_v2_asset_audit WHERE asset_category<>'common_stock'").all()) excludedSymbols.add(String(row.symbol || '').toUpperCase());
+  }
+  if (tableExists('radar_universe_members')) {
+    for (const row of db.prepare("SELECT DISTINCT symbol FROM radar_universe_members WHERE LOWER(instrument_type)<>'equity'").all()) excludedSymbols.add(String(row.symbol || '').toUpperCase());
+  }
+  // A profile's calculation contract, not the whole final decision engine,
+  // determines whether research samples are comparable. Downstream execution
+  // gate changes must not silently clear a technical profile's history.
+  const eligibleAsset = row => !excludedSymbols.has(String(row.symbol || '').toUpperCase());
+  const currentProfileCohort = row => currentProfileVersionById.get(row.profile_id) === row.profile_version;
+  const eligibleProfileOutcome = row => row.profile_id !== 'confirmed' || Number(row.confirmed) === 1;
+  const eventKindForShadow = row => {
+    try {
+      const payload = JSON.parse(row.payload || '{}');
+      const eventKind = payload?.eventKind;
+      if (['baseline', 'state_transition', 'strategy_transition'].includes(eventKind)) return {
+        eventKind,
+        technicalChanged:payload.technicalChanged === true || eventKind === 'state_transition',
+        strategyChanged:payload.strategyChanged === true || eventKind === 'strategy_transition',
+        inferred:false,
+      };
+    } catch {}
+    // Older frozen rows predate eventKind. Keep them visible but mark the
+    // direction-based classification as inferred instead of silently treating
+    // every neutral transition as a true baseline.
+    return {
+      eventKind:Number(row.direction) === 0 ? 'baseline' : 'state_transition',
+      technicalChanged:Number(row.direction) !== 0,
+      strategyChanged:false,
+      inferred:true,
+    };
+  };
+  const rawShadows = db.prepare(`SELECT s.* FROM stock_signal_profile_shadows s
     WHERE s.sample_origin='live_profile_shadow'${marketClause}
-    GROUP BY s.profile_id,s.profile_version,s.profile_role`).all(...params);
-  const outcomes = db.prepare(`SELECT s.profile_id,s.profile_version,o.horizon,
-      COUNT(*) AS outcomes,
-      SUM(CASE WHEN o.directional_return_pct>0 THEN 1 ELSE 0 END) AS wins,
-      AVG(o.directional_return_pct) AS avg_directional_return_pct,
-      AVG(o.excess_return_pct) AS avg_excess_return_pct,
-      MAX(o.exit_date) AS latest_exit_date
+    ORDER BY s.as_of_date,s.symbol,s.profile_id`).all(...params);
+  const assetEligibleShadows = rawShadows.filter(eligibleAsset);
+  const shadows = assetEligibleShadows.filter(currentProfileCohort);
+  const historicalShadows = assetEligibleShadows.filter(row => !currentProfileCohort(row));
+  const rawOutcomes = db.prepare(`SELECT s.id,s.profile_id,s.profile_version,s.profile_role,s.engine_version,
+      s.symbol,s.market,s.as_of_date,s.direction,s.confirmed,s.payload,s.strategy_version,s.opportunity_stage,s.execution_action,s.decision_direction,
+      o.horizon,o.entry_date,o.exit_date,o.directional_return_pct,o.excess_return_pct,o.mfe_pct,o.mae_pct,
+      o.strategy_direction,o.strategy_outcome,o.strategy_trigger_date,o.strategy_return_pct,o.exposure_return_pct
     FROM stock_signal_profile_shadows s
     JOIN stock_signal_profile_shadow_outcomes o ON o.profile_shadow_id=s.id
     WHERE s.sample_origin='live_profile_shadow'
       AND o.outcome_contract_version=?${marketClause}
-    GROUP BY s.profile_id,s.profile_version,o.horizon`).all(OUTCOME_CONTRACT_VERSION, ...params);
-  const profileByKey = new Map(profiles.map(row => [[row.profile_id, row.profile_version].join('|'), row]));
-  const outcomesByKey = new Map();
-  for (const row of outcomes) outcomesByKey.set([row.profile_id, row.profile_version, row.horizon].join('|'), row);
-  const catalog = getSignalProfileCatalog();
+    ORDER BY s.as_of_date,s.symbol,s.profile_id,o.horizon`).all(OUTCOME_CONTRACT_VERSION, ...params);
+  const assetEligibleOutcomes = rawOutcomes.filter(eligibleAsset);
+  const profileEligibleOutcomes = assetEligibleOutcomes.filter(eligibleProfileOutcome);
+  const currentOutcomeRows = profileEligibleOutcomes.filter(currentProfileCohort);
+  const historicalOutcomeRows = profileEligibleOutcomes.filter(row => !currentProfileCohort(row));
+  const eligibleEvents = currentOutcomeRows.filter(row => Number(row.direction) !== 0).map(row => ({
+    profileId: row.profile_id, profileVersion: row.profile_version,
+    symbol: row.symbol, market: row.market, signalDate: row.as_of_date,
+    entryDate: row.entry_date, exitDate: row.exit_date, horizon: Number(row.horizon),
+    direction: Number(row.direction), directionalReturn: Number(row.directional_return_pct),
+    excessReturn: row.excess_return_pct == null ? null : Number(row.excess_return_pct),
+    mfePct: row.mfe_pct == null ? null : Number(row.mfe_pct),
+    maePct: row.mae_pct == null ? null : Number(row.mae_pct),
+  }));
+  const nonOverlapping = selectNonOverlappingProfileEvents(eligibleEvents);
+  const strategyEvents = assetEligibleOutcomes
+    .filter(row => currentProfileCohort(row)
+      && eventKindForShadow(row).strategyChanged === true
+      && row.strategy_version === STOCK_PROFILE_STRATEGY_VERSION
+      && Number(row.strategy_direction) !== 0
+      && ['OPEN', 'ADD', 'REDUCE', 'CLOSE'].includes(String(row.execution_action || '').toUpperCase()))
+    .map(row => ({
+      profileId:row.profile_id, profileVersion:row.profile_version, strategyVersion:row.strategy_version,
+      symbol:row.symbol, market:row.market, signalDate:row.as_of_date,
+      entryDate:row.entry_date, exitDate:row.exit_date, horizon:Number(row.horizon),
+      opportunityStage:row.opportunity_stage, executionAction:row.execution_action, strategyDirection:Number(row.strategy_direction),
+      strategyOutcome:row.strategy_outcome || null,
+      strategyTriggerDate:row.strategy_trigger_date || null,
+      strategyReturnPct:row.strategy_return_pct == null ? null : Number(row.strategy_return_pct),
+      exposureReturnPct:row.exposure_return_pct == null ? null : Number(row.exposure_return_pct),
+    }));
+  const nonOverlappingStrategy = selectNonOverlappingProfileEvents(strategyEvents);
+  const aggregateByKey = new Map();
+  for (const shadow of shadows) {
+    const key = [shadow.profile_id, shadow.profile_version].join('|');
+    if (!aggregateByKey.has(key)) aggregateByKey.set(key, {
+      observations:0, baselines:0, transitions:0, strategyTransitions:0, inferredEventKinds:0,
+      actionCounts:{}, symbols:new Set(), markets:new Set(), latest:null, engineVersions:new Set(),
+    });
+    const aggregate = aggregateByKey.get(key);
+    const event = eventKindForShadow(shadow);
+    aggregate.observations += 1;
+    aggregate.baselines += event.eventKind === 'baseline' ? 1 : 0;
+    aggregate.transitions += event.eventKind === 'state_transition' ? 1 : 0;
+    if (shadow.strategy_version === STOCK_PROFILE_STRATEGY_VERSION && event.strategyChanged === true) {
+      aggregate.strategyTransitions += 1;
+      const action = String(shadow.execution_action || 'UNKNOWN').toUpperCase();
+      aggregate.actionCounts[action] = Number(aggregate.actionCounts[action] || 0) + 1;
+    }
+    aggregate.inferredEventKinds += event.inferred ? 1 : 0;
+    aggregate.symbols.add(shadow.symbol); aggregate.markets.add(shadow.market); aggregate.engineVersions.add(shadow.engine_version);
+    if (!aggregate.latest || String(shadow.as_of_date) > aggregate.latest) aggregate.latest = String(shadow.as_of_date);
+  }
   const rows = catalog.map(profile => {
-    const aggregate = profileByKey.get([profile.id, profile.version].join('|')) || {};
+    const aggregate = aggregateByKey.get([profile.id, profile.version].join('|')) || {};
     const horizons = Object.fromEntries([5, 20].map(horizon => {
-      const outcome = outcomesByKey.get([profile.id, profile.version, horizon].join('|')) || null;
-      const count = Number(outcome?.outcomes || 0);
-      const adequate = count >= PROFILE_LAB_MIN_OUTCOME_SAMPLES;
+      const events = nonOverlapping.accepted.filter(event => event.profileId === profile.id && event.profileVersion === profile.version && event.horizon === horizon);
+      const summary = summarizeProfileOutcomeRows(events);
       return [horizon, {
-        count,
-        adequate,
-        wins: Number(outcome?.wins || 0),
-        winRatePct: adequate ? +(Number(outcome.wins || 0) / count * 100).toFixed(1) : null,
-        averageDirectionalReturnPct: adequate && outcome?.avg_directional_return_pct != null
-          ? +Number(outcome.avg_directional_return_pct).toFixed(3) : null,
-        averageExcessReturnPct: adequate && outcome?.avg_excess_return_pct != null
-          ? +Number(outcome.avg_excess_return_pct).toFixed(3) : null,
-        latestExitDate: outcome?.latest_exit_date || null,
+        ...summary,
+        long: summarizeProfileOutcomeRows(events.filter(event => event.direction > 0)),
+        defensive: summarizeProfileOutcomeRows(events.filter(event => event.direction < 0)),
       }];
     }));
+    const strategyHorizons = Object.fromEntries([5, 20].map(horizon => {
+      const events = nonOverlappingStrategy.accepted.filter(event => (
+        event.profileId === profile.id && event.profileVersion === profile.version && event.horizon === horizon
+      ));
+      const entry = summarizeProfileStrategyRows(events.filter(event => (
+        event.strategyDirection > 0 && ['OPEN', 'ADD'].includes(String(event.executionAction || '').toUpperCase())
+      )));
+      const defensive = summarizeProfileDefensiveRows(events.filter(event => (
+        event.strategyDirection < 0 && ['REDUCE', 'CLOSE'].includes(String(event.executionAction || '').toUpperCase())
+      )));
+      return [horizon, { ...entry, entry, defensive, count:entry.count + defensive.count, adequate:entry.adequate || defensive.adequate }];
+    }));
     const transitions = Number(aggregate.transitions || 0);
-    const hasAnyOutcome = Object.values(horizons).some(item => item.count > 0);
-    const hasAdequateOutcome = Object.values(horizons).some(item => item.adequate);
+    const strategyTransitions = Number(aggregate.strategyTransitions || 0);
+    const hasAnyOutcome = Object.values(horizons).some(item => item.count > 0)
+      || Object.values(strategyHorizons).some(item => item.count > 0);
+    const hasAdequateOutcome = Object.values(horizons).some(item => item.adequate)
+      || Object.values(strategyHorizons).some(item => item.adequate);
     return {
       id: profile.id,
       version: profile.version,
       label: profile.label,
       role: profile.role,
-      formalActionEligible: profile.formalActionEligible === true,
+      formalActionEligible: profile.defaultFormal === true,
+      strategyVersion: STOCK_PROFILE_STRATEGY_VERSION,
       baselines: Number(aggregate.baselines || 0),
       transitions,
+      strategyTransitions,
+      actionCounts:aggregate.actionCounts || {},
       observations: Number(aggregate.observations || 0),
-      symbols: Number(aggregate.symbols || 0),
-      markets: Number(aggregate.markets || 0),
-      latestAsOfDate: aggregate.latest_as_of_date || null,
-      status: transitions === 0 ? 'baseline_collecting'
+      inferredEventKinds: Number(aggregate.inferredEventKinds || 0),
+      symbols: aggregate.symbols?.size || 0,
+      markets: aggregate.markets?.size || 0,
+      engineVersions: [...(aggregate.engineVersions || [])].sort(),
+      latestAsOfDate: aggregate.latest || null,
+      status: transitions + strategyTransitions === 0 ? 'baseline_collecting'
         : !hasAnyOutcome ? 'outcome_collecting'
           : !hasAdequateOutcome ? 'sample_insufficient' : 'descriptive_only',
       horizons,
+      strategyHorizons,
     };
   });
+  const historicalByKey = new Map();
+  for (const shadow of historicalShadows) {
+    const key = [shadow.profile_id, shadow.profile_version].join('|');
+    if (!historicalByKey.has(key)) historicalByKey.set(key, {
+      id: shadow.profile_id,
+      version: shadow.profile_version,
+      observations: 0,
+      baselines: 0,
+      transitions: 0,
+      inferredEventKinds: 0,
+      symbols: new Set(),
+      markets: new Set(),
+      latestAsOfDate: null,
+      engineVersions: new Set(),
+    });
+    const cohort = historicalByKey.get(key);
+    const event = eventKindForShadow(shadow);
+    cohort.observations += 1;
+    cohort.baselines += event.eventKind === 'baseline' ? 1 : 0;
+    cohort.transitions += event.eventKind === 'state_transition' ? 1 : 0;
+    cohort.inferredEventKinds += event.inferred ? 1 : 0;
+    cohort.symbols.add(shadow.symbol);
+    cohort.markets.add(shadow.market);
+    cohort.engineVersions.add(shadow.engine_version);
+    if (!cohort.latestAsOfDate || String(shadow.as_of_date) > cohort.latestAsOfDate) cohort.latestAsOfDate = String(shadow.as_of_date);
+  }
+  const historicalCohorts = [...historicalByKey.values()]
+    .map(cohort => ({
+      id: cohort.id,
+      version: cohort.version,
+      label: catalog.find(profile => profile.id === cohort.id)?.label || cohort.id,
+      observations: cohort.observations,
+      baselines: cohort.baselines,
+      transitions: cohort.transitions,
+      inferredEventKinds: cohort.inferredEventKinds,
+      symbols: cohort.symbols.size,
+      markets: cohort.markets.size,
+      latestAsOfDate: cohort.latestAsOfDate,
+      engineVersions: [...cohort.engineVersions].sort(),
+    }))
+    .sort((a, b) => String(b.latestAsOfDate || '').localeCompare(String(a.latestAsOfDate || '')) || a.id.localeCompare(b.id));
+  const anchorsByProfileAndHorizon = new Map();
+  for (const event of nonOverlapping.accepted) {
+    const key = `${event.profileId}|${event.horizon}`;
+    if (!anchorsByProfileAndHorizon.has(key)) anchorsByProfileAndHorizon.set(key, new Set());
+    anchorsByProfileAndHorizon.get(key).add(`${event.market}|${event.symbol}|${event.signalDate}`);
+  }
+  const pairedWithBalanced = Object.fromEntries([5, 20].map(horizon => {
+    const balancedAnchors = anchorsByProfileAndHorizon.get(`balanced|${horizon}`) || new Set();
+    return [horizon, Object.fromEntries(catalog.map(profile => {
+      const anchors = anchorsByProfileAndHorizon.get(`${profile.id}|${horizon}`) || new Set();
+      return [profile.id, [...anchors].filter(anchor => balancedAnchors.has(anchor)).length];
+    }))];
+  }));
   return {
     mode: 'read_only_profile_research',
     market: normalizedMarket,
     minimumOutcomeSamples: PROFILE_LAB_MIN_OUTCOME_SAMPLES,
     executionContract: OUTCOME_CONTRACT_VERSION,
+    formalEngineVersion: SIGNAL_ENGINE_VERSION,
+    sampleFlow: {
+      rawObservations: rawShadows.length,
+      eligibleObservations: shadows.length,
+      historicalObservations: historicalShadows.length,
+      excludedObservations: rawShadows.length - assetEligibleShadows.length,
+      rawOutcomes: rawOutcomes.length,
+      eligibleOutcomes: eligibleEvents.length,
+      historicalOutcomes: historicalOutcomeRows.length,
+      excludedOutcomes: rawOutcomes.length - assetEligibleOutcomes.length,
+      ineligibleProfileOutcomes: assetEligibleOutcomes.length - profileEligibleOutcomes.length,
+      acceptedNonOverlappingOutcomes: nonOverlapping.accepted.length,
+      purgedOverlappingOutcomes: nonOverlapping.skippedOverlap,
+      strategyOutcomes:strategyEvents.length,
+      acceptedNonOverlappingStrategyOutcomes:nonOverlappingStrategy.accepted.length,
+      purgedOverlappingStrategyOutcomes:nonOverlappingStrategy.skippedOverlap,
+      excludedSymbols: [...excludedSymbols].sort(),
+    },
+    pairedWithBalanced,
     profiles: rows,
+    historicalCohorts,
     method: [
-      '三套人格均为固定、版本化的研究配置；均衡决策仍是唯一正式动作来源。',
-      '仅在已完成日线首次建立基线或发生状态迁移时记录；盘中、历史重放和持续同状态不会写入。',
+      '三套人格共享同一事实与安全边界，并分别记录最终动作、仓位比例、关键价位及后续路径；均衡决策仍是唯一正式动作来源。',
+      '仅在已完成日线首次建立基线，或技术状态/完整策略发生迁移时记录；盘中、历史重放和持续同状态不会写入。',
+      '默认排除杠杆 ETF 与已知非普通股；同一标的、人格和期限的重叠持有区间只保留第一条。',
+      '稳健确认仅在连续确认完成后进入收益结算；等待确认状态不会混入表现统计。',
+      '人格计算口径以 profile_version 分代；正式引擎的执行门控升级不会清空技术人格基线，旧口径单独保留且不与当前口径混算。',
+      '完整策略统计按 strategy_version 分代；止损与目标同日触发且无法判断先后时标记为歧义，不计入策略收益。',
+      '长仓机会与风险保护分别统计，超额收益只在基准可比样本足够时显示。',
       `每个期限至少积累 ${PROFILE_LAB_MIN_OUTCOME_SAMPLES} 条影子结算记录后，才显示描述性表现统计。`,
       '面板只读，不会调参、改变正式信号、仓位或提醒；结果不构成预测或投资建议。',
     ],
@@ -3283,7 +3704,7 @@ async function evaluateSignalOutcomes() {
   const archived = archiveSupersededSignalOutcomes();
   if (archived) console.log(`[signal-outcomes] archived ${archived} superseded next-close results before correction`);
   const signals = db.prepare(`SELECT l.* FROM stock_signal_log l
-    WHERE l.action IN ('PROBE','ADD','BUY','TRIM','EXIT','AVOID','SELL','REDUCE')
+    WHERE l.action IN ('OPEN','ADD','REDUCE','CLOSE')
       AND l.engine_version IN (${compatibleSignalEnginePlaceholders()})
       AND (SELECT COUNT(*) FROM stock_signal_outcomes o
         WHERE o.signal_id=l.id AND o.outcome_contract_version=?) < 5
@@ -3398,6 +3819,13 @@ function replayMarkets(input) {
   return [...new Set(values.map(x => String(x || '').toUpperCase()).filter(x => allowed.has(x)))];
 }
 
+function resolveReplayStatus(totalSignals, lastRun, currentEngineVersion = SIGNAL_ENGINE_VERSION) {
+  if (Number(totalSignals || 0) > 0) return 'ready';
+  if (!lastRun) return 'not_built';
+  if (lastRun.engineVersion && lastRun.engineVersion !== currentEngineVersion) return 'stale';
+  return lastRun.status === 'running' ? 'running' : 'empty';
+}
+
 function replayStatusSnapshot() {
   const stored = db.prepare('SELECT value,updated_at FROM app_meta WHERE key=?').get(SIGNAL_REPLAY_STATUS_KEY);
   let lastRun = null;
@@ -3409,7 +3837,7 @@ function replayStatusSnapshot() {
     GROUP BY l.market ORDER BY l.market`).all(HISTORICAL_REPLAY_ORIGIN, SIGNAL_ENGINE_VERSION);
   const total = rows.reduce((sum, row) => sum + Number(row.signals || 0), 0);
   return {
-    status: total ? 'ready' : (lastRun?.status || 'not_built'),
+    status: resolveReplayStatus(total, lastRun),
     origin: HISTORICAL_REPLAY_ORIGIN,
     replayMode: HISTORICAL_REPLAY_MODE,
     engineVersion: SIGNAL_ENGINE_VERSION,
@@ -3432,11 +3860,10 @@ async function rebuildHistoricalSignalReplay({ days = 320, markets = ['US', 'HK'
   const placeholders = selectedMarkets.map(() => '?').join(',');
   const watchlist = db.prepare(`SELECT symbol,market FROM stock_watchlist WHERE UPPER(market) IN (${placeholders}) ORDER BY market,added_at,symbol`)
     .all(...selectedMarkets);
-  // A date/symbol remains unique across sources in the legacy schema. Replace all
-  // older replay versions for the requested markets so a later engine version can
-  // rebuild instead of being blocked by stale replay rows; live frozen rows remain.
-  const oldIds = db.prepare(`SELECT id FROM stock_signal_log WHERE sample_origin=? AND market IN (${placeholders})`)
-    .all(HISTORICAL_REPLAY_ORIGIN, ...selectedMarkets).map(row => row.id);
+  // Rebuild only the current engine replay. Previous engine cohorts remain
+  // immutable research history and never collide with live samples.
+  const oldIds = db.prepare(`SELECT id FROM stock_signal_log WHERE sample_origin=? AND engine_version=? AND market IN (${placeholders})`)
+    .all(HISTORICAL_REPLAY_ORIGIN, SIGNAL_ENGINE_VERSION, ...selectedMarkets).map(row => row.id);
   if (oldIds.length) {
     const idMarks = oldIds.map(() => '?').join(',');
     db.transaction(() => {
@@ -3446,19 +3873,14 @@ async function rebuildHistoricalSignalReplay({ days = 320, markets = ['US', 'HK'
     })();
   }
 
-  const existsAtDate = db.prepare('SELECT sample_origin FROM stock_signal_log WHERE date=? AND symbol=?');
-  const perMarket = Object.fromEntries(selectedMarkets.map(market => [market, { symbols:0, inserted:0, skippedLiveCollision:0, errors:[] }]));
+  const perMarket = Object.fromEntries(selectedMarkets.map(market => [market, { symbols:0, inserted:0, errors:[] }]));
   let candidates = 0;
   const insert = db.transaction(entries => {
     for (const entry of entries) {
-      const existing = existsAtDate.get(entry.date, entry.symbol);
-      if (existing) {
-        entry.marketStats.skippedLiveCollision++;
-        continue;
-      }
       const changed = insertSignalLog.run(
         entry.date, entry.ts, entry.symbol, entry.market, entry.price, entry.rawSignal,
-        entry.action, entry.label, entry.regime, entry.setup, entry.risk, entry.score, entry.confidence,
+        entry.executionAction, entry.label, entry.opportunityStage, entry.executionAction,
+        entry.regime, entry.setup, entry.risk, entry.score, entry.confidence,
         entry.quality, entry.payload, HISTORICAL_REPLAY_ORIGIN, SIGNAL_ENGINE_VERSION, HISTORICAL_REPLAY_MODE,
         entry.ts, entry.payload
       ).changes;
@@ -3470,19 +3892,22 @@ async function rebuildHistoricalSignalReplay({ days = 320, markets = ['US', 'HK'
     const market = String(row.market || 'US').toUpperCase();
     const marketStats = perMarket[market];
     marketStats.symbols++;
-    const series = buildBacktestSeries(row.symbol, market, boundedDays);
+    const series = buildBacktestSeriesWithV21(row.symbol, market, boundedDays);
     if (series.error) {
       marketStats.errors.push({ symbol:row.symbol, reason:series.error, bars:series.bars || 0 });
       continue;
     }
     const entries = [];
     for (const event of series.events) {
-      if (!signalDirection(event.action)) continue;
+      const opportunityStage = event.v21?.opportunityStage || null;
+      const executionAction = event.v21?.executionAction || null;
+      if (!signalDirection(executionAction)) continue;
       candidates++;
       const date = String(event.date);
       entries.push({
         date, ts:Date.parse(date + 'T12:00:00Z'), symbol:row.symbol, market, price:event.close,
-        rawSignal:event.rawSignal || null, action:event.action, label:event.label || event.action,
+        rawSignal:event.rawSignal || null, opportunityStage, executionAction,
+        label:event.v21?.label || executionAction,
         regime:event.regime || null, setup:event.setup || null, risk:event.risk || null,
         score:event.score ?? null, confidence:event.confidence ?? null, quality:event.quality || null,
         payload:JSON.stringify({
@@ -3640,8 +4065,8 @@ function driftWeekKey(date) {
 
 const SIGNAL_DRIFT_REPORT_VERSION = 'live-drift-v3-entry-and-defense';
 const SIGNAL_DRIFT_HORIZON = 5;
-const ENTRY_ACTIONS = new Set(['PROBE', 'ADD', 'BUY']);
-const DEFENSIVE_ACTIONS = new Set(['TRIM', 'EXIT', 'AVOID', 'SELL', 'REDUCE']);
+const ENTRY_ACTIONS = new Set(['OPEN', 'ADD', 'PROBE', 'BUY']);
+const DEFENSIVE_ACTIONS = new Set(['REDUCE', 'CLOSE', 'TRIM', 'EXIT', 'AVOID', 'SELL']);
 
 // Entry signals and defensive calls answer different questions.  A correct
 // AVOID can protect capital when the stock falls, but it is not an investable
@@ -4040,6 +4465,10 @@ function analyzeDaily(sym, mkt) {
     bollPctB: a.bollPctB, bollUpper: a.bollUpper, bollLower: a.bollLower,
     volRatio: a.volRatio, roc: a.roc, atr: a.atr,
     signalProfiles: a.signalProfiles,
+    // Research-only opportunity identity and the three confirmation-speed
+    // views. Keep this in the public analysis DTO so the stock detail page and
+    // feature-snapshot ledger observe the same object computed above.
+    opportunityModel: a.opportunityModel,
     indicators: a.indObj, score: a.score, confidence: a.confidence, signal: a.signal, stopLoss: a.stopLoss, takeProfit: a.takeProfit,
     dataQuality: a.dataQuality, tradePlan: a.tradePlan, relativeStrength: a.relativeStrength, marketRegime: a.marketRegime, longTermTrend: a.longTermTrend,
     votes: a.votes, // D3: 完整投票明细，供审计 tab 展示
@@ -4145,6 +4574,43 @@ export function stockHandler(req, res) {
     res.writeHead(200,{"Content-Type":"application/json"});res.end(JSON.stringify({symbol,days,bars:rows}));return;
   }
 
+  if (url.pathname === "/stock/chart-studies") {
+    const symbol = String(url.searchParams.get("symbol") || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+    const requestedProfile = String(url.searchParams.get("profile") || FORMAL_SIGNAL_PROFILE_ID).toLowerCase();
+    const profileId = getSignalProfile(requestedProfile)?.id || FORMAL_SIGNAL_PROFILE_ID;
+    const days = Math.max(260, Math.min(400, parseInt(url.searchParams.get("days") || "320", 10)));
+    if (!symbol) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "need symbol" }));
+      return;
+    }
+    const analysis = latestAnalysis?.[symbol] || null;
+    const profile = analysis?.signalProfiles?.profiles?.[profileId] || null;
+    const decision = analysis?.profileDecisions?.[profileId]
+      || (analysis?.swingDecision?.profileId === profileId ? analysis.swingDecision : null);
+    const bars = db.prepare("SELECT date,open,high,low,close,volume FROM stock_kline WHERE symbol=? ORDER BY date DESC LIMIT ?").all(symbol, days).reverse();
+    const payload = buildSignalProfileChartStudies({
+      bars, profileId,
+      marketRegimeKey: profile?.metrics?.marketRegime || decision?.profileStrategy?.regimeKey || analysis?.marketRegime?.key || 'range',
+    });
+    payload.symbol = symbol;
+    payload.market = analysis?.market || null;
+    payload.formalProfileId = analysis?.signalProfiles?.effectiveProfileId || FORMAL_SIGNAL_PROFILE_ID;
+    payload.selectorEnabled = analysis?.signalProfiles?.selectorEnabled === true;
+    payload.asOfDate = analysis?.asOfDate || bars.at(-1)?.date || null;
+    payload.stagePlan = decision?.stagePlan || null;
+    payload.snapshot = profile ? {
+      score: profile.score ?? null,
+      signal: profile.signal || null,
+      status: profile.status || null,
+      metrics: profile.metrics || null,
+      votes: Array.isArray(profile.votes) ? profile.votes : [],
+    } : null;
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-cache" });
+    res.end(JSON.stringify(payload));
+    return;
+  }
+
   if (url.pathname === "/stock/minute-bars") {
     const symbol = String(url.searchParams.get("symbol") || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
     const minutes = Math.max(15, Math.min(30 * 24 * 60, parseInt(url.searchParams.get("minutes") || "1440", 10)));
@@ -4200,11 +4666,18 @@ export function stockHandler(req, res) {
           completedDateForMarket: lastCompletedTradingDate,
         });
       } catch (e) { console.error('[feature-snapshots] initial capture', e.message); }
-      latestAnalysis = results;
+      commitLatestAnalysis(results);
       try { logSignalSnapshot(results); } catch (e) { console.error("[signal-log]", e.message); }
     }
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(results));
+    if (!latestAnalysisJson) latestAnalysisJson = JSON.stringify(results || {});
+    const etag = `"stock-analysis-${latestAnalysisRevision}"`;
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, { ETag:etag, 'Cache-Control':'no-cache' });
+      res.end();
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json", ETag:etag, "Cache-Control":"no-cache" });
+    res.end(latestAnalysisJson);
     return;
   }
 
@@ -4366,6 +4839,7 @@ export function stockHandler(req, res) {
     // 不触发 outcome 回填、参数调优或任何正式决策变更。
     dashboard.signalDrift = isCurrentSignalDriftReport(latestDrift) ? latestDrift : buildSignalDriftReport();
     dashboard.signalProfiles = getSignalProfileResearchDashboard({ market });
+    dashboard.researchRanking = summarizeResearchRankingFactors(latestAnalysis, { market });
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(dashboard));
     return;
@@ -4482,19 +4956,20 @@ export function stockHandler(req, res) {
     const symbol=(url.searchParams.get("symbol")||"").toUpperCase().replace(/[^A-Z0-9]/g,"");
     const limit=Math.min(120,Math.max(1,parseInt(url.searchParams.get("limit")||"30",10)));
     if(!symbol){res.writeHead(400,{"Content-Type":"application/json"});res.end(JSON.stringify({error:"symbol required"}));return;}
-    const rows=db.prepare(`SELECT id,date,ts,symbol,market,price,raw_signal,action,action_label,confidence,payload,sample_origin,engine_version
-      FROM stock_signal_log WHERE symbol=? AND sample_origin=? ORDER BY date DESC LIMIT ?`).all(symbol,LIVE_FROZEN_ORIGIN,limit);
-    const ids=rows.map(x=>x.id),outcomes=ids.length?db.prepare(`SELECT signal_id,horizon,entry_date,exit_date,net_directional_return_pct,mfe_pct,mae_pct
-      FROM stock_signal_outcomes WHERE signal_id IN (${ids.map(()=>'?').join(',')}) ORDER BY horizon`).all(...ids):[];
-    const byId=new Map();for(const x of outcomes){if(!byId.has(x.signal_id))byId.set(x.signal_id,{});byId.get(x.signal_id)[x.horizon]=x;}
+    const rows=db.prepare(`SELECT id,date,ts,symbol,market,action_label,opportunity_stage,execution_action,payload
+      FROM stock_signal_log WHERE symbol=? AND sample_origin=? AND engine_version=? ORDER BY date DESC LIMIT ?`).all(symbol,LIVE_FROZEN_ORIGIN,SIGNAL_ENGINE_VERSION,limit);
+    const bars=getKline.all(symbol);
     const result=rows.map(row=>{let payload={};try{payload=JSON.parse(row.payload||'{}')}catch{}
-      const swing=payload.swingDecision||{},reliability=payload.reliability||{};
-      return {id:row.id,date:row.date,ts:row.ts,symbol:row.symbol,market:row.market,price:row.price,
-        rawAction:row.raw_signal,finalAction:row.action,actionLabel:row.action_label,confidence:row.confidence,
-        engineVersion:row.engine_version||payload.engineVersion||null,origin:row.sample_origin,reliabilityScore:swing.reliabilityScore??reliability.reliabilityScore??null,
-        compositeScore:swing.compositeScore??null,scoringEngine:swing.scoringEngine||payload.scoringEngine||null,
-        summary:swing.summary||payload.tradePlan?.summary||null,validFrom:swing.validFrom||row.date,validUntil:swing.validUntil||null,
-        zones:swing.zones||null,reasons:Array.isArray(swing.reasons)?swing.reasons:(payload.reasons||[]),outcomes:byId.get(row.id)||{}};
+      const swing=payload.swingDecision||{};
+      return {id:row.id,date:row.date,ts:row.ts,symbol:row.symbol,market:row.market,
+        opportunityStage:row.opportunity_stage,executionAction:row.execution_action,
+        actionLabel:row.action_label,
+        summary:swing.summary||payload.tradePlan?.summary||null,
+        closeFollowup:buildSignalCloseFollowup({
+          bars,
+          signalDate:row.date,
+          completedThroughDate:lastCompletedTradingDate(row.market),
+        })};
     });
     res.writeHead(200,{"Content-Type":"application/json"});res.end(JSON.stringify(result));return;
   }
@@ -4507,7 +4982,7 @@ export function stockHandler(req, res) {
     if(!analysis){res.writeHead(404,{"Content-Type":"application/json"});res.end(JSON.stringify({error:"analysis unavailable"}));return;}
     const current=snapshotFromAnalysis(analysis);
     const previousRow=current.asOfDate
-      ? db.prepare(`SELECT date,action,payload FROM stock_signal_log
+      ? db.prepare(`SELECT date,action,opportunity_stage,execution_action,payload FROM stock_signal_log
           WHERE symbol=? AND sample_origin=? AND engine_version=? AND date<?
           ORDER BY date DESC LIMIT 1`).get(symbol,LIVE_FROZEN_ORIGIN,SIGNAL_ENGINE_VERSION,current.asOfDate)
       : null;
@@ -4674,9 +5149,11 @@ export function stockHandler(req, res) {
       const plan = analysis?.tradePlan || null;
       const action = plan?.action || analysis?.signal || null;
       const swing = analysis?.swingDecision || null;
-      const signalState = swing?.state || null;
-      const isLongSignal = ["BUY","ADD","PROBE","STRONG_BUY"].includes(action) || signalState === "PROBE" || signalState === "ADD";
-      const isShortSignal = ["SELL","REDUCE","TRIM","EXIT","STRONG_SELL"].includes(action) || signalState === "TRIM" || signalState === "EXIT";
+      const executionAction = swing?.executionAction || null;
+      const opportunityStage = swing?.opportunityStage || null;
+      const isLongSignal = ["BUY","ADD","STRONG_BUY"].includes(action) || ["OPEN","ADD"].includes(executionAction);
+      const isShortSignal = ["SELL","REDUCE","STRONG_SELL"].includes(action)
+        || ["REDUCE","CLOSE"].includes(executionAction) || opportunityStage === 'RISK_OFF';
 
       // 联动判断
       let bridge = { applicable: false };
@@ -4701,8 +5178,9 @@ export function stockHandler(req, res) {
 
         // 止损/止盈影响
         let stopImpact = null;
-        if (plan?.stopLoss != null) {
-          const distToStop = Math.abs(regularPrice - plan.stopLoss) / regularPrice * 100;
+        const activeInvalidation = Number(swing?.zones?.invalidation);
+        if (Number.isFinite(activeInvalidation) && activeInvalidation > 0) {
+          const distToStop = Math.abs(regularPrice - activeInvalidation) / regularPrice * 100;
           if (isLongSignal && extPct < 0 && distToStop < Math.abs(extPct) * 1.5) {
             stopImpact = { level: "danger", label: "盘后跌幅接近止损位" };
           } else if (isLongSignal && extPct < 0 && distToStop < Math.abs(extPct) * 3) {
@@ -4786,6 +5264,7 @@ export function stockHandler(req, res) {
               const mkt = String(wl?.market || 'US').toUpperCase();
               if (latestAnalysis && latestAnalysis[symbol]) {
                 latestAnalysis[symbol].groupRisk = getGroupRiskOverlay(symbol, mkt);
+                touchLatestAnalysis();
               }
             } catch (e) { console.error('[set-group] refresh groupRisk cache failed:', e.message); }
             res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ ok:true,symbol,groupKey }));
@@ -4822,6 +5301,7 @@ export function stockHandler(req, res) {
               try {
                 if (latestAnalysis && latestAnalysis[symbol]) {
                   latestAnalysis[symbol].groupRisk = getGroupRiskOverlay(symbol, market);
+                  touchLatestAnalysis();
                 }
               } catch (e) { console.error('[rename-group] refresh cache failed for', symbol, e.message); }
             }
@@ -4848,6 +5328,7 @@ export function stockHandler(req, res) {
               try {
                 if (latestAnalysis && latestAnalysis[symbol]) {
                   latestAnalysis[symbol].groupRisk = getGroupRiskOverlay(symbol, market);
+                  touchLatestAnalysis();
                 }
               } catch (e) { console.error('[delete-group] refresh cache failed for', symbol, e.message); }
             }
@@ -4880,6 +5361,38 @@ export function stockHandler(req, res) {
     res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(rows)); return;
   }
 
+  if (url.pathname === "/stock/signal-profile") {
+    if (req.method === 'GET') {
+      const symbol = String(url.searchParams.get('symbol') || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const position = symbol ? computePositionFromEvents(symbol) : null;
+      const selection = stockProfileState.resolveForPosition(symbol, position);
+      res.writeHead(200, { 'Content-Type':'application/json' });
+      res.end(JSON.stringify({ ok:true, catalog:stockProfileState.getCatalog(), ...selection }));
+      return;
+    }
+    if (req.method === 'POST') {
+      let body = ''; req.on('data', chunk => body += chunk); req.on('end', () => {
+        try {
+          const input = JSON.parse(body || '{}');
+          const symbol = String(input.symbol || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+          if (symbol && computePositionFromEvents(symbol).shares > 0) {
+            res.writeHead(409, { 'Content-Type':'application/json' });
+            return res.end(JSON.stringify({ error:'持仓已绑定既有人格；请先平仓，或使用后续提供的显式迁移流程。' }));
+          }
+          const saved = stockProfileState.setPreference({ symbol, profileId:input.profileId, source:'api' });
+          const selection = stockProfileState.resolveForPosition(symbol, symbol ? computePositionFromEvents(symbol) : null);
+          res.writeHead(200, { 'Content-Type':'application/json' });
+          return res.end(JSON.stringify({ ok:true, saved, ...selection }));
+        } catch (error) {
+          res.writeHead(400, { 'Content-Type':'application/json' });
+          return res.end(JSON.stringify({ error:error.message }));
+        }
+      });
+      return;
+    }
+    res.writeHead(405); res.end(); return;
+  }
+
   if (url.pathname === "/stock-positions") {
     if (req.method === "POST") {
       // 持仓状态已改为由操作事件推算，不再支持手动编辑。保留 POST 返回 410 提示。
@@ -4898,13 +5411,20 @@ export function stockHandler(req, res) {
       try {
         const t = JSON.parse(body || '{}');
         const symbol = String(t.symbol || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-        const result = voidTradeEvent(symbol, t.id, { reason:t.reason });
-        if (!result.ok) { res.writeHead(409, { "Content-Type":"application/json" }); return res.end(JSON.stringify(result)); }
-        const pos = computePositionFromEvents(symbol);
+        const outcome = db.transaction(() => {
+          const result = voidTradeEvent(symbol, t.id, { reason:t.reason });
+          if (!result.ok) return { result, pos:null, profileBinding:null };
+          const pos = computePositionFromEvents(symbol);
+          const eventMarket = db.prepare('SELECT market FROM stock_trade_events WHERE id=?').get(result.id)?.market || 'US';
+          const profileBinding = stockProfileState.reconcileBinding(symbol, eventMarket, pos, { source:'trade_event_void' });
+          return { result, pos, profileBinding };
+        })();
+        if (!outcome.result.ok) { res.writeHead(409, { "Content-Type":"application/json" }); return res.end(JSON.stringify(outcome.result)); }
+        const { result, pos, profileBinding } = outcome;
         const tp = db.prepare("SELECT id FROM tracker_pairs WHERE etf=?").get(symbol);
         if (tp) recalcTrackerPositionFromEvents(tp.id);
         res.writeHead(200, { "Content-Type": "application/json" });
-        return res.end(JSON.stringify({ ...result, shares:pos.shares, cost:pos.cost }));
+        return res.end(JSON.stringify({ ...result, shares:pos.shares, cost:pos.cost, profileBinding }));
       } catch (e) { res.writeHead(400, { "Content-Type":"application/json" }); res.end(JSON.stringify({ error:e.message })); }
     });
     return;
@@ -4928,15 +5448,20 @@ export function stockHandler(req, res) {
           // 费用（可选）：写入 total_fee 字段，用于成本推算
           const fee = Math.max(0, Number(t.fee) || 0);
           const createdAt = Date.now();
-          // 只写入事件流水；持仓由 computePositionFromEvents 推算
-          db.prepare(`INSERT INTO stock_trade_events(symbol,market,event_type,shares,price,date,note,created_at,total_fee) VALUES(?,?,?,?,?,?,?,?,?)`)
-            .run(symbol, market, event_type, shares, price, date, note, createdAt, fee);
-          // 返回推算后的持仓状态
-          const pos = computePositionFromEvents(symbol);
+          const { pos, profileBinding } = db.transaction(() => {
+            const positionBefore = computePositionFromEvents(symbol);
+            // 交易事件与人格绑定同事务提交，避免“交易已写入但策略锁定失败”。
+            db.prepare(`INSERT INTO stock_trade_events(symbol,market,event_type,shares,price,date,note,created_at,total_fee) VALUES(?,?,?,?,?,?,?,?,?)`)
+              .run(symbol, market, event_type, shares, price, date, note, createdAt, fee);
+            const pos = computePositionFromEvents(symbol);
+            const bindingSource = event_type === 'buy' && positionBefore.shares <= 0 ? 'first_buy' : 'trade_event';
+            const profileBinding = stockProfileState.reconcileBinding(symbol, market, pos, { source:bindingSource });
+            return { pos, profileBinding };
+          })();
           // 同步：若该 symbol 是某个 tracker pair 的 ETF，刷新 tracker_positions 缓存
           const tp = db.prepare("SELECT id FROM tracker_pairs WHERE etf=?").get(symbol);
           if (tp) recalcTrackerPositionFromEvents(tp.id);
-          res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ ok: true, shares: pos.shares, cost: pos.cost }));
+          res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ ok: true, shares: pos.shares, cost: pos.cost, profileBinding }));
         } catch (e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
       });
       return;
@@ -5050,7 +5575,7 @@ async function analyzeAll() {
       });
       if (featureSnapshots.inserted > 0) console.log(`[feature-snapshots] frozen ${featureSnapshots.inserted} completed-daily source snapshots`);
     } catch (e) { console.error('[feature-snapshots] capture', e.message); }
-    latestAnalysis = results;
+    commitLatestAnalysis(results);
     try { logSignalSnapshot(results); } catch (e) { console.error("[signal-log]", e.message); }
   } catch (e) { console.error("[stock-engine] analyzeAll", e.message); }
   finally { analysisInFlight = false; }
@@ -5113,6 +5638,19 @@ export async function initStockEngine({ runBackgroundTask = null } = {}) {
   // Signal analysis cache for the alert engine (computed now + every 60s; refreshed on demand too).
   analyzeAll().catch((e) => console.error("[stock-engine] initial analysis", e.message));
   setTimeout(() => scheduleScenarioShadowAccrual(true), 30_000);
+  // A new engine version has no compatible historical replay rows. Rebuild the
+  // isolated research baseline in the low-priority queue instead of leaving a
+  // stale previous-version status that looks ready forever.
+  setTimeout(() => {
+    const status = getHistoricalReplayStatus();
+    if (status.totalSignals > 0 || status.status === 'running') return;
+    const task = () => rebuildHistoricalSignalReplay({ days:320, markets:['US','HK','CN'] });
+    const pending = typeof runBackgroundTask === 'function'
+      ? runBackgroundTask('stock:historical-replay', task, { priority:'low', dedupeKey:'stock:historical-replay' })
+      : task();
+    Promise.resolve(pending).then(result => console.log('[signal-replay] automatic rebuild', JSON.stringify(result)))
+      .catch(error => console.error('[signal-replay] automatic rebuild', error.message));
+  }, 45_000);
   setInterval(() => analyzeAll().catch((e) => console.error("[stock-engine] scheduled analysis", e.message)), 60_000);
   console.log("[stock-engine] analysis cache started (60s)");
 }
@@ -5124,7 +5662,10 @@ export async function initStockEngine({ runBackgroundTask = null } = {}) {
 // P2-6b: K 线域函数（fetchKlineArray / backfillAllDailyK / recordMinuteQuote /
 // aggregateIntradayBars / validateKline 等）已迁移至 stock_kline.mjs，这里 re-export 保持外部
 // API 稳定（虽然目前无外部模块直接从 stock_engine 导入这些函数，但作为防御性措施保留）。
-export { db, DB_PATH, computePositionFromEventRows, computePositionFromEvents, computeAllPositionsFromEvents, recalcTrackerPositionFromEvents, voidTradeEvent, invalidateActiveEtfPairCache, getWatchlist, getLatestAnalysis, getScenarioResearchOperationsStatus, getScenarioResearchSymbolSummary, getStockDisplayName, getStockPositions, recordStockSignalAudit, getStockSignalAudit, recordAlertAudit, updateAlertAudit, getAlertAudit, recordRuntimeMetric, getRuntimeMetrics, getSystemSetting, setSystemSetting, transitionsOnly, createDatabaseBackup, getBackupStatus, verifyDatabaseBackup, restoreDatabaseBackup, getMarketStateFor, isAnyMarketOpen, buildSwingDecision, resolveFinalSwingState, applyCriticalDataGate, getHistoricalAnalysisForDate, backfillPersonalSymbols, rebuildHistoricalSignalReplay, getHistoricalReplayStatus, SIGNAL_ENGINE_VERSION, COMPATIBLE_SIGNAL_ENGINE_VERSIONS,
+export { db, DB_PATH, computePositionFromEventRows, computePositionFromEvents, computeAllPositionsFromEvents, recalcTrackerPositionFromEvents, voidTradeEvent, invalidateActiveEtfPairCache, getWatchlist, getLatestAnalysis, getScenarioResearchOperationsStatus, getScenarioResearchSymbolSummary, getStockDisplayName, getStockPositions, recordStockSignalAudit, getStockSignalAudit, recordAlertAudit, updateAlertAudit, getAlertAudit, recordRuntimeMetric, getRuntimeMetrics, getSystemSetting, setSystemSetting, transitionsOnly, createDatabaseBackup, getBackupStatus, verifyDatabaseBackup, restoreDatabaseBackup, getMarketStateFor, isAnyMarketOpen, buildSwingDecisionContext, applyCriticalDataGate, getHistoricalAnalysisForDate, backfillPersonalSymbols, rebuildHistoricalSignalReplay, getHistoricalReplayStatus, SIGNAL_ENGINE_VERSION, COMPATIBLE_SIGNAL_ENGINE_VERSIONS,
+  scoreVolumePriceCorrelation,
+  applyEventExecutionOverlay,
+  resolveReplayStatus,
   // D1 新增：风险配置 + API Key 管理
   getRiskConfig, setRiskConfig, getEarningsPolicy, getApiKeys, getApiKey, setApiKey, deleteApiKey, maskApiKey, SUPPORTED_API_PROVIDERS,
   // P2-6b: 供 stock_kline.mjs 通过 ESM live binding 反向引用

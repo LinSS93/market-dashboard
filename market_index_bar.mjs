@@ -89,10 +89,10 @@ function parseTencentIndex(raw) {
 }
 
 // 新浪主源 + 腾讯备份（与 quote.mjs 架构一致）
-async function fetchIndexQuote(def) {
+async function fetchIndexQuote(def, { force = false } = {}) {
   const now = Date.now();
   const lastFail = recentFail.get(def.id) || 0;
-  if (now - lastFail < FAIL_COOLDOWN_MS) return null;
+  if (!force && now - lastFail < FAIL_COOLDOWN_MS) return null;
 
   // 主源：新浪
   if (def.sinaCode) {
@@ -106,7 +106,7 @@ async function fetchIndexQuote(def) {
         else if (def.sinaFormat === 'int_index') q = parseSinaIntlIndex(f);
         else if (def.sinaFormat === 'us_index') q = parseSinaUSIndex(f);
         else if (def.sinaFormat === 'hk_index') q = parseSinaHKIndex(f);
-        if (q && q.price != null) return q;
+        if (q && q.price != null) { recentFail.delete(def.id); return q; }
       }
     } catch (e) { /* 主源失败，降级腾讯 */ }
   }
@@ -116,7 +116,7 @@ async function fetchIndexQuote(def) {
   try {
     const text = await httpGet('https://qt.gtimg.cn/q=' + def.quoteCode, {}, 1);
     const q = parseTencentIndex(text);
-    if (q && q.price != null) return q;
+    if (q && q.price != null) { recentFail.delete(def.id); return q; }
   } catch (e) { /* 腾讯也失败 */ }
   recentFail.set(def.id, now);
   return null;
@@ -184,10 +184,10 @@ async function fetchIntradayChart(def) {
   return points;
 }
 
-export async function getIndexBarSnapshot() {
+export async function getIndexBarSnapshot({ force = false } = {}) {
   // 报价并发拉取（新浪主源+腾讯备份）；分时走势并发；日 K 作为降级备份
   const [quotes, intradayCharts, dailyCharts] = await Promise.all([
-    Promise.all(INDEX_DEFS.map(def => fetchIndexQuote(def).then(q => ({ def, q })))),
+    Promise.all(INDEX_DEFS.map(def => fetchIndexQuote(def, { force }).then(q => ({ def, q })))),
     Promise.all(INDEX_DEFS.map(def => fetchIntradayChart(def).then(points => ({ id: def.id, points })))),
     Promise.all(INDEX_DEFS.map(def => fetchMiniChart(def).then(points => ({ id: def.id, points })))),
   ]);

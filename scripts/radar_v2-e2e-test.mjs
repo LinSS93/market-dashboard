@@ -14,7 +14,7 @@ import { setRadarV2DbForTest, clearRadarV2DbForTest } from '../radar_v2_schema.m
 import { loadUniverse, getUniverseStats } from '../radar_v2_universe.mjs';
 import { adapterFor, getAllAdapters, loadDailyBars, setNowFnForTest, resetNowFnForTest } from '../radar_v2_market.mjs';
 import { marketKlineParams } from '../market_adapter.mjs';
-import { scoreCandidate, scoreUniverse, fetchEventFacts, SCORING_PROFILE_VERSION } from '../radar_v2_scoring.mjs';
+import { scoreCandidate, scoreUniverse, fetchEventFacts, SCORING_PROFILE_VERSION, invalidateLiquidityAnchorCache } from '../radar_v2_scoring.mjs';
 import { runScan, getScanStatus, resetThrottleForTest } from '../radar_v2_scanner.mjs';
 import { backfillOutcome, updateMaturedOutcomes } from '../radar_v2_outcomes.mjs';
 import { getTopCandidates, getRunHistory, getScanStats, getCandidateDetail } from '../radar_v2_query_api.mjs';
@@ -336,8 +336,8 @@ global.fetch = async (url, opts) => {
   // 返回模拟 K 线数据（qfqday 格式）
   const mockBars = [];
   let price = 100;
-  for (let i = 0; i < 80; i++) {
-    const d = new Date(Date.now() - (80 - i) * 86400000);
+  for (let i = 0; i < 120; i++) {
+    const d = new Date(Date.now() - (120 - i) * 86400000);
     if (d.getUTCDay() === 0 || d.getUTCDay() === 6) continue;
     const date = d.toISOString().slice(0, 10);
     price *= 1.003;
@@ -391,10 +391,66 @@ assert(['positive', 'negative', 'neutral'].includes(aaplScored.direction), `dire
 assert(aaplScored.metrics.technical != null, 'metrics.technical 存在');
 assert(aaplScored.metrics.event == null, '可交易性 base score 不混入事件分（事件由 dossier 层独立表达）');
 assert(aaplScored.metrics.liquidity != null, 'metrics.liquidity 存在');
-assert(aaplScored.metrics.reliability != null, 'metrics.reliability 存在');
+assert(aaplScored.metrics.reliability == null, 'metrics.reliability 已移除（审计修正：数据可靠度改硬门槛，不再是评分维度）');
 assert(aaplScored.metrics.fundamental == null, '可交易性 base score 不混入基本面分（基本面由独立 dossier 通道表达）');
 assert(aaplScored.evidence.some(item => item.type === 'event' && item.external_id === aaplEvents[0].external_id),
   '近期事件仅作为可追溯 evidence 保留，不混入 base score');
+
+// 审计修正 2026.09.02：数据质量硬门槛 + 市场相对流动性
+{
+  console.log('\n[4b] 数据质量硬门槛（可靠度不再是评分维度）');
+  // 4b.1 K 线不足 60 根 → skipped，不产生分数
+  const shortBars = scoreCandidate({
+    market: 'US', symbol: 'AAPL', name: 'Apple Inc.',
+    bars: aaplBars.slice(0, 50), metadata: { dataSuspect: false, breaks: [] },
+  });
+  assert(shortBars.skipped === 'insufficient_bars' && shortBars.score == null,
+    `50 根 K 线 → skipped=insufficient_bars（实际 ${shortBars.skipped}）`);
+  // 4b.2 断点 > 3 → skipped
+  const fragmented = scoreCandidate({
+    market: 'US', symbol: 'AAPL', name: 'Apple Inc.',
+    bars: aaplBars, metadata: { dataSuspect: true, breaks: [{}, {}, {}, {}] },
+  });
+  assert(fragmented.skipped === 'fragmented_data' && fragmented.score == null,
+    `4 个断点 → skipped=fragmented_data（实际 ${fragmented.skipped}）`);
+  // 4b.3 scoreUniverse 过滤 skipped 标的
+  const mixedUniverse = scoreUniverse([
+    { market: 'US', symbol: 'AAPL', name: 'Apple', bars: aaplBars, metadata: { dataSuspect: false, breaks: [] } },
+    { market: 'US', symbol: 'SHORT', name: 'Short', bars: aaplBars.slice(0, 30), metadata: {} },
+  ]);
+  assert(mixedUniverse.length === 1 && mixedUniverse[0].symbol === 'AAPL',
+    `scoreUniverse 过滤门槛不过的标的（实际 ${mixedUniverse.length} 个）`);
+
+  console.log('\n[4c] 流动性市场相对分位（跨市场标准化）');
+  // 4c.1 市场 symbol 数 < 10 → 锚点不可用，回退绝对尺度（不阻塞评分）
+  assert(aaplScored.metrics.liquidity === 72,
+    `6 symbol 市场锚点不可用 → 绝对尺度（1e6 均量 → 72，实际 ${aaplScored.metrics.liquidity}）`);
+  // 4c.2 注入 10+ symbol 的均量分布 → 中位数锚点生效：AAPL 均量=中位数 → 50
+  const anchorTx = db.transaction(() => {
+    for (let k = 0; k < 12; k++) {
+      const sym = `ANCHOR${String(k).padStart(2, '0')}`;
+      for (let i = 0; i < 20; i++) {
+        const d = TRADING_DAYS[TRADING_DAYS.length - 20 + i];
+        insertV2Bar.run('US', sym, d, 100, 101, 99, 100, 1000000, now);
+      }
+    }
+  });
+  anchorTx();
+  invalidateLiquidityAnchorCache();
+  const relScored = scoreCandidate({
+    market: 'US', symbol: 'AAPL', name: 'Apple Inc.',
+    bars: aaplBars, metadata: { marketCap: 3e12, dataSuspect: false, breaks: [] },
+  });
+  assert(relScored.metrics.liquidity === 50,
+    `均量=市场中位数 → 流动性 50（实际 ${relScored.metrics.liquidity}）`);
+  // 4c.3 10 倍中位 → 90；1/10 中位 → 10（对数分位映射）
+  const bigVolBars = aaplBars.map((b, idx) => idx >= aaplBars.length - 20 ? { ...b, volume: 10000000 } : b);
+  const smallVolBars = aaplBars.map((b, idx) => idx >= aaplBars.length - 20 ? { ...b, volume: 100000 } : b);
+  const bigScored = scoreCandidate({ market: 'US', symbol: 'AAPL', bars: bigVolBars, metadata: {} });
+  const smallScored = scoreCandidate({ market: 'US', symbol: 'AAPL', bars: smallVolBars, metadata: {} });
+  assert(bigScored.metrics.liquidity === 90, `10 倍中位均量 → 90（实际 ${bigScored.metrics.liquidity}）`);
+  assert(smallScored.metrics.liquidity === 10, `1/10 中位均量 → 10（实际 ${smallScored.metrics.liquidity}）`);
+}
 
 // === 测试 5: 批量评分 ===
 console.log('\n[5] 批量评分');
@@ -640,8 +696,8 @@ global.fetch = async (url) => {
   }
   const mockBars = [];
   let price = 100;
-  for (let i = 0; i < 80; i++) {
-    const d = new Date(Date.now() - (80 - i) * 86400000);
+  for (let i = 0; i < 120; i++) {
+    const d = new Date(Date.now() - (120 - i) * 86400000);
     if (d.getUTCDay() === 0 || d.getUTCDay() === 6) continue;
     const date = d.toISOString().slice(0, 10);
     price *= 1.003;
@@ -742,8 +798,8 @@ global.fetch = async (url) => {
   }
   const mockBars = [];
   let price = 100;
-  for (let i = 0; i < 80; i++) {
-    const d = new Date(Date.now() - (80 - i) * 86400000);
+  for (let i = 0; i < 120; i++) {
+    const d = new Date(Date.now() - (120 - i) * 86400000);
     if (d.getUTCDay() === 0 || d.getUTCDay() === 6) continue;
     const date = d.toISOString().slice(0, 10);
     price *= 1.003;
@@ -812,8 +868,8 @@ console.log('\n[16] 重启恢复（run_id 在扫描前持久化）');
   global.fetch = async () => {
     const mockBars = [];
     let price = 100;
-    for (let i = 0; i < 80; i++) {
-      const d = new Date(Date.now() - (80 - i) * 86400000);
+    for (let i = 0; i < 120; i++) {
+      const d = new Date(Date.now() - (120 - i) * 86400000);
       if (d.getUTCDay() === 0 || d.getUTCDay() === 6) continue;
       const date = d.toISOString().slice(0, 10);
       price *= 1.003;
@@ -869,8 +925,8 @@ console.log('\n[17] 重试未成功项（scan_items 过滤）');
     }
     const mockBars = [];
     let price = 100;
-    for (let i = 0; i < 80; i++) {
-      const d = new Date(Date.now() - (80 - i) * 86400000);
+    for (let i = 0; i < 120; i++) {
+      const d = new Date(Date.now() - (120 - i) * 86400000);
       if (d.getUTCDay() === 0 || d.getUTCDay() === 6) continue;
       const date = d.toISOString().slice(0, 10);
       price *= 1.003;
@@ -911,8 +967,8 @@ console.log('\n[17] 重试未成功项（scan_items 过滤）');
       }
       const mockBars = [];
       let price = 100;
-      for (let i = 0; i < 80; i++) {
-        const d = new Date(Date.now() - (80 - i) * 86400000);
+      for (let i = 0; i < 120; i++) {
+        const d = new Date(Date.now() - (120 - i) * 86400000);
         if (d.getUTCDay() === 0 || d.getUTCDay() === 6) continue;
         const date = d.toISOString().slice(0, 10);
         price *= 1.003;
@@ -983,8 +1039,8 @@ console.log('\n[18] 限速（token bucket 包裹 fetchTencentDaily）');
     fetchCount18++;
     const mockBars = [];
     let price = 100;
-    for (let i = 0; i < 80; i++) {
-      const d = new Date(Date.now() - (80 - i) * 86400000);
+    for (let i = 0; i < 120; i++) {
+      const d = new Date(Date.now() - (120 - i) * 86400000);
       if (d.getUTCDay() === 0 || d.getUTCDay() === 6) continue;
       const date = d.toISOString().slice(0, 10);
       price *= 1.003;

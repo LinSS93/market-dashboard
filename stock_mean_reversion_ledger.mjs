@@ -169,7 +169,8 @@ function recordRawCapture({ db, symbol, market, marketDate, analysis, observedAt
     quote_source=excluded.quote_source,quote_time=excluded.quote_time,payload_json=excluded.payload_json
   WHERE excluded.rsi6 < stock_mean_reversion_raw_observations.rsi6`).run(
     MEAN_REVERSION_OBSERVATION_SCHEMA_VERSION, observedAt, observedAt, symbol, market, marketDate, price, rsi6,
-    numeric(analysis.rsi12), numeric(analysis.bollPctB), numeric(analysis.bollLower), analysis?.swingDecision?.state || null,
+    numeric(analysis.rsi12), numeric(analysis.bollPctB), numeric(analysis.bollLower),
+    analysis?.swingDecision?.opportunityStage || null,
     analysis?.dataQuality?.level || null, quote.source || null, quote.providerTime || null, rawPayload(analysis),
   );
   return info.changes;
@@ -206,7 +207,7 @@ export function recordMeanReversionObservations({ db, results, marketStateFor, m
       const info = insert.run(
         key, MEAN_REVERSION_OBSERVATION_SCHEMA_VERSION, MEAN_REVERSION_POLICY_VERSION, observedAt, symbol, market, marketDate,
         evaluation.eventType, evaluation.price, evaluation.candidatePrice, evaluation.rsi6, evaluation.rsi12, evaluation.bollPctB,
-        evaluation.bollLower, analysis?.swingDecision?.state || null, analysis?.liveQuote?.source || null,
+        evaluation.bollLower, analysis?.swingDecision?.opportunityStage || null, analysis?.liveQuote?.source || null,
         analysis?.liveQuote?.providerTime || null, eventPayload(analysis, evaluation),
       );
       inserted += info.changes;

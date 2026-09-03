@@ -2,8 +2,10 @@
   'use strict';
   const $=id=>document.getElementById(id);
   const esc=value=>String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-  const ACTIONS=['PROBE','ADD','TRIM','EXIT','AVOID'];
-  const ACTION_LABELS={PROBE:'试仓',ADD:'加仓',TRIM:'减仓',EXIT:'清仓',AVOID:'回避'};
+  const STOCK_ACTIONS=['OPEN','ADD','REDUCE','CLOSE'];
+  const STOCK_ACTION_LABELS={OPEN:'可试仓',ADD:'可加仓',REDUCE:'减仓',CLOSE:'清仓'};
+  const ETF_ACTIONS=['PROBE','ADD','TRIM','EXIT','AVOID'];
+  const ETF_ACTION_LABELS={PROBE:'试仓',ADD:'加仓',TRIM:'减仓',EXIT:'清仓',AVOID:'回避'};
   const RADAR_V2_TIERS=['risk','confirmed','new'];
   const RADAR_V2_TIER_LABELS={risk:'风险待核验',confirmed:'优先研究（多通道）',new:'新变化（待验证）'};
   const MARKET_LABELS={US:'美股',HK:'港股',KR:'韩股',CN:'A 股'};
@@ -27,8 +29,8 @@
     $('stockEnabled').checked=settings.modules.stock.enabled!==false;
     $('etfEnabled').checked=settings.modules.etf.enabled!==false;
     $('radarV2Enabled').checked=settings.modules.radar_v2?.enabled===true;
-    renderChecks($('stockTiers'),settings.modules.stock.tiers,Object.fromEntries(ACTIONS.map(x=>[x,ACTION_LABELS[x]])));
-    renderChecks($('etfTiers'),settings.modules.etf.tiers,Object.fromEntries(ACTIONS.map(x=>[x,ACTION_LABELS[x]])));
+    renderChecks($('stockTiers'),settings.modules.stock.tiers,Object.fromEntries(STOCK_ACTIONS.map(x=>[x,STOCK_ACTION_LABELS[x]])));
+    renderChecks($('etfTiers'),settings.modules.etf.tiers,Object.fromEntries(ETF_ACTIONS.map(x=>[x,ETF_ACTION_LABELS[x]])));
     renderChecks($('radarV2Tiers'),settings.modules.radar_v2?.tiers||RADAR_V2_TIERS,Object.fromEntries(RADAR_V2_TIERS.map(x=>[x,RADAR_V2_TIER_LABELS[x]])));
     renderIntegration();
   }

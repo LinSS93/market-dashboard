@@ -36,7 +36,6 @@
       <button class="active" onclick="selectAllMarkets()">全选</button>
     </div>
     <span class="toolbar-spacer"></span>
-    <button class="btn ghost" onclick="openCompareModal()">对比</button>
     <button class="btn" onclick="toggleAdd()">+ 添加</button>
     <input type="hidden" id="sortSel" value="auto">
   </div>
@@ -68,8 +67,8 @@
         </div>
         <div class="card-inner">
         <table class="tracker-grid-table">
-          <colgroup><col style="width:28%"><col style="width:14%"><col style="width:14%"><col style="width:20%"><col style="width:20%"><col style="width:4%"></colgroup>
-          <thead><tr><th style="padding-left:36px"><button class="sort-header" type="button" id="sortCode" onclick="cycleTrackerSort('code')">ETF / 正股 <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th><button class="sort-header" type="button" id="sortPrice" onclick="cycleTrackerSort('price')">现价 <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th><button class="sort-header" type="button" id="sortPrem" onclick="cycleTrackerSort('prem')">估算溢价 <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th>当前动作</th><th><button class="sort-header" type="button" id="sortPnl" onclick="cycleTrackerSort('pnl')">持仓 / 盈亏 <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th></th></tr></thead>
+          <colgroup><col style="width:34%"><col style="width:16%"><col style="width:18%"><col style="width:28%"><col style="width:4%"></colgroup>
+          <thead><tr><th style="padding-left:36px"><button class="sort-header" type="button" id="sortCode" onclick="cycleTrackerSort('code')">ETF / 正股 <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th><button class="sort-header" type="button" id="sortPrice" onclick="cycleTrackerSort('price')">现价 <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th><button class="sort-header" type="button" id="sortPrem" onclick="cycleTrackerSort('prem')">估算溢价 <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th>当前动作</th><th></th></tr></thead>
           <tbody id="gridBody"></tbody>
         </table>
         <div id="empty" class="hint" style="padding:14px 0;display:none">还没有追踪项。点击「+ 添加追踪」加入一对 ETF 与正股。</div>
@@ -108,53 +107,42 @@
         </div>
       </div>
     </div>
-    <div class="detail-tabs" role="tablist" aria-label="ETF 详情">
-      <button class="detail-tab active" data-tab="decision" onclick="switchTrackerTab('decision',this)">决策</button>
-      <button class="detail-tab" data-tab="position" onclick="switchTrackerTab('position',this)">持仓</button>
-    </div>
-    <!-- 决策 tab：以“当前判断 → 为什么 → 接下来观察什么”为主线。 -->
-    <section class="detail-tab-panel active" data-panel="decision">
-      <!-- 段 1：当前判断。只展示投资者需要的结论和三项关键因素。 -->
-      <div id="d_decision" class="decision-card"></div>
-      <div class="tracker-focus-grid">
-        <section class="tracker-focus-card">
-          <div class="tracker-section-heading"><span>接下来观察</span><small>不构成自动交易指令</small></div>
-          <div id="d_next_steps" class="tracker-next-steps"></div>
-        </section>
-        <section class="tracker-focus-card">
-          <div class="tracker-section-heading"><span>正股分析</span><a id="d_underlying_link" class="tracker-stock-link" href="/stock">查看股票监控 →</a></div>
-          <div id="d_underlying_signal" class="underlying-signal-card"></div>
-        </section>
-      </div>
-      <!-- 段 2：价格与溢价。数值与图表放在同一语境中，不与结论混排。 -->
-      <section class="tracker-market-card">
+    <div class="detail-body">
+      <!-- 段 1：溢价主区。当前溢价 + 历史分位 + NAV 质量 + 分时曲线，页面唯一一处溢价数值主显示。 -->
+      <section class="tracker-market-card prem-hero">
         <div class="tracker-section-heading"><span>价格与溢价</span><small id="d_market_asof">—</small></div>
-        <div id="d_keylevels" class="key-levels">
+        <div class="prem-hero-grid">
+          <div class="prem-hero-left">
+            <div class="prem-big" id="d_prem_big">—</div>
+            <div class="prem-state" id="d_prem_state">—</div>
+            <div class="prem-pctile" id="d_prem_pctile">90 天分位 …</div>
+            <div class="prem-meta" id="d_prem_navq">NAV 质量 —</div>
+            <div class="prem-meta" id="d_prem_reliability">信号可信度 …</div>
+          </div>
+          <div class="prem-hero-chart">
+            <div id="chPrem" class="chart"></div>
+          </div>
+        </div>
+        <div class="key-levels">
           <div class="kl-item"><div class="kl-k">ETF 现价</div><div class="kl-v" id="d_price">—</div></div>
           <div class="kl-item"><div class="kl-k" id="d_nav_k">估算 NAV</div><div class="kl-v" id="d_nav">—</div></div>
-          <div class="kl-item"><div class="kl-k">溢价率</div><div class="kl-v" id="d_prem">—</div></div>
           <div class="kl-item"><div class="kl-k">正股现价</div><div class="kl-v" id="d_und">—</div></div>
           <div class="kl-item"><div class="kl-k">数据时点</div><div class="kl-v" id="d_asof">—</div></div>
         </div>
-        <div class="charts">
-          <div id="chPrem" class="chart"></div>
-        </div>
       </section>
-      <!-- 段 3：解释与风险。内部流程状态不再出现在当前判断区。 -->
-      <details class="fold tracker-fold" open><summary>判断依据与风险</summary><div class="fold-content">
-        <div id="d_layers" class="tracker-decision-layers"></div>
-        <div id="d_diagnosis"></div>
-        <div id="d_sentiment_cross"></div>
-      </div></details>
+      <!-- 段 2：收盘溢价分布。从历史复盘 fold 提前：当前溢价处于历史什么位置是核心判断依据。 -->
+      <section class="tracker-market-card">
+        <div class="tracker-section-heading"><span>收盘溢价分布</span><small id="d_dist_meta">最近 90 天 · 只统计已收盘独立交易日</small></div>
+        <div id="d_premium_dist" class="premium-dist-box"><div class="hint">加载中…</div></div>
+      </section>
+      <!-- 段 3：决策摘要。紧凑一行：动作 + 正股方向 + 风险旗标，不展开决策故事。 -->
+      <section class="decision-summary" id="d_decision_summary"><div class="hint">数据整理中…</div></section>
+      <!-- 段 4：产品结构与数据记录，供回看与验证。 -->
       <details class="fold tracker-fold"><summary>产品结构与风险说明</summary><div class="fold-content">
         <div id="d_product_profile" class="product-profile-card"></div>
       </div></details>
-      <!-- 段 4：数据与记录。供回看与验证，不抢占当前结论。 -->
-      <details class="fold tracker-fold" ontoggle="onHistoryFoldToggle(this)"><summary>数据与记录<span class="muted" style="margin-left:8px;font-weight:normal">· 不反向影响正式决策</span></summary><div class="fold-content">
+      <details class="fold tracker-fold"><summary>数据与记录<span class="muted" style="margin-left:8px;font-weight:normal">· 不反向影响正式决策</span></summary><div class="fold-content">
         <div class="research-intro">盘中记录用于观察价格变化；只有收盘封口的独立交易日样本才会用于溢价阈值与 NAV 收敛验证。</div>
-        <details class="fold sub-fold"><summary>收盘溢价位置<span class="muted" style="margin-left:8px;font-weight:normal">· 最近 90 天</span></summary><div class="fold-content">
-          <div id="d_premium_dist" class="premium-dist-box"><div class="hint">加载中…</div></div>
-        </div></details>
         <details class="fold sub-fold"><summary>近期信号生命周期<span class="muted" style="margin-left:8px;font-weight:normal">· 最近 40 条</span></summary><div class="fold-content">
           <div id="d_signal_audit" class="signal-alert-audit"><div class="hint">正在积累信号记录</div></div>
         </div></details>
@@ -162,46 +150,7 @@
           <div id="d_alert_audit" class="signal-alert-audit"><div class="hint">暂无提醒记录</div></div>
         </div></details>
       </div></details>
-    </section>
-    <!-- 持仓 tab：4 张汇总卡 + 操作事件 lot 管理（与股票监控看板对齐） -->
-    <section class="detail-tab-panel" data-panel="position">
-      <!-- 顶部 4 张汇总卡（参考股票监控 pos-card 样式） -->
-      <div class="position-summary-cards" id="d_pos_cards">
-        <div class="pos-card"><div class="pos-k">持仓股数</div><div class="pos-v" id="pos_card_shares">—</div></div>
-        <div class="pos-card"><div class="pos-k">成本价 <span id="p_cost_ccy">HKD</span></div><div class="pos-v" id="pos_card_cost">—</div></div>
-        <div class="pos-card"><div class="pos-k">浮盈 / 浮亏</div><div class="pos-v" id="pos_card_pl">—</div></div>
-        <div class="pos-card"><div class="pos-k">市值</div><div class="pos-v" id="pos_card_mv">—</div></div>
-      </div>
-      <!-- ETF 特有字段已精简：产品年化成本% 不再让用户配置（默认 0，NAV 不扣减） -->
-      <input id="p_product_cost" type="hidden" value="">
-      <!-- 隐藏承载容器：原 p_shares/p_cost/p_pl 仍由 JS 引用，保留以避免报错 -->
-      <div style="display:none">
-        <input id="p_shares" type="number" value="0">
-        <input id="p_cost" type="number" value="0">
-        <div id="p_pl">—</div>
-      </div>
-      <!-- 操作事件 fold：与股票监控看板表单一致（事件类型/股数/单价/费用/日期/备注） -->
-      <details class="fold" open><summary>操作事件</summary><div class="fold-content">
-        <div class="research-intro">持仓状态（股数 / 成本价）由下方操作事件流水推算，上方汇总卡自动更新。股票监控看板录入的事件也会合并显示。</div>
-        <div class="trade-form" id="d_trade_form">
-          <div class="fld">事件类型
-            <select id="lot_side">
-              <option value="BUY">买入</option>
-              <option value="SELL">卖出</option>
-            </select>
-          </div>
-          <div class="fld">股数 <input id="lot_shares" type="number" min="0" step="1" placeholder="0"></div>
-          <div class="fld">单价 <input id="lot_price" type="number" min="0" step="0.01" placeholder="0.00"></div>
-          <div class="fld">费用 <input id="lot_fee" type="number" min="0" step="0.01" placeholder="0.00"></div>
-          <div class="fld">日期 <input id="lot_date" type="date"></div>
-          <div class="fld">备注 <input id="lot_tag" type="text" maxlength="100" placeholder="可选"></div>
-          <button class="btn primary" type="button" onclick="addLot()">记录事件</button>
-        </div>
-        <div class="trade-history" id="d_lots"><div class="detail-note soft compact">暂无操作事件。</div></div>
-      </div></details>
-      <!-- 个人历史校准详情卡已删除（参考股票看板，后端降级逻辑保留） -->
-      <div id="d_personal" style="display:none"></div>
-    </section>
+    </div>
   </div>
   </div>
   </div>
@@ -218,35 +167,6 @@
       <button id="browserGrantBtn" class="alert-inline-btn" type="button" onclick="enableNotify()">授权浏览器</button>
     </div>
     <p class="hint" style="margin-top:14px;line-height:1.6">浏览器提醒仅在本页保持打开时生效。<a href="/control#notification-settings">前往控制中心管理正式通知设置</a></p>
-  </div>
-</div>
-
-<!-- 跨标的对比面板（P1-9）：多选 ETF 叠加 premium 曲线 -->
-<div id="compareModal" class="modal">
-  <div class="modal-box compare-box">
-    <span class="closeX" onclick="closeCompareModal()">×</span>
-    <h2>跨标的对比</h2>
-    <p class="alert-center-lead">多选 ETF（最多 8 个）叠加显示溢价率曲线，便于横向比较折价/溢价机会。</p>
-    <div class="sec">
-      <div class="sec-t">选择标的 <span id="cmpCount" class="cmp-count">0</span> / 8</div>
-      <div id="cmpPicker" class="cmp-picker"></div>
-    </div>
-    <div class="sec row">
-      <div class="cmp-time-row">
-        <label class="cmp-time-lbl">时间窗口：</label>
-        <select id="cmpWindow">
-          <option value="60">最近 60 分钟</option>
-          <option value="120" selected>最近 120 分钟</option>
-          <option value="240">最近 240 分钟</option>
-          <option value="480">最近 8 小时</option>
-          <option value="1440">最近 24 小时</option>
-        </select>
-        <button class="btn" type="button" onclick="drawCompare()">绘制对比</button>
-        <button class="btn ghost" type="button" onclick="clearCompare()">清空选择</button>
-      </div>
-    </div>
-    <div id="cmpChart" class="cmp-chart"></div>
-    <div id="cmpHint" class="hint">选择标的后点击「绘制对比」</div>
   </div>
 </div>
 

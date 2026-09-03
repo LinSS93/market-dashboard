@@ -136,19 +136,19 @@ function parseNaverKR(raw, code) {
 const MARKET_PARSE = { HK: parseTencentHK, KR: parseTencentKR, US: parseTencentUS, CN: parseTencentCN };
 
 // 统一行情入口：带进程内缓存去重。
-async function fetchTencentQuote(market, code) {
+async function fetchTencentQuote(market, code, { attempts = 3, httpRetries = 1 } = {}) {
   const quoteCode = marketQuoteCode(market, code);
   if (!quoteCode) return null;
   const parser = MARKET_PARSE[market] || parseTencentHK;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
     try {
-      const raw = await httpGet("https://qt.gtimg.cn/q=" + quoteCode, {}, 1);
+      const raw = await httpGet("https://qt.gtimg.cn/q=" + quoteCode, {}, httpRetries);
       const parsed = parser(raw);
       if (parsed && parsed.price != null) {
         return {...parsed,source:market==='CN'?'Tencent CN Quote':'Tencent Delayed',isRealtime:market==='CN',providerLagMinutes:quoteLagMinutes(parsed.providerTime,market)};
       }
     } catch (e) { /* retry network and transient empty responses */ }
-    if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1)));
+    if (attempt < attempts - 1) await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1)));
   }
   return null;
 }
@@ -195,32 +195,38 @@ function parseSinaCN(raw, code) {
     source: 'Sina CN Real-time', isRealtime: true,
   };
 }
-async function fetchQuoteUncached(market, code) {
+async function fetchPrimaryQuote(market, code, httpRetries = 1) {
   // 新浪作为主源（4 个市场均支持），腾讯作为备份源
   if(market==='HK'){
     try{
-      const raw=await httpGet(`https://hq.sinajs.cn/list=rt_hk${code}`,{"Referer":"https://finance.sina.com.cn/"},1);
+      const raw=await httpGet(`https://hq.sinajs.cn/list=rt_hk${code}`,{"Referer":"https://finance.sina.com.cn/"},httpRetries);
       const quote=parseSinaHK(raw,code);if(quote)return quote;
     }catch{}
   }else if(market==='KR'){
     try{
-      const raw=await httpGet(`https://polling.finance.naver.com/api/realtime/domestic/stock/${code}`,{"Referer":"https://finance.naver.com/"},1);
+      const raw=await httpGet(`https://polling.finance.naver.com/api/realtime/domestic/stock/${code}`,{"Referer":"https://finance.naver.com/"},httpRetries);
       const quote=parseNaverKR(raw,code);if(quote)return quote;
     }catch{}
   }else if(market==='US'){
     try{
-      const raw=await httpGet(`https://hq.sinajs.cn/list=gb_${String(code).toLowerCase()}`,{"Referer":"https://finance.sina.com.cn/"},1);
+      const raw=await httpGet(`https://hq.sinajs.cn/list=gb_${String(code).toLowerCase()}`,{"Referer":"https://finance.sina.com.cn/"},httpRetries);
       const quote=parseSinaUS(raw,code);if(quote)return quote;
     }catch{}
   }else if(market==='CN'){
     try{
       const sinaCode=marketQuoteCode('CN',code); // 600519 -> sh600519
       if(sinaCode){
-        const raw=await httpGet(`https://hq.sinajs.cn/list=${sinaCode}`,{"Referer":"https://finance.sina.com.cn/"},1);
+        const raw=await httpGet(`https://hq.sinajs.cn/list=${sinaCode}`,{"Referer":"https://finance.sina.com.cn/"},httpRetries);
         const quote=parseSinaCN(raw,code);if(quote)return quote;
       }
     }catch{}
   }
+  return null;
+}
+
+async function fetchQuoteUncached(market, code) {
+  const primary = await fetchPrimaryQuote(market, code, 1);
+  if (primary) return primary;
   // 腾讯作为备份源（所有市场）
   return fetchTencentQuote(market,code);
 }
@@ -233,6 +239,19 @@ export async function fetchQuote(market, code) {
   const task=fetchQuoteUncached(market,code).then(quote=>{if(quote)_store(key,quote);return quote;}).finally(()=>_inflight.delete(key));
   _inflight.set(key,task);
   return task;
+}
+
+// 手动“重新检测行情源”只做一次新浪/Naver与一次腾讯请求，并行执行。
+// 它绕过 4 秒报价缓存，但不会扫描整个股票池，故障时最多等待单次 7 秒超时。
+export async function probeQuote(market, code) {
+  market=String(market||'HK').toUpperCase();code=String(code||'').toUpperCase();
+  const settled=await Promise.allSettled([
+    fetchPrimaryQuote(market,code,0),
+    fetchTencentQuote(market,code,{attempts:1,httpRetries:0}),
+  ]);
+  const quote=settled.map(item=>item.status==='fulfilled'?item.value:null).find(item=>item?.price!=null)||null;
+  if(quote)_store(market+':'+code,quote);
+  return quote;
 }
 
 // 外汇（新浪）。无 fxPair 时视为 1:1。

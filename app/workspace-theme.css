@@ -279,13 +279,6 @@
 .stock-workspace .sentiment-line b.disc { color:var(--ws-green); }
 .stock-workspace .sentiment-line b.prem { color:var(--ws-red); }
 .stock-workspace .sentiment-key { flex:0 0 27px; color:var(--ws-muted-soft); font-size:11px; font-weight:500; }
-/* 杠杆 ETF 看板期权列：与股票看板 sentiment 样式一致 */
-.tracker-workspace .sentiment-cell { padding:5px 6px; }
-.tracker-workspace .sentiment-line { display:flex; min-width:0; align-items:center; gap:4px; overflow:hidden; font-size:11.5px; line-height:16px; white-space:nowrap; }
-.tracker-workspace .sentiment-line b { min-width:0; overflow:hidden; color:var(--ws-ink-soft); font-size:11.5px; font-weight:600; text-overflow:ellipsis; white-space:nowrap; }
-.tracker-workspace .sentiment-line b.disc { color:var(--ws-green); }
-.tracker-workspace .sentiment-line b.prem { color:var(--ws-red); }
-.tracker-workspace .sentiment-key { flex:0 0 24px; color:var(--ws-muted-soft); font-size:10.5px; font-weight:500; }
 /* 杠杆 ETF 看板布局与列表装饰：与股票看板 stock-workspace 一致 */
 .tracker-workspace .wrap { width:calc(100vw - 24px); max-width:1920px; margin:12px auto; padding:0; }
 .tracker-workspace .main-layout { gap:var(--ws-space-3); align-items:stretch; }
@@ -300,14 +293,7 @@
 .tracker-workspace .list-card tbody tr:nth-child(even) { background:var(--ws-surface-alt); }
 .tracker-workspace .list-card tbody tr:hover { background:#f0f5ff; }
 .tracker-workspace .list-card tbody tr.sel { background:#e6efff; box-shadow:inset 4px 0 0 var(--ws-blue); }
-.tracker-workspace .detail-tab-panel { padding:14px 18px 18px; }
-.tracker-workspace .detail .stats { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; }
-.tracker-workspace .detail .stat { min-width:0; }
-.tracker-workspace .detail .stat .v { font-size:20px; }
-.tracker-workspace .charts { display:grid; grid-template-columns:minmax(0,1fr); gap:10px; align-items:start; }
 .tracker-workspace .chart { min-width:0; }
-.tracker-workspace #chPrice { height:280px; }
-.tracker-workspace #chPrem { height:440px; }
 .tracker-workspace .drag-handle:active { cursor:grabbing; }
 .tracker-workspace.reordering { user-select:none; cursor:grabbing; }
 .tracker-workspace tr.dragging { opacity:.42; }
@@ -468,12 +454,7 @@
 }
 
 /* 2x ETF workspace: same decision-first language, ETF-specific hierarchy. */
-.tracker-workspace .wrap { width:calc(100vw - 24px); max-width:1920px; margin:12px auto; padding:0; }
 .tracker-workspace .toolbar { min-height:50px; }
-.tracker-workspace .tracker-context { color:var(--ws-muted); font-size:12px; font-weight:600; }
-.tracker-workspace .pair-name,.tracker-workspace .pair-under { display:block; overflow:hidden; color:var(--ws-muted-soft); font-size:11.5px; text-overflow:ellipsis; white-space:nowrap; }
-.tracker-workspace .pair-name { margin-top:3px; }
-.tracker-workspace .pair-under { margin-top:2px; color:var(--ws-muted-soft); }
 .tracker-workspace .mkt-badge { margin-left:5px; padding:1px 4px; border-radius:3px; background:var(--ws-canvas); color:var(--ws-muted-soft); font-size:9px; }
 /* 列表行：ETF 名称优先（粗体大字），代码弱化（小字灰色），参照股票看板 stock-name/stock-code */
 .tracker-workspace .etf-name { display:block; overflow:hidden; color:var(--ws-ink-soft); font-size:13.5px; font-weight:750; text-overflow:ellipsis; white-space:nowrap; text-align:left; }

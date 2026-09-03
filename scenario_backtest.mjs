@@ -3,7 +3,9 @@
 // invoke reliability calibration, write signal logs, or change formal actions.
 
 import { buildBacktestSeries } from './stock_backtest.mjs';
-import { buildSwingDecision, getWatchlist, SIGNAL_ENGINE_VERSION } from './stock_engine.mjs';
+import { buildSwingDecisionContext, getWatchlist, SIGNAL_ENGINE_VERSION } from './stock_engine.mjs';
+import { computeCompositeScore } from './signal_scoring.mjs';
+import { arbitrateStockDecision } from './stock_decision_arbiter.mjs';
 import {
   SCENARIO_OUTCOME_CONTRACT_VERSION,
   evaluateScenarioPath,
@@ -39,15 +41,15 @@ function replaySplitOptions(options = {}) {
 function decisionSnapshot(decision) {
   return {
     version: decision?.version || null,
-    state: decision?.state || null,
+    opportunityStage: decision?.opportunityStage || null,
+    executionAction: decision?.executionAction || null,
     label: decision?.label || null,
-    sourceAction: decision?.sourceAction || null,
     validSessions: decision?.validSessions ?? null,
     zones: {
       confirmation: decision?.zones?.confirmation ?? null,
       invalidation: decision?.zones?.invalidation ?? null,
-      target1: decision?.zones?.target1 ?? null,
-      target2: decision?.zones?.target2 ?? null,
+      reassessment: decision?.zones?.reassessment ?? null,
+      secondaryReassessment: decision?.zones?.secondaryReassessment ?? null,
     },
   };
 }
@@ -100,7 +102,9 @@ export function buildScenarioReplaySymbol(symbol, market, days = 320, options = 
       }
       // A historical position ledger is intentionally not synthesized. The
       // replay evaluates price conditions, not position-dependent P&L.
-      const decision = buildSwingDecision(baseEvent._analysis, null, null);
+      const context = buildSwingDecisionContext(baseEvent._analysis, null, null);
+      const scoreResult = computeCompositeScore({ analysis: baseEvent._analysis, reliability: null, executionRisk: null });
+      const decision = { ...context, ...arbitrateStockDecision({ analysis: baseEvent._analysis, context, scoreResult }) };
       const outcome = evaluateScenarioPath({
         bars: base.rows,
         signalIndex: baseEvent.barIndex,

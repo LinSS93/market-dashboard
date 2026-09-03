@@ -87,11 +87,14 @@ function renderNotifyTemplate(tpl, vars) {
 // ETF 用原始溢价信号；股票用看板“信号”列的执行动作。
 const DEFAULT_ALERT_SETTINGS = {
   etfTiers: ['PROBE', 'ADD', 'TRIM', 'EXIT'], // 杠杆 ETF：与股票看板共用正式动作档位
-  stockTiers: ['PROBE', 'ADD', 'TRIM', 'EXIT', 'AVOID'], // 股票：提醒需要采取行动的波段状态（含回避）
+  stockTiers: ['OPEN', 'ADD', 'REDUCE', 'CLOSE'],
   feishu: true,                              // Webhook 推送总开关（字段名为兼容旧配置保留）
 };
 function normalizeStockTiers(tiers) {
-  return Array.isArray(tiers) ? DashboardActions.normalizeTiers(tiers) : DEFAULT_ALERT_SETTINGS.stockTiers;
+  if (!Array.isArray(tiers)) return DEFAULT_ALERT_SETTINGS.stockTiers.slice();
+  const legacy = { PROBE:'OPEN', TRIM:'REDUCE', EXIT:'CLOSE' };
+  const allowed = new Set(DEFAULT_ALERT_SETTINGS.stockTiers);
+  return [...new Set(tiers.map(value => legacy[String(value || '').toUpperCase()] || String(value || '').toUpperCase()).filter(value => allowed.has(value)))];
 }
 function loadAlertSettings() {
   try {
@@ -285,41 +288,25 @@ function maybeAlert(type, key, symbol, rawSignal, detail, allowNotify = true, me
 }
 
 function stockAlertAction(a, position = null) {
-  const hasPosition=Number(position?.shares)>0;
-  const adapt=action=>action?DashboardActions.normalize(action,{hasPosition}):null;
-  // C7 收敛：把"action + label"打包为单次调用，避免每分支重复 DashboardActions.label(action)。
-  //   label 只在 action 非空时计算，与原行为一致。
-  const withLabel = rawAction => {
-    const action = adapt(rawAction);
-    return { action, label: action ? DashboardActions.label(action) : null };
-  };
+  const labels = { OPEN:'可试仓', ADD:'可加仓', HOLD:'持有观察', REDUCE:'减仓', CLOSE:'清仓', NONE:'不交易' };
   const swing = a && a.swingDecision ? a.swingDecision : null;
   if (swing?.signalAvailable === false && !swing.exitPending) {
     return { action:null, label:'数据不足', notifyEligible:false, detail:swing.summary || '关键数据不可用，已停止正式动作与提醒。' };
   }
   if (swing) {
     const z = swing.zones || {};
-    // ATR 体系核心三价位（entry/stop/target），与决策卡执行价位对齐
-    const levels = [z.confirmation != null ? `买入：${z.confirmation}` : '', z.invalidation != null ? `止损：${z.invalidation}` : '', z.target1 != null ? `目标：${z.target1}` : ''].filter(Boolean).join('；');
-    const { action, label } = withLabel(swing.state);
+    // 形态锚定计划的三个复核价位，与决策卡使用同一事实源。
+    const levels = [z.confirmation != null ? `确认：${z.confirmation}` : '', z.invalidation != null ? `失效：${z.invalidation}` : '', z.reassessment != null ? `复核：${z.reassessment}` : ''].filter(Boolean).join('；');
+    const action = String(swing.executionAction || 'NONE').toUpperCase();
+    const label = swing.label || labels[action] || action;
     return {
-      action, label,
+      action:action === 'NONE' || action === 'HOLD' ? null : action, label,
       notifyEligible: swing.exitPending ? !!swing.notifyEligible : !!swing.actionable,
       detail: [swing.summary, swing.tranchePct ? `建议比例：${swing.tranchePct}% ${swing.trancheBasis || ''}` : '', levels,
         swing.recommendedShares ? `建议股数：${swing.recommendedShares}` : '', swing.validUntil ? `有效至：${swing.validUntil}` : ''].filter(Boolean).join('；')
     };
   }
-  const plan = a && a.tradePlan ? a.tradePlan : null;
-  const rel = a && a.reliability ? a.reliability : null;
-  if (rel && rel.effectiveAction) {
-    const { action, label } = withLabel(rel.effectiveAction);
-    return { action, label, detail: rel.summary || (rel.verdict && rel.verdict.label) || '' };
-  }
-  if (plan && plan.action) {
-    const { action, label } = withLabel(plan.action);
-    return { action, label, detail: plan.summary || '' };
-  }
-  return { ...withLabel(a && a.signal), detail: '' };
+  return { action:null, label:null, notifyEligible:false, detail:'正式阶段/动作尚未生成。' };
 }
 
 function checkStockAlerts() {
@@ -335,11 +322,11 @@ function checkStockAlerts() {
       if (!eff.action) continue;
       const marketOpen = getMarketStateFor((w.market || 'US').toUpperCase()).state === 'open';
       const marketState = marketOpen ? 'open' : 'closed';
-      const riskAction = eff.action === 'TRIM' || eff.action === 'EXIT';
+      const riskAction = eff.action === 'REDUCE' || eff.action === 'CLOSE';
       const allowNotify = !!eff.notifyEligible && (marketOpen || riskAction);
       const conf = [eff.label ? `动作：${eff.label}` : '', eff.detail || '', (!marketOpen && riskAction) ? '市场休市：作为下一交易时段风险计划' : '', (a.confidence != null) ? `置信度：${a.confidence}%` : ''].filter(Boolean).join('；');
       recordStockSignalAudit({symbol:w.symbol,market:w.market||'US',price:a.currentPrice,
-        raw_action:a.reliability?.effectiveAction||a.tradePlan?.action||a.signal,final_action:eff.action,action_label:eff.label,
+        raw_action:a.tradePlan?.action||a.signal,final_action:eff.action,action_label:eff.label,
         confidence:a.swingDecision?.reliabilityScore??a.reliability?.reliabilityScore??a.confidence,
         actionable:!!eff.notifyEligible,reason:eff.detail,signal_date:a.asOfDate,ts:Date.now()},marketState);
       maybeAlert('stock', 'stock:' + w.symbol,

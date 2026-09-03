@@ -7,7 +7,7 @@ function analysis(overrides = {}) {
   return {
     symbol: 'MR_TEST', market: 'US', daily: true, asOfDate: '2026-08-20',
     rsi6: 16, rsi12: 30, bollPctB: 0.02, bollLower: 98,
-    dataQuality: { level: 'ok' }, swingDecision: { state: 'WATCH' },
+    dataQuality: { level: 'ok' }, swingDecision: { opportunityStage:'FORMING', executionAction:'NONE' },
     liveQuote: { price: 99, isRealtime: true, stale: false, source: 'sina', providerTime: '2026-08-20T14:00:00-04:00' },
     ...overrides,
   };
@@ -20,7 +20,7 @@ assert.equal(candidate.formalActionEligible, false);
 assert.equal(candidate.researchPositionCapPct, 15);
 assert.equal(evaluateMeanReversionObservation({ analysis: analysis({ bollPctB: 0.20 }), marketOpen: true, marketDate: '2026-08-20' }).status, 'inactive');
 assert.equal(evaluateMeanReversionObservation({ analysis: analysis({ rsi12: 40 }), marketOpen: true, marketDate: '2026-08-20' }).status, 'inactive');
-assert.equal(evaluateMeanReversionObservation({ analysis: analysis({ swingDecision: { state: 'AVOID' } }), marketOpen: true, marketDate: '2026-08-20' }).status, 'blocked');
+assert.equal(evaluateMeanReversionObservation({ analysis: analysis({ swingDecision: { opportunityStage:'RISK_OFF', executionAction:'NONE' } }), marketOpen: true, marketDate: '2026-08-20' }).status, 'blocked');
 assert.equal(evaluateMeanReversionObservation({ analysis: analysis(), marketOpen: false, marketDate: '2026-08-20' }).status, 'unavailable');
 const confirmed = evaluateMeanReversionObservation({
   analysis: analysis({ rsi6: 26, liveQuote: { price: 100, isRealtime: true, stale: false } }),

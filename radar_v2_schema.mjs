@@ -184,6 +184,17 @@ function normalizeLegacyEventTypes(db) {
   })();
 }
 
+// 审计修正（P1）：迁移错误可见化。
+// 旧实现 46 处 `catch {}` 静默吞掉全部迁移错误——幂等冲突（重复列）与真实故障
+// （语法错误、磁盘满、schema 漂移）一律无声。现在仅 "duplicate column name"
+// （ADD COLUMN 的预期幂等路径，SQLite 不支持 IF NOT EXISTS）保持静默，
+// 其余错误 console.error 记录，不再吞掉。
+function reportMigrationError(e) {
+  const msg = String(e?.message || e);
+  if (/duplicate column name/i.test(msg)) return;
+  console.error('[radar_v2_schema] 迁移执行失败（原先被静默吞掉）:', msg);
+}
+
 function execSchema(db) {
   db.exec(`
     -- === 股票宇宙（V2 自包含声明） ===
@@ -703,7 +714,7 @@ function execSchema(db) {
   try {
     db.exec(`ALTER TABLE radar_v2_dossier_observations ADD COLUMN linked_at INTEGER NOT NULL DEFAULT 0`);
     db.exec(`UPDATE radar_v2_dossier_observations SET linked_at = observed_at WHERE linked_at = 0`);
-  } catch {}
+  } catch (e) { reportMigrationError(e); }
   // F.2-4 migration: 回填旧 observation 的 observed_at = candidate.created_at。
   // F.1-1 只把旧 observed_at 复制到 linked_at，但没有修正 observed_at 的语义。
   // 旧行的特征：linked_at = observed_at（F.1-1 复制产生）；新行 linked_at = Date.now() > observed_at = candidate.created_at。
@@ -717,45 +728,45 @@ function execSchema(db) {
       WHERE linked_at = observed_at
         AND candidate_id IN (SELECT id FROM radar_v2_candidates)
     `);
-  } catch {}
+  } catch (e) { reportMigrationError(e); }
   // P0-2 migration: 为已存在的 radar_v2_runs 表补充统计列（旧库无这些列）。
   // SQLite 的 ADD COLUMN 不支持 IF NOT EXISTS，用 try/catch 忽略"duplicate column"错误。
   for (const col of ['attempted_count', 'succeeded_count', 'skipped_count', 'failed_count']) {
-    try { db.exec(`ALTER TABLE radar_v2_runs ADD COLUMN ${col} INTEGER NOT NULL DEFAULT 0`); } catch {}
+    try { db.exec(`ALTER TABLE radar_v2_runs ADD COLUMN ${col} INTEGER NOT NULL DEFAULT 0`); } catch (e) { reportMigrationError(e); }
   }
   // F.4 migration: 为已存在的 radar_v2_runs 表补充 dossier_link_status 列。
   // 旧库无此列；默认 'pending'，使历史 complete run 在下次 reconcile 时被处理（幂等）。
   // F.5-1: 索引必须在列添加后创建（否则旧库会报 no such column 中止整个初始化）。
   // F.5-3: 补充 link_attempts / last_attempt_at 列用于有界退避重试。
-  try { db.exec(`ALTER TABLE radar_v2_runs ADD COLUMN dossier_link_status TEXT NOT NULL DEFAULT 'pending'`); } catch {}
-  try { db.exec(`ALTER TABLE radar_v2_runs ADD COLUMN link_attempts INTEGER NOT NULL DEFAULT 0`); } catch {}
-  try { db.exec(`ALTER TABLE radar_v2_runs ADD COLUMN last_attempt_at INTEGER`); } catch {}
+  try { db.exec(`ALTER TABLE radar_v2_runs ADD COLUMN dossier_link_status TEXT NOT NULL DEFAULT 'pending'`); } catch (e) { reportMigrationError(e); }
+  try { db.exec(`ALTER TABLE radar_v2_runs ADD COLUMN link_attempts INTEGER NOT NULL DEFAULT 0`); } catch (e) { reportMigrationError(e); }
+  try { db.exec(`ALTER TABLE radar_v2_runs ADD COLUMN last_attempt_at INTEGER`); } catch (e) { reportMigrationError(e); }
   // 索引在列添加后创建（F.5-1 修复）
-  try { db.exec(`CREATE INDEX IF NOT EXISTS idx_v2_runs_link_pending ON radar_v2_runs(status, dossier_link_status) WHERE dossier_link_status = 'pending'`); } catch {}
+  try { db.exec(`CREATE INDEX IF NOT EXISTS idx_v2_runs_link_pending ON radar_v2_runs(status, dossier_link_status) WHERE dossier_link_status = 'pending'`); } catch (e) { reportMigrationError(e); }
   // Candidate 评分溯源：列必须先于依赖索引迁移，旧库初始化不可因 no such column 中断。
-  try { db.exec(`ALTER TABLE radar_v2_candidates ADD COLUMN scoring_version TEXT`); } catch {}
-  try { db.exec(`ALTER TABLE radar_v2_candidates ADD COLUMN scoring_profile_name TEXT`); } catch {}
-  try { db.exec(`ALTER TABLE radar_v2_candidates ADD COLUMN scoring_weights_json TEXT`); } catch {}
+  try { db.exec(`ALTER TABLE radar_v2_candidates ADD COLUMN scoring_version TEXT`); } catch (e) { reportMigrationError(e); }
+  try { db.exec(`ALTER TABLE radar_v2_candidates ADD COLUMN scoring_profile_name TEXT`); } catch (e) { reportMigrationError(e); }
+  try { db.exec(`ALTER TABLE radar_v2_candidates ADD COLUMN scoring_weights_json TEXT`); } catch (e) { reportMigrationError(e); }
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_v2_candidates_provenance
-    ON radar_v2_candidates(scoring_version, scoring_profile_name)`); } catch {}
+    ON radar_v2_candidates(scoring_version, scoring_profile_name)`); } catch (e) { reportMigrationError(e); }
   // trend_states migration: 补充 overheat_exit_streak / recovery_streak / below_breakout_streak 列。
   // 这些 streak 字段在状态机中被使用但早期 CREATE TABLE 遗漏，旧库需 ALTER 补齐，
   // 否则 producer 持久化后次日重载会丢失计数（破坏 OVERHEAT 降温、FAILURE 恢复、假突破的连续日判定）。
-  try { db.exec(`ALTER TABLE radar_v2_trend_states ADD COLUMN overheat_exit_streak INTEGER NOT NULL DEFAULT 0`); } catch {}
-  try { db.exec(`ALTER TABLE radar_v2_trend_states ADD COLUMN recovery_streak INTEGER NOT NULL DEFAULT 0`); } catch {}
-  try { db.exec(`ALTER TABLE radar_v2_trend_states ADD COLUMN below_breakout_streak INTEGER NOT NULL DEFAULT 0`); } catch {}
+  try { db.exec(`ALTER TABLE radar_v2_trend_states ADD COLUMN overheat_exit_streak INTEGER NOT NULL DEFAULT 0`); } catch (e) { reportMigrationError(e); }
+  try { db.exec(`ALTER TABLE radar_v2_trend_states ADD COLUMN recovery_streak INTEGER NOT NULL DEFAULT 0`); } catch (e) { reportMigrationError(e); }
+  try { db.exec(`ALTER TABLE radar_v2_trend_states ADD COLUMN below_breakout_streak INTEGER NOT NULL DEFAULT 0`); } catch (e) { reportMigrationError(e); }
 
   // 步骤 5.2 migration: 旧版 trend_jobs 表缺少 cursor_offset 列（P1: 续跑游标推进）
-  try { db.exec(`ALTER TABLE radar_v2_trend_jobs ADD COLUMN cursor_offset INTEGER NOT NULL DEFAULT 0`); } catch {}
+  try { db.exec(`ALTER TABLE radar_v2_trend_jobs ADD COLUMN cursor_offset INTEGER NOT NULL DEFAULT 0`); } catch (e) { reportMigrationError(e); }
 
   // 步骤 6 migration: 旧版 trend_jobs 表缺少 last_attempt_at 列（P1: 公平调度）
-  try { db.exec(`ALTER TABLE radar_v2_trend_jobs ADD COLUMN last_attempt_at INTEGER`); } catch {}
+  try { db.exec(`ALTER TABLE radar_v2_trend_jobs ADD COLUMN last_attempt_at INTEGER`); } catch (e) { reportMigrationError(e); }
 
   // dossier_outcomes migration: 补充 absolute_matured 列（P1-2: 拆分可比较成熟与绝对成熟）
-  try { db.exec(`ALTER TABLE radar_v2_dossier_outcomes ADD COLUMN absolute_matured INTEGER NOT NULL DEFAULT 0`); } catch {}
+  try { db.exec(`ALTER TABLE radar_v2_dossier_outcomes ADD COLUMN absolute_matured INTEGER NOT NULL DEFAULT 0`); } catch (e) { reportMigrationError(e); }
   // P1-2 回填：旧 outcome 的 matured 是个股收益口径（旧逻辑），等价于 absolute_matured。
   // 把 matured > 0 AND absolute_matured = 0 的行回填，避免 matured=3 的旧行永远不进更新队列导致 absolute_matured=0。
-  try { db.exec(`UPDATE radar_v2_dossier_outcomes SET absolute_matured = matured WHERE absolute_matured = 0 AND matured > 0`); } catch {}
+  try { db.exec(`UPDATE radar_v2_dossier_outcomes SET absolute_matured = matured WHERE absolute_matured = 0 AND matured > 0`); } catch (e) { reportMigrationError(e); }
   // P1-2 口径修正：旧 matured 基于个股收益，但新口径要求基准严格匹配才推进。
   // 直接按 excess_return_* 连续重算 matured，覆盖所有"基准终点缺失"场景：
   //   - benchmark_entry IS NULL → excess_return_5d 必然 NULL → matured=0
@@ -768,24 +779,24 @@ function execSchema(db) {
     WHEN excess_return_20d IS NULL THEN 1
     WHEN excess_return_60d IS NULL THEN 2
     ELSE 3
-  END`); } catch {}
+  END`); } catch (e) { reportMigrationError(e); }
 
   // 第二期 migration: 为 radar_v2_dossiers 补充规则化字段（旧库 ALTER TABLE）。
   // 新库在 CREATE TABLE 中已含这些列；旧库通过 ALTER 增量补齐，用 try/catch 忽略 duplicate column。
   // thesis_json / confirmation_json / invalidation_json / priority_components_json / next_review_at 允许 NULL；
   // priority_level NOT NULL DEFAULT 'medium'（旧 dossier 视为中等优先级）。
-  try { db.exec(`ALTER TABLE radar_v2_dossiers ADD COLUMN thesis_json TEXT`); } catch {}
-  try { db.exec(`ALTER TABLE radar_v2_dossiers ADD COLUMN confirmation_json TEXT`); } catch {}
-  try { db.exec(`ALTER TABLE radar_v2_dossiers ADD COLUMN invalidation_json TEXT`); } catch {}
-  try { db.exec(`ALTER TABLE radar_v2_dossiers ADD COLUMN priority_level TEXT NOT NULL DEFAULT 'medium'`); } catch {}
-  try { db.exec(`ALTER TABLE radar_v2_dossiers ADD COLUMN priority_components_json TEXT`); } catch {}
-  try { db.exec(`ALTER TABLE radar_v2_dossiers ADD COLUMN next_review_at INTEGER`); } catch {}
-  try { db.exec(`ALTER TABLE radar_v2_dossiers ADD COLUMN last_evaluated_at INTEGER`); } catch {}
+  try { db.exec(`ALTER TABLE radar_v2_dossiers ADD COLUMN thesis_json TEXT`); } catch (e) { reportMigrationError(e); }
+  try { db.exec(`ALTER TABLE radar_v2_dossiers ADD COLUMN confirmation_json TEXT`); } catch (e) { reportMigrationError(e); }
+  try { db.exec(`ALTER TABLE radar_v2_dossiers ADD COLUMN invalidation_json TEXT`); } catch (e) { reportMigrationError(e); }
+  try { db.exec(`ALTER TABLE radar_v2_dossiers ADD COLUMN priority_level TEXT NOT NULL DEFAULT 'medium'`); } catch (e) { reportMigrationError(e); }
+  try { db.exec(`ALTER TABLE radar_v2_dossiers ADD COLUMN priority_components_json TEXT`); } catch (e) { reportMigrationError(e); }
+  try { db.exec(`ALTER TABLE radar_v2_dossiers ADD COLUMN next_review_at INTEGER`); } catch (e) { reportMigrationError(e); }
+  try { db.exec(`ALTER TABLE radar_v2_dossiers ADD COLUMN last_evaluated_at INTEGER`); } catch (e) { reportMigrationError(e); }
   // 第三期 P0/P1：验证规则版本化 + 评估截止窗口（Codex review 修复）
   // verification_version：标记 dossier 使用的验证规则版本，便于 A/B 比较不同规则的效果
   // evaluation_window_days：评估器最多扫描入场后 N 个交易日，防止远期 K 线回溯定性
-  try { db.exec(`ALTER TABLE radar_v2_dossiers ADD COLUMN verification_version TEXT`); } catch {}
-  try { db.exec(`ALTER TABLE radar_v2_dossiers ADD COLUMN evaluation_window_days INTEGER`); } catch {}
+  try { db.exec(`ALTER TABLE radar_v2_dossiers ADD COLUMN verification_version TEXT`); } catch (e) { reportMigrationError(e); }
+  try { db.exec(`ALTER TABLE radar_v2_dossiers ADD COLUMN evaluation_window_days INTEGER`); } catch (e) { reportMigrationError(e); }
   // 旧 dossier 从未经过版本化。保留原规则 JSON 与状态，仅诚实标明其为不可与当前模型混合的历史规则。
   // 两侧均为非空合法条件数组才可称为 unbounded；其余保守标记 unknown。
   try { db.exec(`UPDATE radar_v2_dossiers
@@ -806,17 +817,17 @@ function execSchema(db) {
       WHEN channel = 'trend' THEN 'trend_v1_legacy_unknown'
       ELSE verification_version
     END
-    WHERE verification_version IS NULL AND channel IN ('event', 'trend')`); } catch {}
+    WHERE verification_version IS NULL AND channel IN ('event', 'trend')`); } catch (e) { reportMigrationError(e); }
   // 索引在列添加后创建（与 F.5-1 同模式，避免旧库报 no such column 中止初始化）
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_v2_dossiers_review_due
-    ON radar_v2_dossiers(next_review_at) WHERE status = 'active' AND next_review_at IS NOT NULL`); } catch {}
+    ON radar_v2_dossiers(next_review_at) WHERE status = 'active' AND next_review_at IS NOT NULL`); } catch (e) { reportMigrationError(e); }
   // 条件评估公平排序索引：未评估（last_evaluated_at IS NULL）优先，再按评估时间 ASC
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_v2_dossiers_eval_fair
     ON radar_v2_dossiers(last_evaluated_at IS NULL DESC, last_evaluated_at ASC, created_at ASC)
-    WHERE status = 'active' AND confirmation_json IS NOT NULL AND invalidation_json IS NOT NULL`); } catch {}
+    WHERE status = 'active' AND confirmation_json IS NOT NULL AND invalidation_json IS NOT NULL`); } catch (e) { reportMigrationError(e); }
   // 性能索引：按 (market, symbol, available_at DESC) 快速取每股票最新 dossier（列表聚合用）
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_v2_dossiers_market_symbol_available
-    ON radar_v2_dossiers(market, symbol, available_at DESC, created_at DESC)`); } catch {}
+    ON radar_v2_dossiers(market, symbol, available_at DESC, created_at DESC)`); } catch (e) { reportMigrationError(e); }
   // 审计表（旧库补建）
   try { db.exec(`CREATE TABLE IF NOT EXISTS radar_v2_dossier_evaluations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -830,9 +841,9 @@ function execSchema(db) {
       trigger_date TEXT,
       details_json TEXT NOT NULL,
       FOREIGN KEY (dossier_id) REFERENCES radar_v2_dossiers(id) ON DELETE CASCADE
-    )`); } catch {}
+    )`); } catch (e) { reportMigrationError(e); }
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_v2_evaluations_dossier
-    ON radar_v2_dossier_evaluations(dossier_id, evaluated_at DESC)`); } catch {}
+    ON radar_v2_dossier_evaluations(dossier_id, evaluated_at DESC)`); } catch (e) { reportMigrationError(e); }
 
   // 阶段 3 migration: scoring_profiles 表（反馈调权）。
   // 存储权重配置 + 应用审计元数据。默认 profile_name='default'，is_active=1。
@@ -843,7 +854,7 @@ function execSchema(db) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       profile_name TEXT NOT NULL,
       market TEXT NOT NULL,
-      weights_json TEXT NOT NULL,           -- {"technical":0.50,"liquidity":0.25,"reliability":0.25}
+      weights_json TEXT NOT NULL,           -- {"technical":0.60,"liquidity":0.40}
       is_active INTEGER NOT NULL DEFAULT 0, -- 1=当前生效，0=shadow/历史
       is_shadow INTEGER NOT NULL DEFAULT 0, -- 1=反馈环生成的 shadow 建议
       previous_weights_json TEXT,           -- apply 时备份原权重，用于 rollback
@@ -855,29 +866,30 @@ function execSchema(db) {
       applied_at INTEGER,                   -- apply 时间戳
       created_at INTEGER NOT NULL,
       UNIQUE(profile_name, market)
-    )`); } catch {}
+    )`); } catch (e) { reportMigrationError(e); }
   // 初始化默认 profile（幂等）：权重与 radar_v2_scoring.mjs DEFAULT_WEIGHTS 一致
-  // 3 因子：technical 0.50 / liquidity 0.25 / reliability 0.25
-  // 事件面和基本面由 signal_bonus（dossier 通道）负责，不进入 base_score
+  // 审计修正 2026.09.02：2 因子 technical 0.60 / liquidity 0.40。
+  // 可靠度不再是评分维度（改硬门槛），事件面和基本面由 signal_bonus 负责。
   try { db.exec(`
     INSERT OR IGNORE INTO radar_v2_scoring_profiles
       (profile_name, market, weights_json, is_active, is_shadow, created_at)
     VALUES
-      ('default', 'US', '{"technical":0.50,"liquidity":0.25,"reliability":0.25}', 1, 0, 0),
-      ('default', 'HK', '{"technical":0.50,"liquidity":0.25,"reliability":0.25}', 1, 0, 0),
-      ('default', 'CN', '{"technical":0.50,"liquidity":0.25,"reliability":0.25}', 1, 0, 0)
-  `); } catch {}
-  // 迁移：将旧的 5 维度（含 event/fundamental）default profile 升级为 3 维度
-  // INSERT OR IGNORE 不会覆盖已存在的行，需显式 UPDATE
+      ('default', 'US', '{"technical":0.60,"liquidity":0.40}', 1, 0, 0),
+      ('default', 'HK', '{"technical":0.60,"liquidity":0.40}', 1, 0, 0),
+      ('default', 'CN', '{"technical":0.60,"liquidity":0.40}', 1, 0, 0)
+  `); } catch (e) { reportMigrationError(e); }
+  // 迁移：将旧的 3 维度（reliability 评分权重）与更早的 5 维度 default profile
+  // 升级为 2 维度。INSERT OR IGNORE 不会覆盖已存在的行，需显式 UPDATE。
   try { db.exec(`
     UPDATE radar_v2_scoring_profiles
-    SET weights_json = '{"technical":0.50,"liquidity":0.25,"reliability":0.25}'
+    SET weights_json = '{"technical":0.60,"liquidity":0.40}'
     WHERE profile_name = 'default'
       AND weights_json IN (
         '{"technical":0.35,"event":0.20,"liquidity":0.15,"reliability":0.15,"fundamental":0.15}',
-        '{"technical":0.40,"event":0.25,"liquidity":0.15,"reliability":0.20}'
+        '{"technical":0.40,"event":0.25,"liquidity":0.15,"reliability":0.20}',
+        '{"technical":0.50,"liquidity":0.25,"reliability":0.25}'
       )
-  `); } catch {}
+  `); } catch (e) { reportMigrationError(e); }
 
   // 旧事件分类已被当前 triage 规则体系替代。新 event_facts 由 radar_v2_event_facts_producer.mjs 从 news_articles
   // 重新生成，event_type 统一为小写下划线（earnings_announcement/profit_alert/major_transaction 等）。
@@ -885,11 +897,11 @@ function execSchema(db) {
   // US 新浪快讯 ticker 标签来自中文词匹配，不能被视为证券级实体证据。
   // 历史误关联必须撤回但不能 DELETE：保留事实、档案及其结果账本，写入独立审计表，
   // 并把 dossier 归档，使候选池、评估器和反馈层均不再消费它。
-  try { db.exec(`ALTER TABLE radar_v2_event_facts ADD COLUMN link_status TEXT NOT NULL DEFAULT 'accepted'`); } catch {}
-  try { db.exec(`ALTER TABLE radar_v2_event_facts ADD COLUMN rejection_reason TEXT`); } catch {}
-  try { db.exec(`ALTER TABLE radar_v2_event_facts ADD COLUMN rejected_at INTEGER`); } catch {}
+  try { db.exec(`ALTER TABLE radar_v2_event_facts ADD COLUMN link_status TEXT NOT NULL DEFAULT 'accepted'`); } catch (e) { reportMigrationError(e); }
+  try { db.exec(`ALTER TABLE radar_v2_event_facts ADD COLUMN rejection_reason TEXT`); } catch (e) { reportMigrationError(e); }
+  try { db.exec(`ALTER TABLE radar_v2_event_facts ADD COLUMN rejected_at INTEGER`); } catch (e) { reportMigrationError(e); }
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_radar_v2_event_facts_link_status
-    ON radar_v2_event_facts(market, source, link_status, published_at DESC)`); } catch {}
+    ON radar_v2_event_facts(market, source, link_status, published_at DESC)`); } catch (e) { reportMigrationError(e); }
   try {
     const retractedAt = Date.now();
     const reason = 'untrusted_us_sina_ticker_link';
@@ -930,7 +942,7 @@ function execSchema(db) {
           AND status != 'archived'
       `).run(retractedAt);
     })();
-  } catch {}
+  } catch (e) { reportMigrationError(e); }
 
   // 旧大写 taxonomy 必须在运行库内实际迁移，不能依赖一个可能尚未执行过的
   // 手动清理脚本。该迁移保留原始事实与 dossier/outcome，只规范已知类型，或将
@@ -949,9 +961,9 @@ function execSchema(db) {
       note TEXT,
       created_at INTEGER NOT NULL,
       UNIQUE(market, symbol, feedback_type)
-    )`); } catch {}
+    )`); } catch (e) { reportMigrationError(e); }
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_v2_user_feedback_lookup
-    ON radar_v2_user_feedback(market, symbol, feedback_type)`); } catch {}
+    ON radar_v2_user_feedback(market, symbol, feedback_type)`); } catch (e) { reportMigrationError(e); }
 
   // P0-5: 证券分类审计表。
   // 名称正则不可靠（线上漏过 ONEQ/ROBT/SPBC/TSPY/XSPI/BBB 等），需要可审计的分类字段。
@@ -977,9 +989,97 @@ function execSchema(db) {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       UNIQUE(market, symbol)
-    )`); } catch {}
+    )`); } catch (e) { reportMigrationError(e); }
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_v2_asset_audit_category
-    ON radar_v2_asset_audit(asset_category)`); } catch {}
+    ON radar_v2_asset_audit(asset_category)`); } catch (e) { reportMigrationError(e); }
+
+  // 审计修正（性能）：候选池"当前信号状态"物化表。
+  // 每行 = 某 (market, symbol, channel) 的最新一条非 archived dossier。
+  // 由 radar_v2_dossiers 上的 INSERT/UPDATE/DELETE 触发器增量维护（所有 producer
+  // 与迁移路径自动覆盖，无需逐个改造写入口），候选池查询不再每次用窗口函数
+  // 重算全量 dossier（Q07 实测 /radar_v2/queue 4.3s 的主要重算成本）。
+  // 启动时全量重建一次：幂等且可自愈（即使历史库触发器缺失/旧数据也能对齐）。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS radar_v2_channel_latest (
+      market TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      dossier_id INTEGER NOT NULL REFERENCES radar_v2_dossiers(id) ON DELETE CASCADE,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (market, symbol, channel)
+    );
+    CREATE INDEX IF NOT EXISTS idx_v2_channel_latest_dossier
+      ON radar_v2_channel_latest(dossier_id);
+
+    CREATE TRIGGER IF NOT EXISTS trg_v2_dossiers_channel_latest_ins
+    AFTER INSERT ON radar_v2_dossiers
+    BEGIN
+      DELETE FROM radar_v2_channel_latest
+      WHERE market = NEW.market AND symbol = NEW.symbol AND channel = NEW.channel;
+      INSERT INTO radar_v2_channel_latest (market, symbol, channel, dossier_id, updated_at)
+      SELECT market, symbol, channel, id, updated_at
+      FROM radar_v2_dossiers
+      WHERE market = NEW.market AND symbol = NEW.symbol AND channel = NEW.channel
+        AND status != 'archived'
+      ORDER BY available_at DESC, created_at DESC
+      LIMIT 1;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_v2_dossiers_channel_latest_del
+    AFTER DELETE ON radar_v2_dossiers
+    BEGIN
+      DELETE FROM radar_v2_channel_latest
+      WHERE market = OLD.market AND symbol = OLD.symbol AND channel = OLD.channel;
+      INSERT INTO radar_v2_channel_latest (market, symbol, channel, dossier_id, updated_at)
+      SELECT market, symbol, channel, id, updated_at
+      FROM radar_v2_dossiers
+      WHERE market = OLD.market AND symbol = OLD.symbol AND channel = OLD.channel
+        AND status != 'archived'
+      ORDER BY available_at DESC, created_at DESC
+      LIMIT 1;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS trg_v2_dossiers_channel_latest_upd
+    AFTER UPDATE ON radar_v2_dossiers
+    BEGIN
+      -- 旧分区重算（状态翻转：最新条 archived/invalidated 时回退到较早档案）
+      DELETE FROM radar_v2_channel_latest
+      WHERE market = OLD.market AND symbol = OLD.symbol AND channel = OLD.channel;
+      INSERT INTO radar_v2_channel_latest (market, symbol, channel, dossier_id, updated_at)
+      SELECT market, symbol, channel, id, updated_at
+      FROM radar_v2_dossiers
+      WHERE market = OLD.market AND symbol = OLD.symbol AND channel = OLD.channel
+        AND status != 'archived'
+      ORDER BY available_at DESC, created_at DESC
+      LIMIT 1;
+      -- 新分区重算（market/symbol/channel 实际不可变，双保险）
+      DELETE FROM radar_v2_channel_latest
+      WHERE market = NEW.market AND symbol = NEW.symbol AND channel = NEW.channel;
+      INSERT INTO radar_v2_channel_latest (market, symbol, channel, dossier_id, updated_at)
+      SELECT market, symbol, channel, id, updated_at
+      FROM radar_v2_dossiers
+      WHERE market = NEW.market AND symbol = NEW.symbol AND channel = NEW.channel
+        AND status != 'archived'
+      ORDER BY available_at DESC, created_at DESC
+      LIMIT 1;
+    END;
+  `);
+
+  // 全量重建（幂等，自愈）：窗口函数一遍算出每分区最新非 archived 档案。
+  // 生产规模（~16k dossier / ~4.6k 分区）单次数十毫秒，只在进程启动执行。
+  db.exec(`
+    DELETE FROM radar_v2_channel_latest;
+    INSERT INTO radar_v2_channel_latest (market, symbol, channel, dossier_id, updated_at)
+    SELECT market, symbol, channel, dossier_id, updated_at FROM (
+      SELECT market, symbol, channel, id AS dossier_id, updated_at,
+             ROW_NUMBER() OVER (
+               PARTITION BY market, symbol, channel
+               ORDER BY available_at DESC, created_at DESC
+             ) AS rn
+      FROM radar_v2_dossiers
+      WHERE status != 'archived'
+    ) WHERE rn = 1;
+  `);
 }
 
 // === Prepared statements（lazy Proxy 模式） ===
@@ -1366,14 +1466,6 @@ export const getScanJob = lazyStmt(`
   WHERE market = ? AND trade_date = ? AND trigger = ?
 `);
 
-// 获取所有需要处理的 job（pending + 退避到期的 partial/failed + 租约过期的 running）
-export const getScanJobsNeedingAction = lazyStmt(`
-  SELECT * FROM radar_v2_scan_jobs
-  WHERE status IN ('pending', 'partial', 'failed', 'running')
-    AND (retry_after IS NULL OR retry_after <= ?)
-  ORDER BY created_at ASC
-`);
-
 // 获取当天某市场的 completed job（用于判断当天是否已完成）
 export const getCompletedScanJob = lazyStmt(`
   SELECT * FROM radar_v2_scan_jobs
@@ -1479,12 +1571,6 @@ export const countPendingItems = lazyStmt(`
   WHERE job_id = ? AND status = 'pending'
 `);
 
-// P0: 统计 failed/skipped 数量（用于判断是否需要进入 retry pass）
-export const countFailedItems = lazyStmt(`
-  SELECT COUNT(*) AS cnt FROM radar_v2_scan_items
-  WHERE job_id = ? AND status IN ('failed', 'skipped')
-`);
-
 // 更新单个 item 状态
 export const updateScanItemStatus = lazyStmt(`
   UPDATE radar_v2_scan_items
@@ -1500,11 +1586,22 @@ export const getScanItemStats = lazyStmt(`
   GROUP BY status
 `);
 
+// 审计修正：统计仍可重试的 items（failed/skipped 且未达重试上限）。
+// retry pass 只应有可重试项时进入；全部达到上限时直接终结 job，
+// 避免"无重试余地却永远 partial→retry_after→空转"的循环。
+export const countRetryableItems = lazyStmt(`
+  SELECT COUNT(*) AS cnt
+  FROM radar_v2_scan_items
+  WHERE job_id = ? AND status IN ('failed', 'skipped') AND retry_count < ?
+`);
+
 // 重置 failed/skipped items 为 pending（退避到期后重试前调用）
+// 审计修正：加 retry_count 上限——长期无数据标的（退市/数据源缺失）不再被
+// 无限反复扫描，达到上限后保持 failed，由 job 终态判定吸收。
 export const resetFailedItems = lazyStmt(`
   UPDATE radar_v2_scan_items
   SET status = 'pending', updated_at = @updated_at
-  WHERE job_id = @job_id AND status IN ('failed', 'skipped')
+  WHERE job_id = @job_id AND status IN ('failed', 'skipped') AND retry_count < @max_retries
 `);
 
 // === Dossier 管理（第二期：规则化字段 + 复核调度） ===
