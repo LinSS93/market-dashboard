@@ -1,0 +1,1552 @@
+/* radar 研究档案页面样式
+   设计原则：复用 workspace-theme.css 设计令牌；简洁、层次清晰、无冗余装饰。
+   布局：flex 全屏，左列表 + 右详情（桌面），移动端纵向堆叠。 */
+
+/* flex 布局：body→header/wrap 纵向排列，radar-layout 自动填满剩余高度，消除全局滚动条 */
+body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-size:14px; display:flex; flex-direction:column; height:100vh; overflow:hidden; }
+.radar-workspace header { flex-shrink:0; }
+.radar-workspace .radar-wrap {
+  width: min(1920px, calc(100vw - 24px));
+  margin: 12px auto;
+  flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
+}
+.radar-workspace .radar-tabs { flex-shrink: 0; }
+.radar-workspace .toolbar { flex-shrink: 0; }
+
+/* === 工具栏（与股票监控看板统一：毛玻璃背景 + 分组按钮） === */
+.radar-workspace .toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(255,255,255,.82);
+  border: 1px solid var(--ws-line);
+  border-radius: var(--ws-radius);
+  backdrop-filter: blur(8px);
+  flex-wrap: wrap;
+  min-height: 48px;
+  margin-bottom: 8px;
+}
+
+.radar-workspace .market-filter-buttons {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--ws-line-strong);
+  border-radius: var(--ws-radius-sm);
+  background: var(--ws-surface-soft);
+}
+
+.radar-workspace .market-btn,
+.radar-workspace .dir-btn,
+.radar-workspace .channel-btn,
+.radar-workspace .status-btn {
+  height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--ws-radius-sm);
+  background: transparent;
+  color: var(--ws-muted);
+  font: 700 var(--ws-font-sm) -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+  cursor: pointer;
+  transition: all .12s;
+}
+.radar-workspace .market-btn:hover,
+.radar-workspace .dir-btn:hover,
+.radar-workspace .channel-btn:hover,
+.radar-workspace .status-btn:hover { background:var(--ws-blue-soft); color: var(--ws-blue); }
+.radar-workspace .market-btn.active,
+.radar-workspace .dir-btn.active,
+.radar-workspace .channel-btn.active,
+.radar-workspace .status-btn.active { background: var(--ws-surface); color: var(--ws-blue); box-shadow: 0 1px 2px rgba(24,32,43,.12); }
+
+.radar-workspace .toolbar-spacer { flex: 1; }
+
+.radar-workspace .dossier-search {
+  width: 180px;
+  height: 32px;
+  padding: 6px 12px;
+  border: 1px solid var(--ws-line-strong);
+  border-radius: var(--ws-radius-sm);
+  background: var(--ws-surface);
+  color: var(--ws-ink);
+  font-size: var(--ws-font-md);
+}
+.radar-workspace .dossier-search:focus { outline: none; border-color: var(--ws-blue); }
+
+/* === 主布局 === */
+.radar-workspace .radar-layout {
+  display: flex;
+  gap: var(--ws-space-3);
+  margin-top: var(--ws-space-2);
+  flex: 1 1 0; min-height: 0; overflow: hidden; align-items: stretch;
+}
+
+.radar-workspace .panel {
+  background: var(--ws-surface);
+  border-radius: var(--ws-radius);
+  box-shadow: var(--ws-shadow-sm);
+  overflow: hidden;
+  display: flex; flex-direction: column;
+}
+
+.radar-workspace .panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--ws-space-3) var(--ws-space-4);
+  border-bottom: 1px solid var(--ws-line);
+}
+.radar-workspace .panel-head h2 {
+  margin: 0;
+  font-size: var(--ws-font-xl);
+  font-weight: 600;
+}
+
+/* === 列表面板 === */
+.radar-workspace .dossier-list-panel { flex: 0 0 42%; min-width: 0; }
+
+.radar-workspace .dossier-list {
+  flex: 1; min-height: 0; overflow-y: auto;
+}
+
+.radar-workspace .status-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ws-space-2);
+}
+.radar-workspace .archive-load-more {
+  border: 1px solid var(--ws-blue);
+  background: var(--ws-blue-soft);
+  color: var(--ws-blue);
+  border-radius: var(--ws-radius-sm);
+  padding: 5px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+.radar-workspace .archive-load-more:hover { background: var(--ws-blue); color: #fff; }
+
+.radar-workspace .dossier-empty {
+  padding: var(--ws-space-6);
+  text-align: center;
+  color: var(--ws-muted);
+  font-size: var(--ws-font-md);
+}
+
+/* === 档案卡片 === */
+.radar-workspace .dossier-card {
+  padding: var(--ws-space-3) var(--ws-space-4);
+  border-bottom: 1px solid var(--ws-line-soft);
+  cursor: pointer;
+  transition: background .12s;
+}
+.radar-workspace .dossier-card:hover { background: var(--ws-surface-soft); }
+.radar-workspace .dossier-card.active { background: var(--ws-blue-soft); border-left: 3px solid var(--ws-blue); padding-left: calc(var(--ws-space-4) - 3px); }
+
+.radar-workspace .dossier-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--ws-space-2);
+  margin-bottom: var(--ws-space-1);
+}
+
+.radar-workspace .dossier-symbol {
+  font-size: var(--ws-font-lg);
+  font-weight: 600;
+  color: var(--ws-ink);
+}
+.radar-workspace .dossier-market {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted-soft);
+  padding: 1px 5px;
+  border-radius: var(--ws-radius-sm);
+  background: var(--ws-surface-tint);
+}
+.radar-workspace .dossier-direction {
+  font-size: var(--ws-font-xs);
+  padding: 1px 6px;
+  border-radius: var(--ws-radius-sm);
+  font-weight: 500;
+}
+.radar-workspace .dossier-direction.positive { color: var(--ws-green); background: var(--ws-green-soft); }
+.radar-workspace .dossier-direction.negative { color: var(--ws-red); background: var(--ws-red-soft); }
+.radar-workspace .dossier-direction.neutral { color: var(--ws-muted); background: var(--ws-surface-tint); }
+
+.radar-workspace .dossier-card-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--ws-space-3);
+  font-size: var(--ws-font-sm);
+  color: var(--ws-muted);
+}
+
+.radar-workspace .dossier-time-quality {
+  font-size: var(--ws-font-xs);
+  padding: 1px 5px;
+  border-radius: var(--ws-radius-sm);
+}
+.radar-workspace .dossier-time-quality.known { color: var(--ws-green); background: var(--ws-green-soft); }
+.radar-workspace .dossier-time-quality.unknown { color: var(--ws-amber); background: var(--ws-amber-soft); }
+
+.radar-workspace .dossier-obs-count {
+  margin-left: auto;
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted-soft);
+}
+
+/* === 详情面板 === */
+.radar-workspace .dossier-detail-panel { flex: 1 1 58%; min-width: 0; }
+
+.radar-workspace .dossier-detail {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: var(--ws-space-4);
+}
+
+.radar-workspace .dossier-detail-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ws-muted);
+  font-size: var(--ws-font-md);
+  min-height: 200px;
+}
+
+/* 详情头部 */
+.radar-workspace .detail-header {
+  margin-bottom: var(--ws-space-4);
+  padding-bottom: var(--ws-space-3);
+  border-bottom: 1px solid var(--ws-line-soft);
+}
+.radar-workspace .detail-title {
+  display: flex;
+  align-items: center;
+  gap: var(--ws-space-2);
+  margin-bottom: var(--ws-space-2);
+}
+.radar-workspace .detail-title .dossier-symbol { font-size: var(--ws-font-3xl); }
+.radar-workspace .detail-facts {
+  font-size: var(--ws-font-md);
+  color: var(--ws-ink-soft);
+  line-height: 1.5;
+}
+
+/* 详情区块 */
+.radar-workspace .detail-section { margin-bottom: var(--ws-space-5); }
+.radar-workspace .detail-section-title {
+  font-size: var(--ws-font-sm);
+  font-weight: 600;
+  color: var(--ws-muted);
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  margin-bottom: var(--ws-space-2);
+}
+
+/* 来源引用 */
+.radar-workspace .source-ref {
+  display: block;
+  padding: var(--ws-space-3);
+  border-left: 3px solid var(--ws-blue);
+  background: var(--ws-surface-soft);
+  border-radius: 0 var(--ws-radius-sm) var(--ws-radius-sm) 0;
+  margin-bottom: var(--ws-space-2);
+  text-decoration: none;
+  color: var(--ws-ink);
+  transition: background .12s;
+}
+.radar-workspace .source-ref:hover { background: var(--ws-blue-soft); }
+.radar-workspace .source-ref-title {
+  font-size: var(--ws-font-md);
+  font-weight: 500;
+  margin-bottom: var(--ws-space-1);
+}
+.radar-workspace .source-ref-meta {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+}
+
+/* 观测时间线 */
+.radar-workspace .observation-item {
+  display: flex;
+  gap: var(--ws-space-3);
+  padding: var(--ws-space-3);
+  border-bottom: 1px solid var(--ws-line-soft);
+}
+.radar-workspace .observation-item:last-child { border-bottom: none; }
+.radar-workspace .observation-score {
+  flex-shrink: 0;
+  width: 44px;
+  text-align: center;
+}
+.radar-workspace .observation-score-val {
+  font-size: var(--ws-font-stat);
+  font-weight: 700;
+  line-height: 1;
+}
+.radar-workspace .observation-tier {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+  margin-top: 2px;
+}
+.radar-workspace .observation-tier.high { color: var(--ws-green); }
+.radar-workspace .observation-tier.medium { color: var(--ws-amber); }
+.radar-workspace .observation-tier.low { color: var(--ws-muted-soft); }
+.radar-workspace .observation-info { flex: 1; min-width: 0; }
+.radar-workspace .observation-meta {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+  margin-bottom: var(--ws-space-1);
+}
+.radar-workspace .observation-empty {
+  padding: var(--ws-space-4);
+  text-align: center;
+  color: var(--ws-muted);
+  font-size: var(--ws-font-sm);
+}
+
+/* 时间标签 */
+.radar-workspace .time-tag {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+}
+
+/* 评分标签 */
+.radar-workspace .score-tag {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-blue);
+  font-weight: 500;
+}
+
+/* 综合评分徽章（卡片右上角） */
+.radar-workspace .card-score-badge {
+  margin-left: auto;
+  font-size: var(--ws-font-sm);
+  font-weight: 700;
+  color: var(--ws-blue);
+  background: var(--ws-blue-soft);
+  padding: 1px 8px;
+  border-radius: var(--ws-radius-sm);
+  min-width: 28px;
+  text-align: center;
+}
+/* 待评分徽章（无当前评分，不显示伪分数） */
+.radar-workspace .card-score-badge.unscored {
+  color: var(--ws-muted);
+  background: var(--ws-surface-tint);
+  font-weight: 500;
+  font-size: var(--ws-font-xs);
+}
+
+/* 不感兴趣按钮 */
+.radar-workspace .dismiss-btn {
+  margin-left: auto;
+  padding: 2px 10px;
+  border: 1px solid var(--ws-line);
+  border-radius: var(--ws-radius-sm);
+  background: var(--ws-surface);
+  color: var(--ws-muted);
+  font-size: var(--ws-font-xs);
+  cursor: pointer;
+  transition: all .15s;
+}
+.radar-workspace .dismiss-btn:hover {
+  border-color: var(--ws-red);
+  color: var(--ws-red);
+  background: var(--ws-red-soft);
+}
+
+/* Undo 按钮（dismiss 后短暂提示） */
+.radar-workspace .undo-btn,
+#status .undo-btn {
+  margin-left: 6px;
+  padding: 1px 10px;
+  border: 1px solid var(--ws-blue);
+  border-radius: var(--ws-radius-sm);
+  background: var(--ws-blue-soft);
+  color: var(--ws-blue);
+  font-size: var(--ws-font-xs);
+  cursor: pointer;
+  transition: all .15s;
+}
+.radar-workspace .undo-btn:hover,
+#status .undo-btn:hover {
+  background: var(--ws-blue);
+  color: #fff;
+}
+
+/* 恢复按钮（已隐藏 tab） */
+.radar-workspace .restore-btn {
+  padding: 3px 12px;
+  border: 1px solid var(--ws-blue);
+  border-radius: var(--ws-radius-sm);
+  background: var(--ws-blue-soft);
+  color: var(--ws-blue);
+  font-size: var(--ws-font-xs);
+  cursor: pointer;
+  transition: all .15s;
+}
+.radar-workspace .restore-btn:hover {
+  background: var(--ws-blue);
+  color: #fff;
+}
+
+/* 已隐藏标的卡片 */
+.radar-workspace .dismissed-card {
+  padding: var(--ws-space-3) var(--ws-space-4);
+  border-bottom: 1px solid var(--ws-line-soft);
+  background: var(--ws-surface-soft);
+}
+
+/* === Tab 栏 === */
+.radar-workspace .radar-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--ws-line);
+}
+.radar-workspace .radar-tab {
+  padding: 10px 16px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--ws-muted);
+  font-size: var(--ws-font-md);
+  font-weight: 600;
+  cursor: pointer;
+  transition: color .15s, border-color .15s;
+  margin-bottom: -1px;
+}
+.radar-workspace .radar-tab:hover { color: var(--ws-ink-soft); }
+.radar-workspace .radar-tab.active {
+  color: var(--ws-blue);
+  border-bottom-color: var(--ws-blue);
+  font-weight: 700;
+}
+
+/* === 优先级徽章 === */
+.radar-workspace .priority-badge {
+  font-size: var(--ws-font-xs);
+  padding: 1px 6px;
+  border-radius: var(--ws-radius-sm);
+  font-weight: 500;
+  margin-left: auto;
+}
+.radar-workspace .priority-badge.high { color: var(--ws-red); background: var(--ws-red-soft); }
+.radar-workspace .priority-badge.medium { color: var(--ws-amber); background: var(--ws-amber-soft); }
+.radar-workspace .priority-badge.low { color: var(--ws-muted-soft); background: var(--ws-surface-tint); }
+
+/* === 状态徽章 === */
+.radar-workspace .status-badge {
+  font-size: var(--ws-font-xs);
+  padding: 1px 6px;
+  border-radius: var(--ws-radius-sm);
+  font-weight: 500;
+}
+.radar-workspace .status-badge.confirmed { color: var(--ws-green); background: var(--ws-green-soft); }
+.radar-workspace .status-badge.invalidated { color: var(--ws-red); background: var(--ws-red-soft); }
+.radar-workspace .status-badge.active { color: var(--ws-blue); background: var(--ws-blue-soft); }
+.radar-workspace .status-badge.needs_review { color: var(--ws-amber); background: var(--ws-amber-soft); }
+.radar-workspace .status-badge.archived { color: var(--ws-muted-soft); background: var(--ws-surface-tint); }
+
+/* === 条件展示 === */
+.radar-workspace .condition-item {
+  display: flex;
+  align-items: center;
+  gap: var(--ws-space-2);
+  padding: var(--ws-space-2) var(--ws-space-3);
+  margin-bottom: var(--ws-space-1);
+  border-radius: var(--ws-radius-sm);
+  background: var(--ws-surface-soft);
+}
+.radar-workspace .condition-item.confirm { border-left: 3px solid var(--ws-blue); }
+.radar-workspace .condition-item.invalid { border-left: 3px solid var(--ws-red); }
+.radar-workspace .condition-status {
+  flex-shrink: 0;
+  font-size: var(--ws-font-xs);
+  padding: 1px 5px;
+  border-radius: var(--ws-radius-sm);
+  font-weight: 500;
+}
+.radar-workspace .condition-status.confirmed { color: var(--ws-green); background: var(--ws-green-soft); }
+.radar-workspace .condition-status.failed { color: var(--ws-red); background: var(--ws-red-soft); }
+.radar-workspace .condition-status.pending { color: var(--ws-muted); background: var(--ws-surface-tint); }
+.radar-workspace .condition-status.active { color: var(--ws-amber); background: var(--ws-amber-soft); }
+.radar-workspace .condition-desc {
+  font-size: var(--ws-font-sm);
+  color: var(--ws-ink-soft);
+}
+
+/* === 评估审计 === */
+.radar-workspace .evaluation-item {
+  display: flex;
+  align-items: center;
+  gap: var(--ws-space-3);
+  padding: var(--ws-space-2) var(--ws-space-3);
+  margin-bottom: var(--ws-space-1);
+  border-radius: var(--ws-radius-sm);
+  background: var(--ws-surface-soft);
+  font-size: var(--ws-font-sm);
+}
+.radar-workspace .evaluation-status {
+  font-weight: 500;
+  color: var(--ws-ink-soft);
+}
+.radar-workspace .evaluation-trigger {
+  color: var(--ws-blue);
+  font-size: var(--ws-font-xs);
+}
+.radar-workspace .evaluation-time {
+  margin-left: auto;
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+}
+
+/* === 通道徽章 === */
+.radar-workspace .channel-badge {
+  font-size: var(--ws-font-xs);
+  padding: 1px 6px;
+  border-radius: var(--ws-radius-sm);
+  font-weight: 500;
+}
+.radar-workspace .channel-badge.event { color: var(--ws-blue); background: var(--ws-blue-soft); }
+.radar-workspace .channel-badge.trend { color: var(--ws-purple, #6b5cb8); background: var(--ws-purple-soft, #ece8f5); }
+.radar-workspace .channel-badge.fundamental { color: var(--ws-green); background: var(--ws-green-soft); }
+
+/* === 研究档案分组（保留旧样式供兼容） === */
+.radar-workspace .archive-group { margin-bottom: var(--ws-space-3); }
+.radar-workspace .archive-group:last-child { margin-bottom: 0; }
+.radar-workspace .archive-group-head {
+  display: flex;
+  align-items: center;
+  gap: var(--ws-space-2);
+  padding: var(--ws-space-2) var(--ws-space-4);
+  background: var(--ws-surface-tint);
+  border-bottom: 1px solid var(--ws-line-soft);
+}
+.radar-workspace .archive-group-title {
+  font-size: var(--ws-font-sm);
+  font-weight: 600;
+  color: var(--ws-ink-soft);
+  text-transform: uppercase;
+  letter-spacing: .5px;
+}
+.radar-workspace .archive-group-count {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+}
+
+/* === 按股票聚合视图 === */
+/* 列表卡片：公司名称（第一重点，粗体 + 深色） */
+.radar-workspace .symbol-card .dossier-name {
+  font-size: var(--ws-font-md);
+  font-weight: 600;
+  color: var(--ws-ink);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.radar-workspace .symbol-card .dossier-name-muted {
+  color: var(--ws-muted-soft);
+  font-weight: 400;
+}
+/* 列表卡片：股票代码（第二重点） */
+.radar-workspace .symbol-card .dossier-symbol {
+  font-size: var(--ws-font-sm);
+  font-weight: 500;
+  color: var(--ws-ink-soft);
+  flex-shrink: 0;
+}
+
+/* 详情页中 symbol 名称 */
+.radar-workspace .detail-title .dossier-name {
+  font-size: var(--ws-font-lg);
+  color: var(--ws-ink-soft);
+  margin-left: var(--ws-space-2);
+}
+
+/* 紧凑头部（symbol 详情页内每个 dossier 不重复显示 symbol/market） */
+.radar-workspace .detail-title.compact {
+  margin-bottom: var(--ws-space-1);
+}
+
+/* symbol 详情页顶部概览 */
+.radar-workspace .symbol-detail-header {
+  margin-bottom: var(--ws-space-4);
+}
+
+/* 通道分组容器 */
+.radar-workspace .channel-group {
+  margin-bottom: var(--ws-space-5);
+}
+.radar-workspace .channel-group:last-child { margin-bottom: 0; }
+
+.radar-workspace .channel-group-head {
+  display: flex;
+  align-items: center;
+  gap: var(--ws-space-2);
+  padding: var(--ws-space-2) var(--ws-space-3);
+  margin-bottom: var(--ws-space-3);
+  background: var(--ws-surface-tint);
+  border-left: 3px solid var(--ws-line);
+  border-radius: var(--ws-radius-sm);
+}
+.radar-workspace .channel-group-head .channel-badge {
+  font-size: var(--ws-font-xs);
+}
+.radar-workspace .channel-group-title {
+  font-size: var(--ws-font-sm);
+  font-weight: 600;
+  color: var(--ws-ink-soft);
+}
+.radar-workspace .channel-group-count {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+}
+
+/* 通道分组内每个 dossier 块 */
+.radar-workspace .channel-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ws-space-4);
+}
+.radar-workspace .channel-group-dossier {
+  padding: var(--ws-space-3);
+  background: var(--ws-surface-soft);
+  border-radius: var(--ws-radius-sm);
+  border: 1px solid var(--ws-line-soft);
+}
+
+/* === 机会卡片增强 === */
+.radar-workspace .opp-card { padding-bottom: var(--ws-space-2); }
+
+.radar-workspace .opp-score-badge {
+  font-size: var(--ws-font-sm);
+  font-weight: 700;
+  padding: 1px 8px;
+  border-radius: var(--ws-radius-sm);
+  margin-left: auto;
+}
+.radar-workspace .opp-score-badge.high { color: var(--ws-green); background: var(--ws-green-soft); }
+.radar-workspace .opp-score-badge.medium { color: var(--ws-amber); background: var(--ws-amber-soft); }
+.radar-workspace .opp-score-badge.low { color: var(--ws-muted-soft); background: var(--ws-surface-tint); }
+.radar-workspace .opp-score-badge.none { color: var(--ws-muted-soft); background: var(--ws-surface-tint); }
+
+/* === 评分多维条 === */
+.radar-workspace .opp-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--ws-space-1) var(--ws-space-3);
+  margin-top: var(--ws-space-2);
+  padding: var(--ws-space-2) var(--ws-space-3);
+  background: var(--ws-surface-soft);
+  border-radius: var(--ws-radius-sm);
+}
+.radar-workspace .opp-metrics-detail { grid-template-columns: 1fr; gap: var(--ws-space-2); }
+.radar-workspace .metric-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--ws-space-2);
+}
+.radar-workspace .metric-bar-label {
+  flex-shrink: 0;
+  width: 36px;
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+}
+.radar-workspace .metric-bar-track {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--ws-line-soft);
+  overflow: hidden;
+}
+.radar-workspace .metric-bar-fill { height: 100%; border-radius: 3px; transition: width .3s; }
+.radar-workspace .metric-bar-fill.high { background: var(--ws-green); }
+.radar-workspace .metric-bar-fill.medium { background: var(--ws-amber); }
+.radar-workspace .metric-bar-fill.low { background: var(--ws-muted-soft); }
+.radar-workspace .metric-bar-fill.none { background: var(--ws-line); }
+.radar-workspace .metric-bar-val {
+  flex-shrink: 0;
+  width: 24px;
+  text-align: right;
+  font-size: var(--ws-font-xs);
+  font-weight: 600;
+}
+.radar-workspace .metric-bar-val.high { color: var(--ws-green); }
+.radar-workspace .metric-bar-val.medium { color: var(--ws-amber); }
+.radar-workspace .metric-bar-val.low { color: var(--ws-muted-soft); }
+.radar-workspace .metric-bar-val.none { color: var(--ws-muted-soft); }
+
+/* Current-model provenance is part of the decision surface, not hidden in details. */
+.radar-workspace .opportunity-provenance,
+.radar-workspace .archive-provenance {
+  display: flex;
+  align-items: center;
+  gap: var(--ws-space-2);
+  margin-top: var(--ws-space-2);
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+}
+
+/* === 聚合结论卡片（按股票聚合详情页顶部） === */
+.radar-workspace .symbol-summary {
+  margin-bottom: var(--ws-space-4);
+  padding: var(--ws-space-3) var(--ws-space-4);
+  border-radius: var(--ws-radius);
+  border-left: 4px solid var(--ws-line);
+  background: var(--ws-surface-soft);
+}
+.radar-workspace .symbol-summary.action-positive { border-left-color: var(--ws-green); background: var(--ws-green-soft); }
+.radar-workspace .symbol-summary.action-watch { border-left-color: var(--ws-blue); background: var(--ws-blue-soft); }
+.radar-workspace .symbol-summary.action-risk { border-left-color: var(--ws-red); background: var(--ws-red-soft); }
+
+.radar-workspace .summary-head {
+  display: flex;
+  align-items: center;
+  gap: var(--ws-space-2);
+  margin-bottom: var(--ws-space-2);
+  flex-wrap: wrap;
+}
+.radar-workspace .summary-action {
+  font-size: var(--ws-font-xl);
+  font-weight: 700;
+  padding: 2px 14px;
+  border-radius: var(--ws-radius-sm);
+  background: var(--ws-surface);
+}
+.radar-workspace .summary-action.positive { color: var(--ws-green); }
+.radar-workspace .summary-action.watch { color: var(--ws-blue); }
+.radar-workspace .summary-action.risk { color: var(--ws-red); }
+
+.radar-workspace .summary-confidence {
+  font-size: var(--ws-font-xs);
+  padding: 1px 6px;
+  border-radius: var(--ws-radius-sm);
+  font-weight: 500;
+  background: var(--ws-surface);
+}
+.radar-workspace .summary-confidence.high { color: var(--ws-ink); }
+.radar-workspace .summary-confidence.medium { color: var(--ws-muted); }
+.radar-workspace .summary-confidence.low { color: var(--ws-muted-soft); }
+
+.radar-workspace .summary-score {
+  font-size: var(--ws-font-sm);
+  font-weight: 600;
+  color: var(--ws-ink-soft);
+  margin-left: auto;
+}
+.radar-workspace .summary-vote {
+  font-size: var(--ws-font-sm);
+  color: var(--ws-muted);
+}
+
+.radar-workspace .summary-channels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ws-space-2);
+  margin-bottom: var(--ws-space-2);
+}
+.radar-workspace .summary-channel-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ws-space-1);
+  padding: 2px 8px;
+  background: var(--ws-surface);
+  border-radius: var(--ws-radius-sm);
+  font-size: var(--ws-font-xs);
+}
+.radar-workspace .summary-channel-item .dossier-direction {
+  font-size: var(--ws-font-xs);
+  padding: 0 4px;
+}
+.radar-workspace .summary-channel-score {
+  color: var(--ws-muted);
+  font-weight: 500;
+}
+
+.radar-workspace .summary-reason {
+  font-size: var(--ws-font-sm);
+  color: var(--ws-ink-soft);
+  line-height: 1.5;
+}
+
+/* === 列表卡片：决策看板版 === */
+.radar-workspace .symbol-card.action-positive { border-left: 3px solid var(--ws-green); }
+.radar-workspace .symbol-card.action-watch { border-left: 3px solid var(--ws-blue); }
+.radar-workspace .symbol-card.action-risk { border-left: 3px solid var(--ws-red); }
+
+.radar-workspace .symbol-card-row1 {
+  display: flex;
+  align-items: center;
+  gap: var(--ws-space-2);
+  margin-bottom: var(--ws-space-1);
+}
+.radar-workspace .summary-action-sm {
+  font-size: var(--ws-font-xs);
+  font-weight: 700;
+  padding: 1px 8px;
+  border-radius: var(--ws-radius-sm);
+  flex-shrink: 0;
+}
+.radar-workspace .summary-action-sm.positive { color: var(--ws-green); background: var(--ws-green-soft); }
+.radar-workspace .summary-action-sm.watch { color: var(--ws-blue); background: var(--ws-blue-soft); }
+.radar-workspace .summary-action-sm.risk { color: var(--ws-red); background: var(--ws-red-soft); }
+
+.radar-workspace .symbol-price {
+  margin-left: auto;
+  font-size: var(--ws-font-sm);
+  font-weight: 600;
+  color: var(--ws-ink);
+}
+.radar-workspace .symbol-price.up { color: var(--ws-green); }
+.radar-workspace .symbol-price.down { color: var(--ws-red); }
+.radar-workspace .symbol-pct { font-size: var(--ws-font-xs); font-weight: 500; }
+.radar-workspace .symbol-score {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.radar-workspace .symbol-card-row2 {
+  display: flex;
+  align-items: center;
+  gap: var(--ws-space-2);
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+}
+.radar-workspace .symbol-channels {
+  display: inline-flex;
+  gap: var(--ws-space-1);
+}
+.radar-workspace .ch-mini {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px;
+  border-radius: var(--ws-radius-sm);
+  font-size: 10px;
+  line-height: 16px;
+}
+.radar-workspace .ch-mini.event { background: var(--ws-blue-soft); color: var(--ws-blue); }
+.radar-workspace .ch-mini.trend { background: var(--ws-purple-soft, #ece8f5); color: var(--ws-purple, #6b5cb8); }
+.radar-workspace .ch-mini.fundamental { background: var(--ws-green-soft); color: var(--ws-green); }
+.radar-workspace .ch-mini-dir { font-weight: 700; }
+.radar-workspace .ch-mini-dir.positive { color: var(--ws-green); }
+.radar-workspace .ch-mini-dir.negative { color: var(--ws-red); }
+.radar-workspace .ch-mini-dir.neutral { color: var(--ws-muted); }
+.radar-workspace .symbol-spark-slot {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+}
+.radar-workspace .symbol-spark { display: block; }
+
+/* === 详情页：公司概览（置顶，不折叠） === */
+.radar-workspace .company-overview {
+  margin-bottom: var(--ws-space-4);
+  padding-bottom: var(--ws-space-3);
+  border-bottom: 1px solid var(--ws-line-soft);
+}
+.radar-workspace .overview-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--ws-space-2);
+  margin-bottom: var(--ws-space-2);
+  flex-wrap: wrap;
+}
+/* 公司名称：第一重点（最大字号 + 粗体） */
+.radar-workspace .overview-name {
+  font-size: var(--ws-font-3xl);
+  font-weight: 700;
+  color: var(--ws-ink);
+  line-height: 1.2;
+}
+/* 股票代码：第二重点 */
+.radar-workspace .overview-code {
+  font-size: var(--ws-font-lg);
+  font-weight: 600;
+  color: var(--ws-ink-soft);
+}
+.radar-workspace .overview-industry {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-blue);
+  background: var(--ws-blue-soft);
+  padding: 1px 6px;
+  border-radius: var(--ws-radius-sm);
+}
+.radar-workspace .overview-price-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--ws-space-2);
+  margin-bottom: var(--ws-space-2);
+}
+.radar-workspace .overview-price {
+  font-size: var(--ws-font-stat);
+  font-weight: 700;
+  color: var(--ws-ink);
+}
+.radar-workspace .overview-price.up { color: var(--ws-green); }
+.radar-workspace .overview-price.down { color: var(--ws-red); }
+.radar-workspace .overview-pct { font-size: var(--ws-font-md); font-weight: 500; }
+.radar-workspace .overview-pct.up { color: var(--ws-green); }
+.radar-workspace .overview-pct.down { color: var(--ws-red); }
+.radar-workspace .overview-summary {
+  font-size: var(--ws-font-sm);
+  color: var(--ws-ink-soft);
+  line-height: 1.6;
+  margin-bottom: var(--ws-space-2);
+}
+.radar-workspace .overview-business-lines {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ws-space-1);
+}
+.radar-workspace .overview-bl {
+  font-size: var(--ws-font-xs);
+  padding: 1px 6px;
+  background: var(--ws-surface-tint);
+  color: var(--ws-muted);
+  border-radius: var(--ws-radius-sm);
+}
+
+/* === LLM 触发按钮（手动生成公司简介） === */
+.radar-workspace .profile-trigger-area {
+  display: flex;
+  align-items: center;
+  gap: var(--ws-space-2);
+  margin-bottom: var(--ws-space-4);
+  padding-bottom: var(--ws-space-3);
+  border-bottom: 1px solid var(--ws-line-soft);
+}
+.radar-workspace .profile-trigger-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+  border: 1px solid var(--ws-blue);
+  border-radius: var(--ws-radius-sm);
+  background: var(--ws-blue-soft);
+  color: var(--ws-blue);
+  font-size: var(--ws-font-sm);
+  cursor: pointer;
+  transition: all .15s;
+}
+.radar-workspace .profile-trigger-btn:hover:not(:disabled) {
+  background: var(--ws-blue);
+  color: #fff;
+}
+.radar-workspace .profile-trigger-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.radar-workspace .profile-trigger-hint {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+}
+
+/* === 详情页：K 线图 === */
+.radar-workspace .kline-host {
+  width: 100%;
+  height: 280px;
+}
+
+/* === 详情页：通道信号矩阵 === */
+.radar-workspace .channel-matrix {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ws-space-2);
+}
+.radar-workspace .matrix-row {
+  display: flex;
+  align-items: center;
+  gap: var(--ws-space-2);
+  padding: var(--ws-space-2) var(--ws-space-3);
+  background: var(--ws-surface-soft);
+  border-radius: var(--ws-radius-sm);
+  border-left: 3px solid var(--ws-line);
+  flex-wrap: wrap;
+}
+.radar-workspace .matrix-score {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+  font-weight: 500;
+}
+.radar-workspace .matrix-summary {
+  flex: 1;
+  min-width: 200px;
+  font-size: var(--ws-font-sm);
+  color: var(--ws-ink-soft);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.radar-workspace .matrix-drill-btn {
+  font-size: var(--ws-font-xs);
+  padding: 2px 8px;
+  border: 1px solid var(--ws-line);
+  border-radius: var(--ws-radius-sm);
+  background: var(--ws-surface);
+  color: var(--ws-blue);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.radar-workspace .matrix-drill-btn:hover { background: var(--ws-blue-soft); }
+.radar-workspace .drill-detail {
+  width: 100%;
+  margin-top: var(--ws-space-2);
+  padding: var(--ws-space-3);
+  background: var(--ws-surface);
+  border-radius: var(--ws-radius-sm);
+  border: 1px solid var(--ws-line-soft);
+}
+
+/* === 详情页：事件时间线 === */
+.radar-workspace .event-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ws-space-1);
+}
+.radar-workspace .event-item {
+  display: flex;
+  align-items: center;
+  gap: var(--ws-space-2);
+  padding: var(--ws-space-1) var(--ws-space-2);
+  font-size: var(--ws-font-sm);
+  border-left: 2px solid var(--ws-line-soft);
+}
+.radar-workspace .event-time {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+  flex-shrink: 0;
+  width: 80px;
+}
+.radar-workspace .event-summary {
+  flex: 1;
+  color: var(--ws-ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* === 详情页：财务亮点 === */
+.radar-workspace .financial-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: var(--ws-space-2);
+}
+.radar-workspace .financial-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--ws-space-2) var(--ws-space-3);
+  background: var(--ws-surface-soft);
+  border-radius: var(--ws-radius-sm);
+}
+.radar-workspace .financial-label {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+}
+.radar-workspace .financial-value {
+  font-size: var(--ws-font-lg);
+  font-weight: 600;
+  color: var(--ws-ink);
+}
+.radar-workspace .financial-value.up { color: var(--ws-green); }
+.radar-workspace .financial-value.down { color: var(--ws-red); }
+.radar-workspace .provenance-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: var(--ws-radius-sm);
+  color: var(--ws-blue);
+  background: var(--ws-blue-soft);
+  font-weight: 600;
+}
+.radar-workspace .provenance-badge.legacy {
+  color: var(--ws-muted);
+  background: var(--ws-surface-tint);
+}
+
+/* === 条件持续天数 === */
+.radar-workspace .condition-dur {
+  flex-shrink: 0;
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+  padding: 1px 5px;
+  border-radius: var(--ws-radius-sm);
+  background: var(--ws-surface-tint);
+}
+
+/* === 空状态提示 === */
+.radar-workspace .dossier-empty-hint {
+  margin-top: var(--ws-space-3);
+  padding: var(--ws-space-3);
+  font-size: var(--ws-font-sm);
+  color: var(--ws-muted);
+  line-height: 1.6;
+  background: var(--ws-surface-soft);
+  border-radius: var(--ws-radius-sm);
+}
+
+/* === 响应式 === */
+@media (max-width: 900px) {
+  body.radar-workspace { height: auto; overflow: auto; }
+  .radar-workspace .radar-wrap { flex: none; overflow: visible; }
+  .radar-workspace .radar-layout { flex-direction: column; flex: none; overflow: visible; }
+  .radar-workspace .dossier-list-panel,
+  .radar-workspace .dossier-detail-panel { flex: 1 1 100%; }
+  .radar-workspace .dossier-list,
+  .radar-workspace .dossier-detail { flex: none; overflow: visible; max-height: none; }
+  .radar-workspace .dossier-search { width: 100%; }
+  .radar-workspace .opp-metrics { grid-template-columns: 1fr; }
+}
+
+/* === 信息架构重构：今日研究队列 + 精简卡片 + 四问 + 折叠证据区 === */
+
+/* 队列分组 */
+.radar-workspace .queue-group {
+  margin-bottom: var(--ws-space-4);
+}
+.radar-workspace .queue-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--ws-space-2);
+  font-size: var(--ws-font-sm);
+  font-weight: 600;
+  color: var(--ws-ink-soft);
+  padding: var(--ws-space-2) var(--ws-space-3);
+  border-bottom: 1px solid var(--ws-line-soft);
+  margin-bottom: var(--ws-space-2);
+}
+.radar-workspace .queue-group-label { color: var(--ws-ink-soft); }
+.radar-workspace .queue-group-count {
+  color: var(--ws-muted);
+  font-weight: 400;
+}
+.radar-workspace .queue-group-hint {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted-soft);
+  font-weight: 400;
+  margin-left: auto;
+}
+
+/* 队列分组色带（左侧细条标识组别） */
+.radar-workspace .queue-group.bucket-risk_review { border-left: 2px solid var(--ws-red); padding-left: var(--ws-space-2); }
+.radar-workspace .queue-group.bucket-cross_confirm { border-left: 2px solid var(--ws-green); padding-left: var(--ws-space-2); }
+.radar-workspace .queue-group.bucket-new_signal { border-left: 2px solid var(--ws-blue); padding-left: var(--ws-space-2); }
+.radar-workspace .queue-group.bucket-dismissed { border-left: 2px solid var(--ws-muted-soft); padding-left: var(--ws-space-2); }
+
+/* 卡片 bucket 样式（未选中统一白底 + 3px 左色标标识 bucket）：
+   - risk_review：浅红底 + 红色左色标（风险组首屏醒目）
+   - cross_confirm：白底 + 绿色左色标（高置信机会）
+   - new_signal：白底 + 蓝色左色标（待确认信号）
+   - 选中：蓝底覆盖 bucket 背景 */
+.radar-workspace .symbol-card.bucket-risk_review { background: var(--ws-red-soft); border-left: 3px solid var(--ws-red); }
+.radar-workspace .symbol-card.bucket-cross_confirm { background: var(--ws-surface); border-left: 3px solid var(--ws-green); }
+.radar-workspace .symbol-card.bucket-new_signal { background: var(--ws-surface); border-left: 3px solid var(--ws-blue); }
+.radar-workspace .symbol-card.bucket-audit_pending { background: var(--ws-surface); border-left: 3px solid var(--ws-amber); }
+.radar-workspace .symbol-card.bucket-unscored { background: var(--ws-surface); border-left: 3px solid var(--ws-muted-soft); }
+/* 选中卡片：蓝底覆盖 bucket 背景，突出当前选中项 */
+.radar-workspace .symbol-card.active { background: var(--ws-blue-soft) !important; border-left: 3px solid var(--ws-blue) !important; }
+
+/* 资产待审计标签（卡片 meta 行，提示数据可信度） */
+.radar-workspace .audit-pending-tag {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-amber);
+  background: var(--ws-amber-soft);
+  padding: 1px 6px;
+  border-radius: var(--ws-radius-sm);
+  font-weight: 500;
+}
+
+/* 评分待更新：最近一次完整日扫未刷新该标的评分，已退出高置信排序 */
+.radar-workspace .stale-score-tag {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-red);
+  background: var(--ws-red-soft);
+  padding: 1px 6px;
+  border-radius: var(--ws-radius-sm);
+  font-weight: 500;
+}
+
+/* 困境反转正向证据：负面事件与正向证据并存 */
+.radar-workspace .reversal-tag {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-green);
+  background: var(--ws-green-soft);
+  padding: 1px 6px;
+  border-radius: var(--ws-radius-sm);
+  font-weight: 500;
+}
+
+/* 基本面未覆盖（软门槛提示）：高置信组中无基本面档案 */
+.radar-workspace .fundamental-uncovered-tag {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-blue);
+  background: var(--ws-blue-soft);
+  padding: 1px 6px;
+  border-radius: var(--ws-radius-sm);
+  font-weight: 500;
+}
+
+/* 资产审计快捷操作栏（阶段 C：provisional 标的的人工审计入口） */
+.radar-workspace .asset-audit-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  margin: 4px 0 8px;
+  background: var(--ws-amber-soft, #fff8e1);
+  border-left: 3px solid var(--ws-amber, #f5a623);
+  border-radius: var(--ws-radius-sm, 4px);
+}
+.radar-workspace .audit-bar-label {
+  font-size: var(--ws-font-xs, 12px);
+  color: var(--ws-amber, #f5a623);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.radar-workspace .audit-bar-actions {
+  display: flex;
+  gap: 6px;
+}
+.radar-workspace .audit-btn {
+  font-size: var(--ws-font-xs, 12px);
+  padding: 2px 10px;
+  border: 1px solid var(--ws-border, #ddd);
+  border-radius: var(--ws-radius-sm, 4px);
+  background: var(--ws-bg, #fff);
+  color: var(--ws-text, #333);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.radar-workspace .audit-btn:hover:not(:disabled) {
+  background: var(--ws-primary, #1976d2);
+  color: #fff;
+  border-color: var(--ws-primary, #1976d2);
+}
+.radar-workspace .audit-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 精简卡片：方向徽章 + 代码/名称 + 一句话事实 + 时间 */
+.radar-workspace .symbol-card .card-row-main {
+  display: flex;
+  align-items: center;
+  gap: var(--ws-space-2);
+  margin-bottom: 4px;
+}
+.radar-workspace .card-dir-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  font-size: var(--ws-font-xs);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.radar-workspace .card-dir-badge.positive { background: var(--ws-green-soft); color: var(--ws-green); }
+.radar-workspace .card-dir-badge.negative { background: var(--ws-red-soft); color: var(--ws-red); }
+.radar-workspace .card-dir-badge.neutral { background: var(--ws-gray-soft); color: var(--ws-muted); }
+.radar-workspace .card-row-fact {
+  font-size: var(--ws-font-sm);
+  color: var(--ws-ink-soft);
+  line-height: 1.5;
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.radar-workspace .card-row-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--ws-space-2);
+}
+.radar-workspace .cov-tag {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+  padding: 1px 6px;
+  border-radius: var(--ws-radius-sm);
+  background: var(--ws-surface-tint);
+}
+.radar-workspace .conflict-tag {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-orange);
+  background: var(--ws-orange-soft, #fff7ed);
+  padding: 1px 6px;
+  border-radius: var(--ws-radius-sm);
+}
+
+/* bucket 标签（候选池卡片，区分高置信机会/待确认信号/风险预警） */
+.radar-workspace .bucket-tag {
+  font-size: var(--ws-font-xs);
+  padding: 1px 6px;
+  border-radius: var(--ws-radius-sm);
+  font-weight: 500;
+}
+.radar-workspace .bucket-tag-risk_review { color: var(--ws-red); background: var(--ws-red-soft); }
+.radar-workspace .bucket-tag-cross_confirm { color: var(--ws-green); background: var(--ws-green-soft, #ecfdf5); }
+.radar-workspace .bucket-tag-new_signal { color: var(--ws-blue); background: var(--ws-blue-soft); }
+
+/* 四问空状态文案：muted 样式（避免用户把空白误读为系统故障） */
+.radar-workspace .qq-answer-muted {
+  color: var(--ws-muted);
+  font-style: italic;
+}
+
+/* 研究优先级 muted 文案 */
+.radar-workspace .summary-meta-muted {
+  color: var(--ws-muted-soft);
+  font-style: italic;
+}
+
+/* 评分待更新（首屏第一层）：最近完整日扫未刷新该标的评分 */
+.radar-workspace .summary-stale {
+  color: var(--ws-red);
+  font-weight: 500;
+}
+
+/* 四问区域 */
+.radar-workspace .four-questions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--ws-space-3);
+  margin-bottom: var(--ws-space-4);
+}
+.radar-workspace .qq-item {
+  background: var(--ws-surface);
+  border: 1px solid var(--ws-line);
+  border-radius: var(--ws-radius-sm);
+  padding: var(--ws-space-3);
+}
+.radar-workspace .qq-label {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+  margin-bottom: var(--ws-space-1);
+}
+.radar-workspace .qq-answer {
+  font-size: var(--ws-font-md);
+  color: var(--ws-ink);
+  line-height: 1.5;
+}
+
+/* 研究优先级卡片 */
+.radar-workspace .summary-conflict-banner {
+  background: var(--ws-orange-soft, #fff7ed);
+  color: var(--ws-orange, #ea580c);
+  padding: var(--ws-space-2) var(--ws-space-3);
+  border-radius: var(--ws-radius-sm);
+  font-size: var(--ws-font-sm);
+  font-weight: 600;
+  margin-bottom: var(--ws-space-2);
+}
+.radar-workspace .summary-meta {
+  display: flex;
+  gap: var(--ws-space-3);
+  flex-wrap: wrap;
+  margin: var(--ws-space-2) 0;
+}
+.radar-workspace .summary-meta-item {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+}
+
+/* 折叠证据区 */
+.radar-workspace .evidence-area {
+  margin-top: var(--ws-space-4);
+}
+.radar-workspace .evidence-section {
+  border: 1px solid var(--ws-line);
+  border-radius: var(--ws-radius-sm);
+  margin-bottom: var(--ws-space-2);
+  background: var(--ws-surface);
+}
+.radar-workspace .evidence-title {
+  font-size: var(--ws-font-sm);
+  font-weight: 600;
+  color: var(--ws-ink-soft);
+  padding: var(--ws-space-2) var(--ws-space-3);
+  cursor: pointer;
+  user-select: none;
+}
+.radar-workspace .evidence-title:hover { background: var(--ws-surface-soft); }
+.radar-workspace .evidence-body {
+  padding: var(--ws-space-3);
+  border-top: 1px solid var(--ws-line-soft);
+}
+
+/* 详情页操作栏：加入股票监控 */
+.radar-workspace .detail-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: var(--ws-space-4);
+}
+.radar-workspace .detail-action-btn {
+  font-size: var(--ws-font-sm, 14px);
+  padding: 8px 18px;
+  border: 1px solid var(--ws-primary, #1976d2);
+  border-radius: var(--ws-radius-sm, 4px);
+  background: var(--ws-primary, #1976d2);
+  color: #fff;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.radar-workspace .detail-action-btn:hover:not(:disabled) {
+  background: var(--ws-primary-dark, #1565c0);
+  border-color: var(--ws-primary-dark, #1565c0);
+}
+.radar-workspace .detail-action-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* 研究附注 */
+.radar-workspace .research-disclaimer {
+  margin-top: var(--ws-space-4);
+  padding: var(--ws-space-3);
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+  line-height: 1.6;
+  background: var(--ws-surface-soft);
+  border-radius: var(--ws-radius-sm);
+  border-left: 3px solid var(--ws-orange, #ea580c);
+}
+
+/* 移除旧 sparkline 相关样式 */
+.radar-workspace .symbol-spark-slot { display: none; }
+
+@media (max-width: 600px) {
+  .radar-workspace .four-questions { grid-template-columns: 1fr; }
+}
+
+/* === 评分构成模块（单行算式流式布局，组标题对齐维度项） === */
+.radar-workspace .score-breakdown {
+  margin-bottom: var(--ws-space-4);
+  padding: 12px 16px;
+  background: var(--ws-surface);
+  border: 1px solid var(--ws-line);
+  border-radius: var(--ws-radius);
+  overflow-x: auto;
+}
+
+/* 算式容器：三组水平排列 */
+.radar-workspace .sb-equation {
+  display: flex;
+  align-items: flex-start;
+  gap: 28px;
+}
+
+/* 每个组：组标题 + 维度行 + 数值行，垂直排列 */
+.radar-workspace .sb-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* 组标题 */
+.radar-workspace .sb-group-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ws-muted);
+  letter-spacing: .03em;
+  margin-bottom: 2px;
+}
+.radar-workspace .sb-result-label { color: var(--ws-blue); }
+
+/* 行：维度名 / 数值 */
+.radar-workspace .sb-line {
+  display: flex;
+  align-items: baseline;
+  white-space: nowrap;
+  line-height: 1.6;
+}
+
+/* 维度名 */
+.radar-workspace .sb-line-dim {
+  font-size: 11px;
+  color: var(--ws-muted-soft);
+}
+.radar-workspace .sb-dim {
+  display: inline-block;
+  min-width: 36px;
+  text-align: center;
+  color: var(--ws-muted);
+}
+.radar-workspace .sb-dim-bonus.dir-positive { color: var(--ws-green); }
+.radar-workspace .sb-dim-bonus.dir-negative { color: var(--ws-red); }
+.radar-workspace .sb-dim-bonus.dir-neutral { color: var(--ws-muted); }
+.radar-workspace .sb-dim-eq { color: var(--ws-muted-soft); min-width: auto; }
+
+/* 数值 */
+.radar-workspace .sb-line-vals {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ws-ink);
+  font-variant-numeric: tabular-nums;
+}
+.radar-workspace .sb-val {
+  display: inline-block;
+  min-width: 36px;
+  text-align: center;
+}
+.radar-workspace .sb-val-bonus.pos { color: var(--ws-green); }
+.radar-workspace .sb-val-bonus.neg { color: var(--ws-red); }
+
+/* 运算符 + */
+.radar-workspace .sb-op {
+  display: inline-block;
+  margin: 0 3px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--ws-muted-soft);
+}
+
+/* 结果列 */
+.radar-workspace .sb-result-col {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-left: auto;
+  align-items: flex-end;
+}
+.radar-workspace .sb-result-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--ws-blue);
+  line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+}
+
+/* tier + 评分时间 */
+.radar-workspace .sb-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--ws-line-soft);
+}
+.radar-workspace .sb-tier {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+.radar-workspace .sb-tier.tier-high { color: var(--ws-green); background: var(--ws-green-soft); }
+.radar-workspace .sb-tier.tier-medium { color: var(--ws-amber); background: var(--ws-amber-soft); }
+.radar-workspace .sb-tier.tier-low { color: var(--ws-muted-soft); background: var(--ws-surface-tint); }
+.radar-workspace .sb-meta-time {
+  font-size: 11px;
+  color: var(--ws-muted-soft);
+  margin-left: auto;
+}

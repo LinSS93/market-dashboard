@@ -6,8 +6,8 @@
   const STOCK_ACTION_LABELS={OPEN:'可试仓',ADD:'可加仓',REDUCE:'减仓',CLOSE:'清仓'};
   const ETF_ACTIONS=['PROBE','ADD','TRIM','EXIT','AVOID'];
   const ETF_ACTION_LABELS={PROBE:'试仓',ADD:'加仓',TRIM:'减仓',EXIT:'清仓',AVOID:'回避'};
-  const RADAR_V2_TIERS=['risk','confirmed','new'];
-  const RADAR_V2_TIER_LABELS={risk:'风险待核验',confirmed:'优先研究（多通道）',new:'新变化（待验证）'};
+  const RADAR_TIERS=['risk','confirmed','new'];
+  const RADAR_TIER_LABELS={risk:'风险待核验',confirmed:'优先研究（多通道）',new:'新变化（待验证）'};
   const MARKET_LABELS={US:'美股',HK:'港股',KR:'韩股',CN:'A 股'};
   const CHANNEL_LABELS={webhook:'Webhook',feishu:'Webhook',browser:'浏览器',server:'服务端记录'};
   const STATUS_LABELS={sent:'已发送',failed:'发送失败',queued:'发送中',logged:'已记录',legacy:'历史记录'};
@@ -28,10 +28,10 @@
     $('browserEnabled').checked=localStorage.getItem('alert_browser')!=='0';
     $('stockEnabled').checked=settings.modules.stock.enabled!==false;
     $('etfEnabled').checked=settings.modules.etf.enabled!==false;
-    $('radarV2Enabled').checked=settings.modules.radar_v2?.enabled===true;
+    $('radarEnabled').checked=settings.modules.radar_v2?.enabled===true;
     renderChecks($('stockTiers'),settings.modules.stock.tiers,Object.fromEntries(STOCK_ACTIONS.map(x=>[x,STOCK_ACTION_LABELS[x]])));
     renderChecks($('etfTiers'),settings.modules.etf.tiers,Object.fromEntries(ETF_ACTIONS.map(x=>[x,ETF_ACTION_LABELS[x]])));
-    renderChecks($('radarV2Tiers'),settings.modules.radar_v2?.tiers||RADAR_V2_TIERS,Object.fromEntries(RADAR_V2_TIERS.map(x=>[x,RADAR_V2_TIER_LABELS[x]])));
+    renderChecks($('radarTiers'),settings.modules.radar_v2?.tiers||RADAR_TIERS,Object.fromEntries(RADAR_TIERS.map(x=>[x,RADAR_TIER_LABELS[x]])));
     renderIntegration();
   }
   function renderIntegration(){
@@ -46,7 +46,7 @@
     modules:{
       stock:{enabled:$('stockEnabled').checked,tiers:checkedValues($('stockTiers'))},
       etf:{enabled:$('etfEnabled').checked,tiers:checkedValues($('etfTiers'))},
-      radar_v2:{enabled:$('radarV2Enabled').checked,tiers:checkedValues($('radarV2Tiers'))},
+      radar_v2:{enabled:$('radarEnabled').checked,tiers:checkedValues($('radarTiers'))},
     },
   }}
   async function loadSettings(){const response=await fetch('/control/settings',{cache:'no-store'});if(!response.ok)throw new Error('配置读取失败');const data=await response.json();settings=data.settings;integration=data.webhook;$('settingsTime').textContent='更新于 '+fmtTime(data.updatedAt);renderSettings();}

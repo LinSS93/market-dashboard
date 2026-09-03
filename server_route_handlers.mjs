@@ -3,10 +3,10 @@
 // 设计目的：server.mjs 顶层执行 server.listen() 等副作用，测试不可直接 import。
 // 将路由处理逻辑提取到本模块（无副作用），server.mjs 和测试均可安全 import。
 //
-// 依赖：仅 radar_v2_schema.mjs（有 setRadarV2DbForTest 注入机制）。
+// 依赖：仅 radar_schema.mjs（有 setRadarDbForTest 注入机制）。
 //       generateFn 由调用方注入（server.mjs 传 generateCompanyProfile，测试传 mock）。
 
-import { getRadarV2Db } from './radar_v2_schema.mjs';
+import { getRadarDb } from './radar_schema.mjs';
 
 function companyProfileFailureStatus(result) {
   const status = Number(result?.http_status);
@@ -15,7 +15,7 @@ function companyProfileFailureStatus(result) {
 }
 
 /**
- * POST /radar_v2/company-profile 路由处理逻辑
+ * POST /radar/company-profile 路由处理逻辑
  *
  * P0 修复：从 radar_universe_members 获取 canonical 公司名（generateCompanyProfile 强制要求），
  * 并显式传递 forceRefresh（前端"重新生成"按钮传 true，首次生成传 false 走缓存）。
@@ -37,7 +37,7 @@ export async function handleCompanyProfilePost({ market, symbol, forceRefresh, g
     return { status: 500, body: { ok: false, error: 'generateFn is required' } };
   }
   try {
-    const db = getRadarV2Db();
+    const db = getRadarDb();
     const member = db.prepare(
       'SELECT name FROM radar_universe_members WHERE market = ? AND symbol = ? AND active = 1 ORDER BY updated_at DESC LIMIT 1'
     ).get(market, symbol);

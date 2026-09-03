@@ -89,7 +89,7 @@ function defineTools(deps) {
         },
         additionalProperties: false,
       },
-      handler: async ({ market, limit, tier }) => deps.getRadarV2TopCandidates({ market, limit: limit || 50, tier }),
+      handler: async ({ market, limit, tier }) => deps.getRadarTopCandidates({ market, limit: limit || 50, tier }),
     },
     {
       name: 'radar_v2_candidate_detail',
@@ -103,7 +103,7 @@ function defineTools(deps) {
         required: ['market', 'symbol'],
         additionalProperties: false,
       },
-      handler: async ({ market, symbol }) => deps.getRadarV2CandidateDetail(market, symbol),
+      handler: async ({ market, symbol }) => deps.getRadarCandidateDetail(market, symbol),
     },
     {
       name: 'radar_v2_runs',
@@ -116,7 +116,7 @@ function defineTools(deps) {
         },
         additionalProperties: false,
       },
-      handler: async ({ market, limit }) => deps.getRadarV2RunHistory({ market, limit: limit || 20 }),
+      handler: async ({ market, limit }) => deps.getRadarRunHistory({ market, limit: limit || 20 }),
     },
     {
       name: 'radar_v2_stats',
@@ -126,7 +126,7 @@ function defineTools(deps) {
         properties: {},
         additionalProperties: false,
       },
-      handler: async () => deps.getRadarV2ScanStats(),
+      handler: async () => deps.getRadarScanStats(),
     },
     {
       name: 'radar_v2_dossiers',
@@ -141,7 +141,7 @@ function defineTools(deps) {
         },
         additionalProperties: false,
       },
-      handler: async ({ market, status, channel, limit }) => deps.listRadarV2Dossiers({ market, status, channel, limit: limit || 50 }),
+      handler: async ({ market, status, channel, limit }) => deps.listRadarDossiers({ market, status, channel, limit: limit || 50 }),
     },
     {
       name: 'radar_v2_dossier_detail',
@@ -154,7 +154,7 @@ function defineTools(deps) {
         required: ['id'],
         additionalProperties: false,
       },
-      handler: async ({ id }) => deps.getRadarV2DossierDetail(Number(id)),
+      handler: async ({ id }) => deps.getRadarDossierDetail(Number(id)),
     },
     {
       name: 'radar_v2_opportunities',
@@ -168,7 +168,7 @@ function defineTools(deps) {
         },
         additionalProperties: false,
       },
-      handler: async ({ market, channel, limit }) => deps.listRadarV2Opportunities({ market, channel, limit: limit || 50 }),
+      handler: async ({ market, channel, limit }) => deps.listRadarOpportunities({ market, channel, limit: limit || 50 }),
     },
     {
       name: 'radar_v2_queue',
@@ -182,7 +182,7 @@ function defineTools(deps) {
         },
         additionalProperties: false,
       },
-      handler: async ({ market, limit, search }) => deps.listRadarV2ResearchQueue({ market, limit: limit || 30, search }),
+      handler: async ({ market, limit, search }) => deps.listRadarResearchQueue({ market, limit: limit || 30, search }),
     },
   ];
 }

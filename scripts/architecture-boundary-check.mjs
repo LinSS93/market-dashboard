@@ -43,13 +43,16 @@ assert(!controlHtml.includes('scenarioCollectionHealth') && !controlHtml.include
 assert(!controlHtml.includes('driftPanel') && !controlClient.includes('renderDrift') && !server.includes('signalDrift:getLatestSignalDriftReport'), 'control center does not surface laboratory signal-drift evaluation');
 assert(labHtml.includes('信号效果与漂移') && labHtml.includes('id="researchDriftPanel"') && labClient.includes('renderDrift') && stockEngine.includes('dashboard.signalDrift'), 'laboratory owns the read-only signal-drift evaluation');
 assert(labHtml.includes('线上实验样本') && labHtml.includes('id="researchRankingPanel"') && labClient.includes('renderResearchRanking') && stockEngine.includes('dashboard.researchRanking'), 'laboratory owns online samples and research-factor diagnostics');
-const navigationPages = ['app/land.html', 'app/stock.html', 'app/tracker.html', 'app/radar-v2.html', 'app/control.html', 'app/scenario-research.html'];
-assert(navigationPages.every(page => { const html = read(page); return html.indexOf('href="/radar-v2"') < html.indexOf('href="/lab"') && html.indexOf('href="/lab"') < html.indexOf('href="/control"'); }), 'every primary page places laboratory between Radar and Control Center');
-assert(!existsSync(resolve(root, 'radar_feedback.mjs')), 'radar_feedback.mjs is removed from the codebase');
-assert(!server.includes("from './radar_feedback.mjs'") && !server.includes('/radar/feedback/status') && !server.includes('/radar/feedback/trigger') && !server.includes('/radar/feedback/rollback') && !server.includes('/radar/score-validation'), 'server.mjs no longer hosts any v1 radar feedback / score-validation route');
-const retiredRadarV1Files = ['opportunity_radar.mjs', 'radar_adapters.mjs', 'radar_event_triage.mjs', 'radar_outcomes.mjs', 'radar_parser.mjs', 'radar_query_api.mjs', 'radar_schema.mjs', 'radar_scoring.mjs', 'radar_utils.mjs'];
+const navigationPages = ['app/land.html', 'app/stock.html', 'app/tracker.html', 'app/radar.html', 'app/control.html', 'app/scenario-research.html'];
+assert(navigationPages.every(page => { const html = read(page); return html.indexOf('href="/radar"') < html.indexOf('href="/lab"') && html.indexOf('href="/lab"') < html.indexOf('href="/control"'); }), 'every primary page places laboratory between Radar and Control Center');
+// 2026-09 radar v2 → radar 改名后，V2 模块占用了 V1 的部分文件名（radar_feedback /
+// radar_outcomes / radar_query_api / radar_schema / radar_scoring），V2 的反馈实验
+// 路由族 /radar/feedback/* 也与 V1 同名。V1 防回归改为特征断言：V1 独有的
+// score-validation 路由保持缺席，且 V2 的 feedback/apply 保持禁用（人工确认门槛）。
+assert(!server.includes('/radar/score-validation') && server.includes('feedback/apply 已禁用'), 'v1 score-validation route stays removed and v2 feedback apply remains disabled');
+const retiredRadarV1Files = ['opportunity_radar.mjs', 'radar_adapters.mjs', 'radar_event_triage.mjs', 'radar_parser.mjs', 'radar_utils.mjs'];
 assert(retiredRadarV1Files.every(file => !existsSync(resolve(root, file))), 'retired Radar V1 source modules are absent');
-assert(!retiredRadarV1Files.some(file => server.includes(`from './${file}'`)), 'server imports only Radar V2 runtime modules');
+assert(!retiredRadarV1Files.some(file => server.includes(`from './${file}'`)), 'server imports only Radar runtime modules');
 assert(stockJs.includes('settingsRiskAccountSize') && stockJs.includes('/stock/risk-config'), 'stock dashboard hosts the sole live risk-configuration UI (migrated from control center)');
 assert(!stockEngine.includes('url.pathname === "/stock/risk-budget"'), 'legacy risk-budget endpoint is removed');
 assert(!stockEngine.includes('"/research/long-term-sensitivity"') && !stockEngine.includes('"/stock/experiment-summary"') && !stockEngine.includes('"/stock/intraday-confirmation"') && !stockEngine.includes('"/stock/minute-coverage"') && !stockEngine.includes('"/research/atr-sensitivity"'), 'removed experiment/intraday/minute-coverage routes are gone from the stock handler');
@@ -58,7 +61,7 @@ assert(server.includes("p === '/scenario-research'") && server.includes("Locatio
 assert(!server.includes("p.startsWith('/research/') || p.startsWith('/lab/')") && !server.includes("p.startsWith('/lab/')"), 'server removes the retired /lab compatibility API alias');
 assert(boundaryDoc.includes('正式') && boundaryDoc.includes('Shadow') && boundaryDoc.includes('兼容'), 'architecture boundary document records the three runtime classes');
 assert(boundaryDoc.includes('stock_stage_price_plan.mjs') && boundaryDoc.includes('buildSignalProfileChartStudies') && decisionSystemDoc.includes('stagePlan'), 'architecture documents the stage-price and profile-chart ownership boundaries');
-assert(server.includes("'/radar_v2/") && server.includes('listRadarV2ResearchQueue'), 'server exposes Radar V2 research queue endpoints instead of legacy radar page routes');
+assert(server.includes("'/radar/") && server.includes('listRadarResearchQueue'), 'server exposes Radar V2 research queue endpoints instead of legacy radar page routes');
 assert(decisionSystemDoc.includes('它们不是第二套技术评分') && decisionSystemDoc.includes('不得弱化 `REDUCE/CLOSE`'), 'decision-system handover records conservative industry-risk boundaries');
 assert(labHtml.includes('机会阶段') && labHtml.includes('value="READY"') && labHtml.includes('value="RISK_OFF"') && labHtml.includes('历史旧口径（只读）') && labClient.includes("PROBE:'历史·试仓'"), 'laboratory separates current opportunity stages from read-only legacy cohorts');
 assert(stockEngine.includes('stock-signal-v2026.09.01-evidence-advisory-v1') && decisionSystemDoc.includes('opportunityStage') && decisionSystemDoc.includes('executionAction'), 'runtime and decision contract use the evidence-advisory engine identity');

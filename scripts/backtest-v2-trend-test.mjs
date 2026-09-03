@@ -10,8 +10,8 @@
 // 运行：node scripts/backtest-v2-trend-test.mjs
 
 import { evaluateEvent, summarizeResults, buildBucketVerdict } from './backtest-v2-trend.mjs';
-import { buildTrendDossierEnrichment } from '../radar_v2_dossier_enrichment.mjs';
-import { computeMetricsAt } from '../radar_v2_dossier_evaluator.mjs';
+import { buildTrendDossierEnrichment } from '../radar_dossier_enrichment.mjs';
+import { computeMetricsAt } from '../radar_dossier_evaluator.mjs';
 
 let pass = 0, fail = 0;
 function assert(cond, msg) {

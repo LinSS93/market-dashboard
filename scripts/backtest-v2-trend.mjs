@@ -42,12 +42,12 @@ const MIN_BARS = 65;  // 状态机要求的最小 K 线数
 const STEP_BARS = Math.max(args.minBars, MIN_BARS);
 
 // 延迟 import 避免循环依赖
-const { computeTransition, createInitialState, STATE_MACHINE_VERSION } = await import('../radar_v2_trend_state_machine.mjs');
-const { buildTrendDossierEnrichment } = await import('../radar_v2_dossier_enrichment.mjs');
-const { evaluateDossierConditions, computeMetricsAt } = await import('../radar_v2_dossier_evaluator.mjs');
-const { getBarsForSymbol, getRadarV2Db } = await import('../radar_v2_schema.mjs');
+const { computeTransition, createInitialState, STATE_MACHINE_VERSION } = await import('../radar_trend_state_machine.mjs');
+const { buildTrendDossierEnrichment } = await import('../radar_dossier_enrichment.mjs');
+const { evaluateDossierConditions, computeMetricsAt } = await import('../radar_dossier_evaluator.mjs');
+const { getBarsForSymbol, getRadarDb } = await import('../radar_schema.mjs');
 
-// 各市场基准（与 radar_v2_dossier_outcomes.mjs BENCHMARK_SYMBOLS 一致）
+// 各市场基准（与 radar_dossier_outcomes.mjs BENCHMARK_SYMBOLS 一致）
 // HK symbol 用 5 位格式（与 radar_daily_bars 一致：'02800'）
 const BENCHMARK_SYMBOLS = Object.freeze({ US: 'QQQ', HK: '02800', CN: '000300' });
 
@@ -56,7 +56,7 @@ const BENCHMARK_SYMBOLS = Object.freeze({ US: 'QQQ', HK: '02800', CN: '000300' }
 // ============================================================
 
 function loadSymbols(market) {
-  const db = getRadarV2Db();
+  const db = getRadarDb();
   const rows = db.prepare(`SELECT DISTINCT symbol FROM radar_v2_bars WHERE market = ? ORDER BY symbol`).all(market);
   return rows.map(r => r.symbol);
 }
@@ -71,10 +71,10 @@ function loadBars(market, symbol) {
 
 // P1 修复：基准 K 线从数据财富表 radar_daily_bars 读取
 // 原因：QQQ/2800/000300 等指数 ETF 在 radar_v2_bars（v2 专属缓存）中不存在，
-// 但在 radar_daily_bars（~1.04M 行数据财富）中可用。与 radar_v2_outcomes.mjs loadWealthBars 口径一致。
+// 但在 radar_daily_bars（~1.04M 行数据财富）中可用。与 radar_outcomes.mjs loadWealthBars 口径一致。
 let _benchBarsStmt = null;
 function loadBenchmarkBars(market, symbol) {
-  const db = getRadarV2Db();
+  const db = getRadarDb();
   if (!_benchBarsStmt) {
     _benchBarsStmt = db.prepare(
       'SELECT date, open, high, low, close, volume FROM radar_daily_bars WHERE market = ? AND symbol = ? ORDER BY date ASC'
@@ -525,7 +525,7 @@ function main() {
   // 写入 DB（可选）
   if (!args.noDb) {
     try {
-      const db = getRadarV2Db();
+      const db = getRadarDb();
       const now = Date.now();
       db.prepare(`INSERT INTO radar_backtest_reports (run_at, args_json, report_json, summary_json, alerts_json)
         VALUES (?, ?, ?, ?, ?)`).run(

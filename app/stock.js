@@ -1046,7 +1046,88 @@ function closeSettingsModal(){
   $('settingsModal').style.display = 'none';
 }
 
+// ===== 决策人格（全局默认偏好；已持仓标的被仓位绑定锁定，不跟随此设置） =====
+// settingsProfileLoaded：弹窗打开时从后端拉到的当前全局偏好；
+// settingsProfileDirty：用户在弹窗内改选但尚未保存的标记。
+let settingsProfileLoaded = 'balanced';
+let settingsProfileDirty = false;
+function syncSettingsProfileUI(profileId){
+  document.querySelectorAll('#settingsProfileGroup [data-profile-id]').forEach(btn => {
+    const active = btn.dataset.profileId === profileId;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-checked', String(active));
+  });
+}
+function bindSettingsProfileGroup(){
+  const group = $('settingsProfileGroup');
+  if (!group || group.dataset.bound === '1') return;
+  group.dataset.bound = '1';
+  group.addEventListener('click', ev => {
+    const btn = ev.target.closest('[data-profile-id]');
+    if (!btn || btn.dataset.profileId === settingsProfileLoaded) return;
+    settingsProfileDirty = true;
+    settingsProfileLoaded = btn.dataset.profileId;
+    syncSettingsProfileUI(settingsProfileLoaded);
+    // 不在此处提示“未保存”：保存状态统一由底部保存栏反馈，避免双重状态误导
+  });
+}
+async function loadSettingsProfilePreference(){
+  bindSettingsProfileGroup();
+  const state = $('settingsProfileState');
+  try {
+    const payload = await fetch('/stock/signal-profile', { cache: 'no-store' }).then(r => r.json());
+    if (!payload || !payload.ok) throw new Error(payload?.error || '加载失败');
+    settingsProfileLoaded = String(payload.preference?.profileId || 'balanced').toLowerCase();
+    // 部署级门控未开启时，切换只存储不生效——明确提示，避免“保存了但没效果”的静默陷阱
+    if (state) {
+      if (payload.selectorEnabled) { state.textContent = ''; state.className = 'save-state'; }
+      else { state.textContent = '人格切换未启用：需部署配置 STOCK_SIGNAL_PROFILE_SELECTOR_ENABLED=1 后重启生效'; state.className = 'save-state err'; }
+    }
+  } catch (e) {
+    if (state) { state.textContent = '人格偏好读取失败：' + (e.message || e); state.className = 'save-state err'; }
+  }
+  settingsProfileDirty = false;
+  syncSettingsProfileUI(settingsProfileLoaded);
+}
+async function saveSettingsProfilePreference(){
+  if (!settingsProfileDirty) return { ok: true, skipped: true };
+  try {
+    const res = await fetch('/stock/signal-profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol: null, profileId: settingsProfileLoaded }),
+    });
+    const payload = await res.json();
+    if (!res.ok || !payload.ok) throw new Error(payload?.error || ('HTTP ' + res.status));
+    settingsProfileDirty = false;
+    // 后端保存后已触发立即刷新；轮询轻量 GET 的 analysisEffective
+    // 直到分析缓存实际应用新人格。空闲时约 3-5s；若恰逢 60s 周期运行中，
+    // 需等周期结束+补跑（实测最长 ~20s），超时 45s 兜底。
+    const applied = await waitSettingsProfileApplied(settingsProfileLoaded, 45000);
+    // 等待期间后台轮询可能已把旧人格数据写入 lastAna（15s 客户端缓存），
+    // 使其失效，让保存流程末尾的 loadAll 强制真实拉取新人格信号并立即渲染。
+    invalidateAnalysisSnapshot();
+    return { ok: true, applied };
+  } catch (e) {
+    return { ok: false, error: e.message || String(e) };
+  }
+}
+async function waitSettingsProfileApplied(profileId, timeoutMs = 45000){
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const payload = await fetch('/stock/signal-profile', { cache: 'no-store' }).then(r => r.json());
+      if (payload?.ok && payload.analysisEffective === profileId) return true;
+    } catch {}
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  return false;
+}
+
 async function populateSettingsModal(){
+  // 决策人格（全局默认偏好，独立于看板本地偏好）
+  await loadSettingsProfilePreference();
+
   // 默认市场
   const marketsBox = $('settingsDefaultMarkets');
   const currentDefaults = readDefaultMarkets();
@@ -1220,16 +1301,30 @@ async function saveSettingsModal(){
   applyColumnVisibility();
   reSort();
 
+  // 决策人格偏好（全局默认；已持仓标的被仓位绑定锁定，此设置只对未持仓标的生效）
+  if (saveState && settingsProfileDirty) { saveState.textContent = '正在应用人格…'; saveState.className = 'save-state'; }
+  const profileRes = await saveSettingsProfilePreference();
+  if (!profileRes.ok) {
+    if (saveState) { saveState.textContent = '人格偏好保存失败：' + (profileRes.error || '失败'); saveState.className = 'save-state err'; }
+    setTimeout(() => { if (saveState) { saveState.textContent = ''; saveState.className = 'save-state'; } }, 2000);
+    return;
+  }
+  if (!profileRes.skipped) {
+    if (saveState) { saveState.textContent = profileRes.applied ? '人格已切换生效' : '人格已保存 · 信号刷新中'; saveState.className = 'save-state ok'; }
+  }
+
   // 风险配置（统一保存按钮提交，不弹独立 flash）
   const riskRes = await saveSettingsRiskConfig({ silent: true });
   if (!riskRes.ok) {
     if (saveState) { saveState.textContent = '风险配置保存失败：' + (riskRes.error || '失败'); saveState.className = 'save-state err'; }
   } else {
-    if (saveState) { saveState.textContent = '已保存'; saveState.className = 'save-state ok'; }
+    // 保留人格切换的生效反馈（等待阶段已轮询确认，未确认时提示刷新中）
+    const profileNote = profileRes.skipped ? '' : profileRes.applied ? ' · 人格已生效' : ' · 人格信号刷新中';
+    if (saveState) { saveState.textContent = '已保存' + profileNote; saveState.className = 'save-state ok'; }
     // 风险配置变更后需重新拉取列表以更新建议股数
     await loadAll();
   }
-  setTimeout(() => { if (saveState) { saveState.textContent = ''; saveState.className = 'save-state'; } }, 2000);
+  setTimeout(() => { if (saveState) { saveState.textContent = ''; saveState.className = 'save-state'; } }, 2500);
 }
 async function loadGroupChips(){
   const chipsEl = $('groupModalChips');

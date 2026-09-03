@@ -2,8 +2,8 @@
  * Seeds a deliberately fictional, local-only Radar demonstration.
  * It never fetches a provider, calls an LLM, or reuses production data.
  */
-import { getRadarV2Db } from '../radar_v2_schema.mjs';
-import { SCORING_PROFILE_VERSION } from '../radar_v2_scoring.mjs';
+import { getRadarDb } from '../radar_schema.mjs';
+import { SCORING_PROFILE_VERSION } from '../radar_scoring.mjs';
 
 const DEMO_ENABLED = process.env.MARKET_DASHBOARD_DEMO === '1';
 const CLEAR_ONLY = process.argv.includes('--clear');
@@ -39,7 +39,7 @@ if (!DEMO_ENABLED) {
   throw new Error("Demo seeding is opt-in. In PowerShell run: $env:MARKET_DASHBOARD_DEMO='1'; npm run demo:seed");
 }
 
-const db = getRadarV2Db();
+const db = getRadarDb();
 const now = Date.now();
 
 function tableExists(name) {
@@ -250,4 +250,4 @@ const seed = db.transaction(() => {
 });
 
 seed();
-console.log(`Seeded ${DEMO_SYMBOLS.length} fictional demo symbols. Start the app with npm start and open /radar-v2.`);
+console.log(`Seeded ${DEMO_SYMBOLS.length} fictional demo symbols. Start the app with npm start and open /radar.`);

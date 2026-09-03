@@ -39,6 +39,7 @@ import {
   STOCK_SIGNAL_PROFILE_SCHEMA_VERSION,
   getSignalProfile,
   getSignalProfileCatalog,
+  profileSelectorEnabled,
   profileScoreBand,
 } from "./stock_signal_profiles.mjs";
 import { scaleStockProfileTranches, STOCK_PROFILE_STRATEGY_VERSION } from "./stock_profile_strategy.mjs";
@@ -5367,7 +5368,8 @@ export function stockHandler(req, res) {
       const position = symbol ? computePositionFromEvents(symbol) : null;
       const selection = stockProfileState.resolveForPosition(symbol, position);
       res.writeHead(200, { 'Content-Type':'application/json' });
-      res.end(JSON.stringify({ ok:true, catalog:stockProfileState.getCatalog(), ...selection }));
+      // analysisEffective：当前分析缓存中未持仓标的实际生效的人格（前端保存后轮询此字段确认已生效）
+      res.end(JSON.stringify({ ok:true, catalog:stockProfileState.getCatalog(), analysisEffective:latestAnalysisEffectiveProfile(), ...selection }));
       return;
     }
     if (req.method === 'POST') {
@@ -5381,8 +5383,11 @@ export function stockHandler(req, res) {
           }
           const saved = stockProfileState.setPreference({ symbol, profileId:input.profileId, source:'api' });
           const selection = stockProfileState.resolveForPosition(symbol, symbol ? computePositionFromEvents(symbol) : null);
+          // 偏好已写入：立即触发一次分析刷新，人格切换数秒内生效，
+          // 不等下一个 60s 周期（analyzeAll 内部有 in-flight 去重与补跑）。
+          analyzeAll().catch((e) => console.error('[stock-engine] profile-switch analysis', e.message));
           res.writeHead(200, { 'Content-Type':'application/json' });
-          return res.end(JSON.stringify({ ok:true, saved, ...selection }));
+          return res.end(JSON.stringify({ ok:true, saved, analysisEffective:latestAnalysisEffectiveProfile(), ...selection }));
         } catch (error) {
           res.writeHead(400, { 'Content-Type':'application/json' });
           return res.end(JSON.stringify({ error:error.message }));
@@ -5507,7 +5512,7 @@ function computeOneAnalysis(sym, mkt) {
 let analysisInFlight = false;
 const yieldToEventLoop = () => new Promise(resolve => setImmediate(resolve));
 async function analyzeAll() {
-  if (analysisInFlight) return;
+  if (analysisInFlight) { analysisRefreshRequested = true; return; }
   analysisInFlight = true;
   try {
     // v1.4.3: 预刷新盘后数据缓存，确保 attachReliability 能读到最新 extPrice
@@ -5578,12 +5583,31 @@ async function analyzeAll() {
     commitLatestAnalysis(results);
     try { logSignalSnapshot(results); } catch (e) { console.error("[signal-log]", e.message); }
   } catch (e) { console.error("[stock-engine] analyzeAll", e.message); }
-  finally { analysisInFlight = false; }
+  finally {
+    analysisInFlight = false;
+    if (analysisRefreshRequested) {
+      analysisRefreshRequested = false;
+      analyzeAll().catch((e) => console.error("[stock-engine] requested analysis", e.message));
+    }
+  }
 }
 function getWatchlist() {
   try { return db.prepare("SELECT symbol, market, group_key FROM stock_watchlist ORDER BY added_at").all(); } catch { return []; }
 }
 function getLatestAnalysis() { return latestAnalysis || {}; }
+// 分析缓存中未持仓标的当前实际生效的人格：全部一致→该 id；不一致→'mixed'；无数据→null。
+// 供 /stock/signal-profile 的 analysisEffective 字段，前端保存人格后轮询确认生效。
+function latestAnalysisEffectiveProfile() {
+  if (!latestAnalysis) return null;
+  const ids = new Set();
+  for (const entry of Object.values(latestAnalysis)) {
+    const sp = entry?.signalProfiles;
+    if (!sp || sp.lockedByPosition) continue;
+    if (sp.effectiveProfileId) ids.add(sp.effectiveProfileId);
+  }
+  if (ids.size === 0) return null;
+  return ids.size === 1 ? [...ids][0] : 'mixed';
+}
 function getScenarioResearchOperationsStatus(options = {}) {
   const expectedMarkets = options.expectedMarkets || getWatchlist().map(row => row.market);
   return buildScenarioResearchOperationsStatus(db, { ...options, expectedMarkets });
@@ -5660,26 +5684,23 @@ export async function initStockEngine({ runBackgroundTask = null } = {}) {
 // invalidateActiveEtfPairCache 供 tracker_engine 通过
 // ESM live binding 反向引用（详见 tracker_engine.mjs 顶部说明）。
 // P2-6b: K 线域函数（fetchKlineArray / backfillAllDailyK / recordMinuteQuote /
-// aggregateIntradayBars / validateKline 等）已迁移至 stock_kline.mjs，这里 re-export 保持外部
-// API 稳定（虽然目前无外部模块直接从 stock_engine 导入这些函数，但作为防御性措施保留）。
-export { db, DB_PATH, computePositionFromEventRows, computePositionFromEvents, computeAllPositionsFromEvents, recalcTrackerPositionFromEvents, voidTradeEvent, invalidateActiveEtfPairCache, getWatchlist, getLatestAnalysis, getScenarioResearchOperationsStatus, getScenarioResearchSymbolSummary, getStockDisplayName, getStockPositions, recordStockSignalAudit, getStockSignalAudit, recordAlertAudit, updateAlertAudit, getAlertAudit, recordRuntimeMetric, getRuntimeMetrics, getSystemSetting, setSystemSetting, transitionsOnly, createDatabaseBackup, getBackupStatus, verifyDatabaseBackup, restoreDatabaseBackup, getMarketStateFor, isAnyMarketOpen, buildSwingDecisionContext, applyCriticalDataGate, getHistoricalAnalysisForDate, backfillPersonalSymbols, rebuildHistoricalSignalReplay, getHistoricalReplayStatus, SIGNAL_ENGINE_VERSION, COMPATIBLE_SIGNAL_ENGINE_VERSIONS,
+// aggregateIntradayBars / validateKline 等）已迁移至 stock_kline.mjs，此处仅 re-export
+// 仍有外部消费者的入口；零引用的防御性转发已按 2026-09 消融审查删除。
+export { db, DB_PATH, computePositionFromEventRows, computePositionFromEvents, computeAllPositionsFromEvents, recalcTrackerPositionFromEvents, voidTradeEvent, invalidateActiveEtfPairCache, getWatchlist, getLatestAnalysis, getScenarioResearchOperationsStatus, getScenarioResearchSymbolSummary, getStockDisplayName, getStockPositions, recordStockSignalAudit, getStockSignalAudit, recordAlertAudit, updateAlertAudit, getAlertAudit, recordRuntimeMetric, getRuntimeMetrics, getSystemSetting, setSystemSetting, transitionsOnly, createDatabaseBackup, getBackupStatus, verifyDatabaseBackup, restoreDatabaseBackup, getMarketStateFor, buildSwingDecisionContext, applyCriticalDataGate, getHistoricalAnalysisForDate, backfillPersonalSymbols, rebuildHistoricalSignalReplay, SIGNAL_ENGINE_VERSION, COMPATIBLE_SIGNAL_ENGINE_VERSIONS,
   scoreVolumePriceCorrelation,
   applyEventExecutionOverlay,
   resolveReplayStatus,
-  // D1 新增：风险配置 + API Key 管理
-  getRiskConfig, setRiskConfig, getEarningsPolicy, getApiKeys, getApiKey, setApiKey, deleteApiKey, maskApiKey, SUPPORTED_API_PROVIDERS,
+  // D1 新增：风险配置 + API Key 管理（getApiKey 供 llm_news 等外部模块使用；
+  // getRiskConfig/setRiskConfig/getApiKeys/setApiKey/maskApiKey/SUPPORTED_API_PROVIDERS
+  // 仅本模块内部使用，2026-09 消融审查后不再导出）
+  getEarningsPolicy, getApiKey, deleteApiKey,
   // P2-6b: 供 stock_kline.mjs 通过 ESM live binding 反向引用
   marketLocalToday, benchmarkFor,
   // P2-6c: 供 stock_backtest.mjs 通过 ESM live binding 反向引用
   analyzeRowsForBacktest,
   // C1 修订：供 server.mjs computePair 为不在 watchlist 的 tracker ETF 兜底计算分析
   analyzeDaily,
-  // P2-6b: K 线域 re-export（来源：stock_kline.mjs）
-  insertKline, getKline, countKline, deleteKline,
-  insertQuoteTick, getPreviousMinuteVolume, getMinuteBar, insertMinuteBar, updateMinuteBar,
-  badKline,
-  validateKline, auditStoredKline, upsertTodayKline, insertKlineRows,
-  marketMinuteParts, recordMinuteQuote, aggregateIntradayBars,
-  fetchKlineArray, fetchKlineSinaCN, fetchKlineNaver, fetchKlineYahoo,
-  loadSeedKline, backfillDailyK, backfillAllDailyK,
+  // P2-6b: K 线域 re-export（来源：stock_kline.mjs）：仅保留 backtest 脚本在用的入口；
+  // 其余零引用转发已按 2026-09 消融审查删除，消费方一律直连 stock_kline.mjs
+  getKline, countKline, auditStoredKline,
 };

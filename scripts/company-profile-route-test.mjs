@@ -1,14 +1,14 @@
-// 离线验证 POST /radar_v2/company-profile 的 HTTP 失败语义。
+// 离线验证 POST /radar/company-profile 的 HTTP 失败语义。
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { setRadarV2DbForTest, clearRadarV2DbForTest } from '../radar_v2_schema.mjs';
+import { setRadarDbForTest, clearRadarDbForTest } from '../radar_schema.mjs';
 import { handleCompanyProfilePost } from '../server_route_handlers.mjs';
 
 let assertions = 0;
 function check(condition, message) { assert.ok(condition, message); assertions += 1; }
 
 const db = new Database(':memory:');
-setRadarV2DbForTest(db);
+setRadarDbForTest(db);
 try {
   const now = Date.now();
   db.prepare('INSERT INTO radar_universes (id, market, provider, updated_at) VALUES (1, ?, ?, ?)').run('US', 'test', now);
@@ -49,7 +49,7 @@ try {
   check(unknown.status === 422 && unknown.body.error === 'company_identity_unavailable', '身份未核验保持 422');
   check(called === false, '身份未核验不调用模型');
 } finally {
-  clearRadarV2DbForTest();
+  clearRadarDbForTest();
   db.close();
 }
 

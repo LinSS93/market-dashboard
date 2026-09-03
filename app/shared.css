@@ -111,36 +111,6 @@ small {
   line-height: 1.15;
 }
 
-.banner,
-.riskbox,
-.reasons,
-.posrow {
-  border-radius: var(--radius);
-}
-
-.posrow {
-  flex-wrap: wrap;
-}
-
-.posrow .fld {
-  display: flex;
-  flex: 0 1 140px;
-  flex-direction: column;
-  gap: 4px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.posrow input {
-  width: 100%;
-  min-width: 0;
-  padding: 7px 9px;
-  border: 1px solid var(--ws-line-strong);
-  border-radius: 6px;
-  color: var(--text);
-  font-size: 13px;
-}
-
 .chart {
   height: 220px;
 }
