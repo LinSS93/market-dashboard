@@ -156,6 +156,17 @@ function normSignal(s) {
   if (!s) return null;
   return DashboardActions.normalize(s);
 }
+// 股票推送归一化与共享词表解耦：看板执行动作（OPEN/ADD/REDUCE/CLOSE）不在
+// action-taxonomy 词表内（REDUCE 在 ETF 语境须映射 TRIM/AVOID，无法直接入表），
+// 曾经词表兜底会把 OPEN/REDUCE/CLOSE 全部归一成 WATCH/TRIM，导致档位永不匹配、推送静默失效。
+const STOCK_ALERT_TIERS = new Set(DEFAULT_ALERT_SETTINGS.stockTiers);
+const STOCK_ALERT_LEGACY = { PROBE:'OPEN', TRIM:'REDUCE', EXIT:'CLOSE' };
+function normStockSignal(s) {
+  const v = String(s || '').trim().toUpperCase();
+  if (!v) return null;
+  const mapped = STOCK_ALERT_LEGACY[v] || v;
+  return STOCK_ALERT_TIERS.has(mapped) ? mapped : null;
+}
 
 // 经 curl 子进程推送 Webhook（-d @file 避免 shell 引号问题）。异步，不冻结事件循环。
 function validateWebhook(value) {
@@ -256,7 +267,7 @@ function pushFeishu(text) {
 
 // type: 'etf' | 'stock'；key 唯一标识标的；rawSignal 原始信号（可能含空格，如 'STRONG SELL'）
 function maybeAlert(type, key, symbol, rawSignal, detail, allowNotify = true, meta = {}) {
-  const signal = normSignal(rawSignal);
+  const signal = type === 'etf' ? normSignal(rawSignal) : normStockSignal(rawSignal);
   if (!signal) return;
   const module=type==='etf'?'etf':'stock';
   const set = _getControlSettings().modules[module].tiers;
