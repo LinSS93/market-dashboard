@@ -1,32 +1,40 @@
 #!/usr/bin/env node
 
-import { buildSwingDecision, resolveFinalSwingState, applyCriticalDataGate, buildSignalDriftReport } from '../stock_engine.mjs';
-import { computeCompositeScore, scoreToState } from '../signal_scoring.mjs';
+import {
+  buildSwingDecisionContext,
+  applyCriticalDataGate,
+  applyEventExecutionOverlay,
+  buildSignalDriftReport,
+} from '../stock_engine.mjs';
+import { computeCompositeScore } from '../signal_scoring.mjs';
+import { arbitrateStockDecision, buildStockDecisionExplanation } from '../stock_decision_arbiter.mjs';
 
 const failures = [];
-function check(cond, label) {
-  if (cond) console.log('[PASS] ' + label);
+function check(condition, label) {
+  if (condition) console.log('[PASS] ' + label);
   else { failures.push(label); console.error('[FAIL] ' + label); }
 }
 
 function analysis(overrides = {}) {
-  return {
-    market: 'US', currentPrice: 100, atr: 5, sma20: 100, bollLower: 92,
-    bollUpper: 110, rsi: 52, sma20Dist: 0, bollPctB: 0.5, score: 0.7,
-    daily: true, asOfDate: '2026-07-10',
+  const base = {
+    market: 'US', currentPrice: 100, atr: 5, sma20: 98, rsi12: 52,
+    bollLower: 92, bollUpper: 110, sma20Dist: 0, bollPctB: 0.5,
+    score: 0.7, signal: 'BUY', daily: true, asOfDate: '2026-07-10',
+    marketRegime: { key: 'range' },
     tradePlan: {
-      action: 'BUY', actionLabel: '买入', stopLoss: 90, takeProfit: 112,
+      action: 'BUY', actionLabel: '买入形态', stopLoss: 90, takeProfit: 112,
       setup: { key: 'trend_pullback', label: '趋势回踩' },
+      pricePlanReferenceMa: 98,
       marketRegime: { key: 'range', label: '基准震荡' },
       dataQuality: { level: 'ok' }, risk: { level: 'low' },
     },
-    ...overrides,
   };
+  return { ...base, ...overrides, tradePlan: { ...base.tradePlan, ...(overrides.tradePlan || {}) } };
 }
 
-function reliability(action = 'BUY', overrides = {}) {
+function reliability(overrides = {}) {
   return {
-    effectiveAction: action, reliabilityScore: 65,
+    effectiveAction: 'BUY', reliabilityScore: 65,
     calibration: { probabilityPct: 60, expectancyPct: 2, riskUnitPct: 1 },
     rollingAudit: { level: 'pass' },
     poolThresholdAudit: { rollingAudit: { level: 'pass' } },
@@ -34,68 +42,127 @@ function reliability(action = 'BUY', overrides = {}) {
   };
 }
 
-const probe = buildSwingDecision(analysis(), reliability(), { shares: 0, cost: 0, target_shares: 100 });
-check(probe.state === 'PROBE', 'qualified empty position becomes PROBE');
-check(probe.recommendedShares === 25, 'PROBE converts 25% target position to shares');
+function decide(ai, rel = reliability(), position = null, executionRisk = { score: 0, level: 'low' }) {
+  const context = buildSwingDecisionContext(ai, rel, position);
+  const scoreResult = computeCompositeScore({ analysis: ai, reliability: rel, executionRisk });
+  const arbitration = arbitrateStockDecision({ analysis: ai, context, scoreResult, executionRisk });
+  return {
+    ...context, ...arbitration,
+    summary: arbitration.reason,
+    compositeScore: scoreResult.compositeScore,
+    scoreFactors: scoreResult.factors,
+    actionable: ['OPEN', 'ADD', 'REDUCE', 'CLOSE'].includes(arbitration.executionAction),
+  };
+}
 
-const add = buildSwingDecision(analysis(), reliability('ADD'), { shares: 25, cost: 96, target_shares: 100 });
-check(add.state === 'ADD', 'qualified existing position becomes ADD');
-check(add.recommendedShares === 25, 'ADD respects target position and tranche size');
+const probe = decide(analysis());
+check(probe.opportunityStage === 'READY' && probe.executionAction === 'OPEN' && probe.tranchePct > 0, 'ready bullish empty position becomes READY + OPEN');
 
-const trim = buildSwingDecision(analysis({ currentPrice: 116, rsi: 76 }), reliability('HOLD'), { shares: 100, cost: 100, target_shares: 100 });
-check(trim.state === 'TRIM' && trim.tranchePct === 25, 'profitable overheat becomes 25% TRIM');
-check(trim.recommendedShares >= 1 && trim.recommendedShares <= 100, 'TRIM converts the configured current-position percentage to a valid share quantity');
+const add = decide(analysis(), reliability(), { shares: 25, cost: 96, target_shares: 100 });
+check(add.opportunityStage === 'READY' && add.executionAction === 'ADD' && add.tranchePct > 0, 'ready bullish held position becomes READY + ADD');
 
-const exit = buildSwingDecision(analysis({ currentPrice: 80 }), reliability('HOLD'), { shares: 100, cost: 100, target_shares: 100 });
-check(exit.state === 'EXIT' && exit.recommendedShares === 100, 'invalidation breach becomes full EXIT');
+const trim = decide(analysis({ currentPrice: 116, rsi12: 76 }), reliability(), { shares: 100, cost: 100 });
+check(trim.opportunityStage === 'BLOCKED' && trim.executionAction === 'REDUCE' && trim.tranchePct === 30, 'profitable RSI12 overheat becomes BLOCKED + REDUCE');
 
-const avoid = buildSwingDecision(analysis(), reliability('SELL'), { shares: 0, cost: 0, target_shares: 100 });
-check(avoid.state === 'PROBE' && avoid.actionable,
-  'base technical plan is not overridden by reliability action; reliability is applied through the scoring layer');
+const exit = decide(analysis({ currentPrice: 80 }), reliability(), { shares: 100, cost: 100 });
+check(exit.opportunityStage === 'RISK_OFF' && exit.executionAction === 'CLOSE' && exit.tranchePct === 100 && exit.safetyNet, 'invalidation breach becomes RISK_OFF + CLOSE');
 
-const failed = buildSwingDecision(analysis(), reliability('BUY', { rollingAudit: { level: 'fail' } }), { shares: 0, cost: 0, target_shares: 100 });
-check(failed.state === 'WATCH', 'failed out-of-sample validation blocks entry');
+const failed = decide(analysis(), reliability({ rollingAudit: { level: 'fail' } }));
+check(failed.opportunityStage === 'READY' && failed.executionAction === 'OPEN'
+  && failed.executionReadiness.status === 'ready'
+  && failed.executionReadiness.validationEvidence?.level === 'weak',
+  'explicit failed historical validation remains advisory and does not veto a ready setup');
 
-const failedReliability = reliability('BUY', { rollingAudit: { level: 'fail' } });
-const failedBase = buildSwingDecision(analysis(), failedReliability, { shares: 0, cost: 0, target_shares: 100 });
-const failedScore = computeCompositeScore({ analysis:analysis(), reliability:failedReliability, executionRisk:{ score:0, level:'low' }, longTermTrend:null });
-const failedState = scoreToState(failedScore.compositeScore, { hasPosition:false, cur:100, sma20:100, atr:5, marketRegime:'range' });
-const failedFinal = resolveFinalSwingState({ analysis:analysis(), baseDecision:failedBase, scoreState:failedState, scoreResult:failedScore, hasPosition:false });
-check(failedState.state === 'PROBE' && failedFinal.state === 'WATCH'
-  && failedFinal.executionReadiness.status === 'validation_blocked',
-  'failed out-of-sample validation still blocks a strong research score from opening a position');
-
-const highRiskAnalysis = analysis({
-  tradePlan: { ...analysis().tradePlan, risk: { level: 'high', label: '高' } },
+const pooledFailure = decide(analysis(), reliability({
+  calibration: { level: 'fail', probabilityPct: 42, expectancyPct: -1 },
+  poolThresholdAudit: { rollingAudit: { level: 'fail' } },
+}));
+const pooledFailureExplanation = buildStockDecisionExplanation({
+  ...pooledFailure,
+  executionBlockers: [],
 });
-const highRiskBase = buildSwingDecision(highRiskAnalysis, reliability(), { shares: 0, cost: 0, target_shares: 100 });
-const highRiskScore = computeCompositeScore({ analysis:highRiskAnalysis, reliability:reliability(), executionRisk:{ score:0, level:'low' }, longTermTrend:null });
-const highRiskState = scoreToState(highRiskScore.compositeScore, { hasPosition:false, cur:100, sma20:100, atr:5, marketRegime:'range' });
-const highRiskFinal = resolveFinalSwingState({ analysis:highRiskAnalysis, baseDecision:highRiskBase, scoreState:highRiskState, scoreResult:highRiskScore, hasPosition:false });
-check(highRiskState.state === 'PROBE' && highRiskFinal.state === 'WATCH'
-  && highRiskFinal.executionReadiness.status === 'defer',
-  'high technical risk still defers a strong research score from opening a position');
+check(pooledFailure.opportunityStage === 'READY' && pooledFailure.executionAction === 'OPEN'
+  && pooledFailure.executionReadiness.validationEvidence?.level === 'weak'
+  && pooledFailure.executionReadiness.validationEvidence?.reasons.length === 1
+  && pooledFailure.summary.includes('历史验证偏弱'),
+  'pooled failure is counted once as weak research evidence while the ready action remains');
+check(pooledFailureExplanation.blockingReasons.length === 0
+  && pooledFailureExplanation.nextUpgradeCondition?.includes('再评估加仓'),
+  'weak historical evidence is not presented as an execution blocker');
 
-const riskOffValidationReliability = reliability('BUY', { rollingAudit: { level: 'fail' } });
-const riskOffValidationAnalysis = analysis({
-  tradePlan: { ...analysis().tradePlan, action:'SELL', actionLabel:'卖出', setup:{ key:'risk_off', label:'破位风控' } },
+const unstable = decide(analysis(), reliability({ rollingAudit: { level: 'unstable' } }));
+check(unstable.opportunityStage === 'READY' && unstable.executionAction === 'OPEN'
+  && unstable.executionReadiness.validationEvidence?.level === 'caution',
+  'unstable validation remains advisory rather than a hard block');
+
+const coldStart = decide(analysis(), null);
+check(coldStart.opportunityStage === 'READY' && coldStart.executionAction === 'OPEN'
+  && coldStart.executionReadiness.validationEvidence?.level === 'insufficient',
+  'missing historical evaluation cannot leave a new installation idle when the current setup is ready');
+
+const highRisk = decide(analysis({ tradePlan: { risk: { level: 'high', label: '高' } } }));
+check(highRisk.opportunityStage === 'BLOCKED' && highRisk.executionAction === 'NONE' && highRisk.executionReadiness.status === 'defer',
+  'idiosyncratic high risk defers a ready technical signal');
+
+const signedBear = decide(analysis({
+  score: -0.41, signal: 'SELL',
+  tradePlan: { action: 'REDUCE', actionLabel: '减仓', setup: { key: 'none', label: '趋势偏弱' } },
+}));
+check(signedBear.compositeScore === 0 && signedBear.opportunityStage === 'RISK_OFF' && signedBear.executionAction === 'NONE'
+  && signedBear.technicalDirection?.key === 'bearish',
+  'negative direction survives positive-score clamping');
+
+const weakHeld = decide(analysis({
+  score: 0, signal: 'NEUTRAL',
+  tradePlan: { action: 'WAIT', actionLabel: '等待', setup: { key: 'none', label: '等待确认' } },
+}), reliability(), { shares: 100, cost: 90 });
+check(weakHeld.compositeScore === 0 && weakHeld.executionAction === 'HOLD',
+  'a zero research score alone does not manufacture a trim');
+
+const longTermBear = decide(analysis({
+  longTermTrend: { key: 'bear', label: '长期下行', sma120: 95, sma200: 105, roc90: -10, slope120: -2 },
+}));
+check(longTermBear.opportunityStage === 'BLOCKED' && longTermBear.executionAction === 'NONE' && longTermBear.label === '看多受阻',
+  'long-term bearish structure cannot be bypassed by the research score');
+
+const longTermBearHeld = decide(analysis({
+  longTermTrend: { key: 'bear', label: '长期下行', sma120: 95, sma200: 105, roc90: -10, slope120: -2 },
+}), reliability(), { shares: 100, cost: 90 });
+check(longTermBearHeld.opportunityStage === 'RISK_OFF' && longTermBearHeld.executionAction === 'REDUCE' && longTermBearHeld.tranchePct === 30,
+  'a held long-term bear rallying to SMA120 produces the intended trim');
+
+const missingQuote = applyCriticalDataGate(exit, { result: analysis(), quote: null, market: 'US' });
+check(missingQuote.signalAvailable === false && missingQuote.exitPending && missingQuote.executionAction === 'CLOSE'
+  && missingQuote.notifyEligible && !missingQuote.actionable,
+  'missing quote blocks execution but preserves an exit-pending alert');
+const cachedQuote = applyCriticalDataGate(probe, { result: analysis(), quote: { price: 100, source: 'sqlite-cache', stale: true }, market: 'US' });
+check(cachedQuote.signalAvailable === false && cachedQuote.dataGate.reasons.some(reason => reason.includes('缓存')),
+  'cache-only quote cannot produce a formal signal');
+const validQuote = applyCriticalDataGate(probe, { result: analysis(), quote: { price: 100, source: 'tencent', stale: false }, market: 'US' });
+check(validQuote.signalAvailable === true && validQuote.executionAction === 'OPEN', 'valid critical inputs preserve the formal action');
+
+const earningsBlocked = applyEventExecutionOverlay(validQuote, {
+  earnings: { days_to_earnings: 1, is_fresh: true, event_gate_verified: true, entry_gate_eligible: true },
+  groupRisk: null, policy: { stockEntryBlackoutDays: 1 },
 });
-const riskOffValidationBase = buildSwingDecision(riskOffValidationAnalysis, riskOffValidationReliability, { shares: 0, cost: 0, target_shares: 100 });
-const riskOffValidationScore = computeCompositeScore({ analysis:riskOffValidationAnalysis, reliability:riskOffValidationReliability, executionRisk:{ score:0, level:'low' }, longTermTrend:null });
-const riskOffValidationState = scoreToState(riskOffValidationScore.compositeScore, { hasPosition:false, cur:100, sma20:100, atr:5, marketRegime:'range' });
-const riskOffValidationFinal = resolveFinalSwingState({ analysis:riskOffValidationAnalysis, baseDecision:riskOffValidationBase, scoreState:riskOffValidationState, scoreResult:riskOffValidationScore, hasPosition:false });
-check(riskOffValidationFinal.state === 'AVOID' && riskOffValidationFinal.executionReadiness.status === 'risk_off',
-  'an explicit technical sell remains AVOID even when validation is also unavailable');
+check(earningsBlocked.opportunityStage === 'BLOCKED' && earningsBlocked.executionAction === 'NONE' && earningsBlocked.preEventExecutionAction === 'OPEN'
+  && earningsBlocked.eventGate?.triggered,
+  'verified imminent earnings can only downgrade a new entry');
+const unverifiedEarnings = applyEventExecutionOverlay(validQuote, {
+  earnings: { days_to_earnings: 1, is_fresh: false, event_gate_verified: false, entry_gate_eligible: false },
+  policy: { stockEntryBlackoutDays: 1 },
+});
+check(unverifiedEarnings.executionAction === 'OPEN' && !unverifiedEarnings.eventGate?.triggered,
+  'unverified or stale earnings never block an entry');
+const groupBlocked = applyEventExecutionOverlay(validQuote, {
+  groupRisk: { ok: true, level: 'high', coverage: { status: 'ready' }, items: [{ riskScope: 'industry', keyReasoning: '供应链中断' }] },
+});
+check(groupBlocked.opportunityStage === 'BLOCKED' && groupBlocked.executionAction === 'NONE' && groupBlocked.eventGate?.blockers?.[0]?.key === 'group_news_risk',
+  'qualified high group risk can only downgrade a new entry');
 
-const missingQuote = applyCriticalDataGate(exit, { result:analysis(), quote:null, market:'US' });
-check(missingQuote.signalAvailable === false && missingQuote.exitPending && missingQuote.state === 'EXIT' && missingQuote.notifyEligible && !missingQuote.actionable, 'missing quote blocks execution but preserves an exit-pending alert');
-const cachedQuote = applyCriticalDataGate(probe, { result:analysis(), quote:{price:100,source:'sqlite-cache',stale:true}, market:'US' });
-check(cachedQuote.signalAvailable === false && cachedQuote.dataGate.reasons.some(x=>x.includes('缓存')), 'cache-only quote cannot produce a formal signal');
-const validQuote = applyCriticalDataGate(probe, { result:analysis(), quote:{price:100,source:'tencent',stale:false}, market:'US' });
-check(validQuote.signalAvailable === true && validQuote.state === 'PROBE', 'valid critical inputs preserve the formal signal');
 const driftReport = buildSignalDriftReport();
-check(['stable','warning','provisional_drift','warming_up','insufficient'].includes(driftReport.status), 'fixed signal drift report always exposes an explicit cold-start or formal status');
-check(!driftReport.asOfDate || [1,3,5,10,20].every(h => driftReport.current?.byHorizon?.[h]), 'signal drift report keeps the fixed 1/3/5/10/20-day horizons');
+check(['stable', 'warning', 'provisional_drift', 'warming_up', 'insufficient'].includes(driftReport.status),
+  'signal drift report exposes an explicit cold-start or formal status');
 check(driftReport.autoTuningEligible === false, 'signal drift reporting never authorizes automatic weight changes');
 
 if (failures.length) process.exit(1);

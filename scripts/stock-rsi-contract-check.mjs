@@ -34,6 +34,10 @@ check(!engine.includes('rsi14') && !engine.includes('RSI14'),
   'stock signal engine must not retain an RSI14 input or label');
 check(engine.includes('rsiWilder(closes, RSI_PERIODS.decision)') && engine.includes('rsi12'),
   'formal daily voting must calculate and use RSI12');
+check(engine.includes('rsi: rsi12, macdHist')
+  && engine.includes("selectedProfileId === 'responsive' ? analysis?.rsi6")
+  && engine.includes(": analysis?.rsi12"),
+  'each strategy uses its declared RSI period and the balanced formal setup remains RSI12');
 check(engine.includes('rsiWilder(closes, RSI_PERIODS.fast)') && engine.includes('rsiWilder(closes, RSI_PERIODS.slow)'),
   'daily analysis must expose RSI6 and RSI24 alongside the formal RSI12');
 check(stockUi.includes("rsi12:'RSI12'") && stockUi.includes("rsi24:'RSI24'"),

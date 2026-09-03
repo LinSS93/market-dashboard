@@ -11,8 +11,8 @@ function event(index, market = 'US', symbol = 'TEST') {
   return {
     market, symbol, date: `2026-01-${String(index + 1).padStart(2, '0')}`, barIndex:index,
     signalDate:`2026-01-${String(index + 1).padStart(2, '0')}`, signalIndex:index,
-    scenarioContractVersion:'scenario-path-v1', outcomeContractVersion:'next-session-open-v1',
-    kind:'active_long', state:'PROBE', mature:true, finalStatus:'target_hit',
+    scenarioContractVersion:'scenario-path-v2-stage-action', outcomeContractVersion:'next-session-open-v1',
+    kind:'active_long', state:'READY', mature:true, finalStatus:'reassessment_hit',
     activation:{ index:index + 1, date:`2026-02-${String(index + 1).padStart(2, '0')}` },
     forward:{ execution:{ entryIndex:index + 1, date:`2026-02-${String(index + 1).padStart(2, '0')}`, price:100 } },
   };

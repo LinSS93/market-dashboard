@@ -21,7 +21,7 @@ const engine = requestedEngine || (allowLatest ? db.prepare(`SELECT engine_versi
 
 if (!engine) {
   console.log('请显式指定要审计的引擎，例如：');
-  console.log('  node scripts/audit-stock-signal-value.mjs --engine=stock-signal-v2026.08.20-scoring-v2.3.0-neutral-low-score');
+  console.log('  node scripts/audit-stock-signal-value.mjs --engine=stock-signal-v2026.08.28-scoring-v2.5.0-safety-event-overlay');
   console.log('如只想查看数据库最近一次记录，可额外使用 --latest；不同引擎版本不能混合。');
   process.exit(0);
 }

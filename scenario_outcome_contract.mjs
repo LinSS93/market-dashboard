@@ -7,11 +7,10 @@
 
 import { OUTCOME_CONTRACT_VERSION, calculateForwardOutcomes, resolveNextSessionExecution } from './outcome_contract.mjs';
 
-export const SCENARIO_OUTCOME_CONTRACT_VERSION = 'scenario-path-v1';
+export const SCENARIO_OUTCOME_CONTRACT_VERSION = 'scenario-path-v2-stage-action';
 
-const ACTIVE_LONG_STATES = new Set(['PROBE', 'ADD', 'HOLD']);
-const RISK_STATES = new Set(['TRIM', 'EXIT', 'AVOID']);
-const RISK_ACTIONS = new Set(['SELL', 'REDUCE', 'TRIM', 'EXIT', 'AVOID']);
+const ACTIVE_LONG_ACTIONS = new Set(['OPEN', 'ADD', 'HOLD']);
+const WAITING_STAGES = new Set(['FORMING', 'AWAIT_CONFIRMATION', 'BLOCKED']);
 const DEFAULT_FORWARD_HORIZONS = Object.freeze([5, 10, 20]);
 
 function positiveNumber(value) {
@@ -38,8 +37,27 @@ function snapshotZones(decision) {
   return {
     confirmation: positiveNumber(zones.confirmation),
     invalidation: positiveNumber(zones.invalidation),
-    target1: positiveNumber(zones.target1),
+    reassessment: positiveNumber(zones.reassessment ?? zones.target1),
   };
+}
+
+// Historical scenario snapshots are audit records, not current decision
+// inputs. Mapping is deliberately isolated here so old cohorts remain
+// readable without restoring the retired runtime state machine.
+function scenarioDecisionIdentity(decision) {
+  const currentStage = String(decision?.opportunityStage || '').trim().toUpperCase();
+  const currentAction = String(decision?.executionAction || '').trim().toUpperCase();
+  if (currentStage || currentAction) return {
+    opportunityStage: currentStage || 'DATA_UNAVAILABLE',
+    executionAction: currentAction || 'NONE',
+  };
+  const legacy = String(decision?.state || '').trim().toUpperCase();
+  const opportunityStage = ['PROBE', 'ADD'].includes(legacy) ? 'READY'
+    : ['TRIM', 'EXIT', 'AVOID'].includes(legacy) ? 'RISK_OFF'
+      : legacy === 'WATCH' || legacy === 'HOLD' ? 'FORMING' : 'DATA_UNAVAILABLE';
+  const executionAction = legacy === 'PROBE' ? 'OPEN' : legacy === 'TRIM' ? 'REDUCE'
+    : legacy === 'EXIT' ? 'CLOSE' : ['ADD', 'HOLD'].includes(legacy) ? legacy : 'NONE';
+  return { opportunityStage, executionAction };
 }
 
 function resultBase({ decision, signalBar, signalIndex, classification, validSessions, settlementSessions }) {
@@ -47,8 +65,8 @@ function resultBase({ decision, signalBar, signalIndex, classification, validSes
     scenarioContractVersion: SCENARIO_OUTCOME_CONTRACT_VERSION,
     outcomeContractVersion: OUTCOME_CONTRACT_VERSION,
     kind: classification.kind,
-    state: classification.state,
-    sourceAction: classification.sourceAction,
+    state: classification.opportunityStage,
+    sourceAction: classification.executionAction,
     signalDate: signalBar?.date || null,
     signalIndex,
     validSessions,
@@ -87,7 +105,7 @@ function pickClose(bar) {
   return positiveNumber(bar?.close);
 }
 
-function evaluateActiveSettlement({ rows, activationIndex, invalidation, target1, settlementSessions }) {
+function evaluateActiveSettlement({ rows, activationIndex, invalidation, reassessment, settlementSessions }) {
   const lastIndex = rows.length - 1;
   const endIndex = activationIndex + settlementSessions - 1;
   const limit = Math.min(lastIndex, endIndex);
@@ -98,7 +116,7 @@ function evaluateActiveSettlement({ rows, activationIndex, invalidation, target1
     // Daily OHLC cannot reveal intraday order. In an ambiguous bar,
     // invalidation wins; this is deliberately conservative.
     if (close != null && close <= invalidation) return { status: 'invalidated', index, date: bar.date, endIndex };
-    if (high != null && high >= target1) return { status: 'target_hit', index, date: bar.date, endIndex };
+    if (high != null && high >= reassessment) return { status: 'reassessment_hit', index, date: bar.date, endIndex };
   }
   if (lastIndex >= endIndex) return { status: 'unresolved', index: endIndex, date: rows[endIndex]?.date || null, endIndex };
   return { status: 'pending', index: null, date: null, endIndex };
@@ -122,20 +140,25 @@ function activationFor(rows, signalIndex, fallbackPrice) {
  * no-position reconstruction cannot otherwise surface TRIM/EXIT conditions.
  */
 export function classifyScenarioDecision(decision) {
-  const state = String(decision?.state || '').trim().toUpperCase();
-  const sourceAction = String(decision?.sourceAction || '').trim().toUpperCase();
+  const { opportunityStage, executionAction } = scenarioDecisionIdentity(decision);
   const zones = snapshotZones(decision);
-  if (!decision || !state) return { kind: 'insufficient', state: state || null, sourceAction: sourceAction || null, reason: 'missing_swing_decision' };
+  if (!decision || opportunityStage === 'DATA_UNAVAILABLE') return { kind: 'insufficient', opportunityStage, executionAction, reason: 'missing_swing_decision' };
   if (!zones.confirmation || !zones.invalidation || zones.confirmation <= zones.invalidation) {
-    return { kind: 'insufficient', state, sourceAction, reason: 'invalid_confirmation_or_invalidation_zone' };
+    return { kind: 'insufficient', opportunityStage, executionAction, reason: 'invalid_confirmation_or_invalidation_zone' };
   }
-  if (RISK_STATES.has(state) || RISK_ACTIONS.has(sourceAction)) return { kind: 'risk_rebuild', state, sourceAction, reason: null };
-  if (!zones.target1 || zones.target1 <= zones.invalidation) {
-    return { kind: 'insufficient', state, sourceAction, reason: 'missing_or_invalid_target_zone' };
+  if (opportunityStage === 'RISK_OFF' || ['REDUCE', 'CLOSE'].includes(executionAction)) {
+    return { kind: 'risk_rebuild', opportunityStage, executionAction, reason: null };
   }
-  if (ACTIVE_LONG_STATES.has(state)) return { kind: 'active_long', state, sourceAction, reason: null };
-  if (state === 'WATCH') return { kind: 'waiting_confirmation', state, sourceAction, reason: null };
-  return { kind: 'insufficient', state, sourceAction, reason: 'unsupported_swing_state' };
+  if (!zones.reassessment || zones.reassessment <= zones.invalidation) {
+    return { kind: 'insufficient', opportunityStage, executionAction, reason: 'missing_or_invalid_reassessment_zone' };
+  }
+  if (opportunityStage === 'READY' && ACTIVE_LONG_ACTIONS.has(executionAction)) {
+    return { kind: 'active_long', opportunityStage, executionAction, reason: null };
+  }
+  if (WAITING_STAGES.has(opportunityStage) && executionAction === 'NONE') {
+    return { kind: 'waiting_confirmation', opportunityStage, executionAction, reason: null };
+  }
+  return { kind: 'insufficient', opportunityStage, executionAction, reason: 'unsupported_stage_action' };
 }
 
 /**
@@ -162,7 +185,7 @@ export function evaluateScenarioPath({
   const sessions = safeInteger(validSessions ?? decision?.validSessions, 3, 1, 10);
   const settlement = safeInteger(settlementSessions, 20, 1, 60);
   const base = resultBase({ decision, signalBar, signalIndex, classification, validSessions: sessions, settlementSessions: settlement });
-  const { confirmation, invalidation, target1 } = base.zones;
+  const { confirmation, invalidation, reassessment } = base.zones;
   const lastIndex = rows.length - 1;
 
   if (classification.kind === 'risk_rebuild') {
@@ -212,7 +235,7 @@ export function evaluateScenarioPath({
     rows,
     activationIndex: entry.index,
     invalidation,
-    target1,
+    reassessment,
     settlementSessions: settlement,
   });
   const forward = calculateForwardOutcomes({

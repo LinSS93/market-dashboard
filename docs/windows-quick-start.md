@@ -2,8 +2,8 @@
 
 ## 1. Download and unpack / 下载并解压
 
-Download `market-dashboard-v0.1.1-windows.zip` from the GitHub Release page, then extract the whole folder to a normal local directory such as `Documents\Market Dashboard`. Do not run it inside the ZIP file.
-从 GitHub Release 页面下载 `market-dashboard-v0.1.1-windows.zip`，将整个文件夹解压到普通本地目录，例如 `Documents\Market Dashboard`。不要在 ZIP 文件内部直接运行。
+Download `market-dashboard-v0.2.0-windows.zip` from the GitHub Release page, then extract the whole folder to a normal local directory such as `Documents\Market Dashboard`. Do not run it inside the ZIP file.
+从 GitHub Release 页面下载 `market-dashboard-v0.2.0-windows.zip`，将整个文件夹解压到普通本地目录，例如 `Documents\Market Dashboard`。不要在 ZIP 文件内部直接运行。
 
 ## 2. Install Node.js once / 首次安装 Node.js
 

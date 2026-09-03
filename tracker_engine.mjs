@@ -2,7 +2,8 @@
 //
 // 从 stock_engine.mjs 拆出（P1-2 架构清理）。本模块只承载 tracker 域函数：
 //   - tracker_pairs / tracker_positions / tracker_signal_audit / tracker_premium_daily / tracker_fx_daily / tracker_daily 的 CRUD
-//   - lot 管理通过共享的 stock_trade_events 表（source='tracker_sync'）实现
+//   - 持仓读取：shares/cost 优先从 stock_trade_events 推算（与股票监控看板共享数据源），
+//     写入口统一收敛到股票监控看板（tracker 前端持仓 tab 已于 2026-09 移除）
 //   - 溢价率历史分布、NAV 审计、FX 覆盖度等查询
 //
 // 依赖方向（单向）：tracker_engine → stock_engine
@@ -19,8 +20,6 @@ import {
   db,
   computePositionFromEvents,
   invalidateActiveEtfPairCache,
-  recalcTrackerPositionFromEvents,
-  voidTradeEvent,
 } from './stock_engine.mjs';
 import { resolveRegisteredTrackerProduct } from './tracker_product_registry.mjs';
 
@@ -93,11 +92,7 @@ function resolveTrackerPairIdentity(row = {}) {
 
 // ── 持仓推算 ────────────────────────────────────────────────────────────────
 // tracker_positions 表只缓存 currency/base_currency；shares/cost 优先从
-// stock_trade_events 推算（与股票监控看板共享数据源，source='tracker_sync'）。
-
-function _getTrackerPairById(pairId) {
-  return db.prepare("SELECT id, etf, etf_market FROM tracker_pairs WHERE id=?").get(Math.max(1, Math.round(Number(pairId) || 0))) || null;
-}
+// stock_trade_events 推算（与股票监控看板共享数据源）。
 
 function getTrackerPositions() {
   // 统一数据源：shares/cost 优先从 stock_trade_events 推算（与股票监控看板共享），
@@ -130,91 +125,6 @@ function getTrackerPositions() {
   return out;
 }
 
-function upsertTrackerPosition(pairId, shares, cost, currency, options={}) {
-  const id=Math.max(1,Math.round(Number(pairId)||0));
-  const qty=Math.max(0,Math.round(Number(shares)||0));
-  const px=Math.max(0,Number(cost)||0);
-  const ccy=String(currency||'').toUpperCase().replace(/[^A-Z]/g,'').slice(0,8)||null;
-  const baseCcy=String(options.baseCurrency||'').toUpperCase().replace(/[^A-Z]/g,'').slice(0,8)||null;
-  db.prepare(`INSERT INTO tracker_positions(pair_id,shares,cost,currency,base_currency,updated_at) VALUES(?,?,?,?,?,?)
-    ON CONFLICT(pair_id) DO UPDATE SET shares=excluded.shares,cost=excluded.cost,currency=excluded.currency,base_currency=excluded.base_currency,updated_at=excluded.updated_at`)
-    .run(id,qty,px,ccy,baseCcy,Date.now());
-  return db.prepare("SELECT pair_id,shares,cost,currency,base_currency,updated_at FROM tracker_positions WHERE pair_id=?").get(id);
-}
-
-// 加仓阶梯：统一写入 stock_trade_events 表（与股票监控看板共享数据源）
-// 通过 pair.etf symbol 关联，source='tracker_sync' 标记来源，避免循环同步
-function addTrackerPositionLot(pairId, lotId, side, shares, price, tag=null, options={}) {
-  const pid = Math.max(1, Math.round(Number(pairId) || 0));
-  const pair = _getTrackerPairById(pid);
-  if (!pair) return null;
-  const sd = ['BUY','SELL'].includes(String(side||'').toUpperCase()) ? String(side).toUpperCase() : 'BUY';
-  const qty = Math.max(0, Math.round(Number(shares) || 0));
-  const px = Math.max(0, Number(price) || 0);
-  if (qty <= 0 || px <= 0) return null;
-  const eventType = sd === 'BUY' ? 'buy' : 'sell';
-  // 支持自定义日期和费用（与股票监控看板表单对齐）
-  const dateStr = String(options.date || '').slice(0,10) || new Date().toISOString().slice(0, 10);
-  const fee = Math.max(0, Number(options.fee) || 0);
-  const createdAt = Date.now();
-  // 写入 stock_trade_events，source='tracker_sync' 标记来源
-  const r = db.prepare(`INSERT INTO stock_trade_events(symbol,market,event_type,shares,price,date,note,created_at,total_fee,source)
-    VALUES(?,?,?,?,?,?,?,?,?,?)`).run(pair.etf, pair.etf_market, eventType, qty, px, dateStr, tag?String(tag).slice(0,100):null, createdAt, fee, 'tracker_sync');
-  // 同步更新 tracker_positions 缓存（保留 currency/base_currency）
-  recalcTrackerPositionFromEvents(pid);
-  // 返回 lot 格式（lot_id = event id 字符串，保持前端兼容）
-  return {
-    pair_id: pid,
-    lot_id: String(r.lastInsertRowid),
-    side: sd,
-    shares: qty,
-    price: px,
-    ts: createdAt,
-    date: dateStr,
-    fee,
-    tag: tag ? String(tag).slice(0,100) : null,
-    source: 'tracker_sync',
-  };
-}
-
-function voidTrackerPositionLot(pairId, lotId, { reason = '' } = {}) {
-  const pid = Math.max(1, Math.round(Number(pairId) || 0));
-  const pair = _getTrackerPairById(pid);
-  if (!pair) return { ok:false, error:'未找到 ETF 追踪对' };
-  // lotId 实际是 stock_trade_events.id（字符串形式）
-  const eventId = parseInt(String(lotId), 10);
-  if (!Number.isFinite(eventId) || eventId <= 0) return { ok:false, error:'无效的操作事件编号' };
-  const event = db.prepare('SELECT source FROM stock_trade_events WHERE id=? AND symbol=?').get(eventId, pair.etf);
-  if (!event) return { ok:false, error:'未找到操作事件' };
-  // ETF 页面只能作废自己录入的 tracker_sync 事件，不能越权修改股票页或执行账本的记录。
-  if (event.source !== 'tracker_sync') return { ok:false, error:'该事件不是 ETF 页面录入；请到股票详情的操作事件中处理。' };
-  const result = voidTradeEvent(pair.etf, eventId, { reason:reason || '用户在 ETF 页面作废' });
-  if (!result.ok) return result;
-  recalcTrackerPositionFromEvents(pid);
-  return result;
-}
-
-function getTrackerPositionLots(pairId) {
-  const pid = Math.max(1, Math.round(Number(pairId) || 0));
-  const pair = _getTrackerPairById(pid);
-  if (!pair) return [];
-  // 从 stock_trade_events 读取所有该 ETF 的事件（含股票监控手动录入 + tracker_sync 同步）
-  const rows = db.prepare("SELECT id, event_type, shares, price, date, created_at, total_fee, note, source, voided_at, void_reason FROM stock_trade_events WHERE symbol=? ORDER BY date DESC, created_at DESC").all(pair.etf);
-  return rows.map(r => ({
-    pair_id: pid,
-    lot_id: String(r.id),
-    side: r.event_type === 'buy' ? 'BUY' : (r.event_type === 'sell' ? 'SELL' : 'BUY'),
-    shares: r.shares,
-    price: r.price,
-    date: r.date || null,
-    ts: r.created_at,
-    fee: r.total_fee || 0,
-    tag: r.note || null,
-    source: r.source || 'manual',
-    voided_at: r.voided_at || null,
-    void_reason: r.void_reason || null,
-  }));
-}
 
 // ── 信号审计 ────────────────────────────────────────────────────────────────
 
@@ -582,11 +492,6 @@ export {
   migrateLegacyTrackerPairs,
   // positions
   getTrackerPositions,
-  upsertTrackerPosition,
-  addTrackerPositionLot,
-  voidTrackerPositionLot,
-  getTrackerPositionLots,
-  recalcTrackerPositionFromEvents,
   // signal audit
   recordTrackerSignalAudit,
   getTrackerSignalAudit,

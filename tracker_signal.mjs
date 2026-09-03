@@ -20,8 +20,13 @@ export function providerDate(value) {
 }
 
 function underlyingAction(analysis) {
-  return analysis?.swingDecision?.state || analysis?.swingDecision?.action
-    || analysis?.reliability?.effectiveAction || analysis?.tradePlan?.action || analysis?.signal || null;
+  const decision = analysis?.swingDecision;
+  const action = String(decision?.executionAction || '').toUpperCase();
+  const stage = String(decision?.opportunityStage || '').toUpperCase();
+  if (action && action !== 'NONE') return action;
+  if (stage === 'RISK_OFF') return 'RISK_OFF';
+  if (action === 'NONE') return 'NONE';
+  return analysis?.tradePlan?.action || analysis?.signal || null;
 }
 
 function reliabilityScore(analysis) {
@@ -31,9 +36,9 @@ function reliabilityScore(analysis) {
 }
 
 function directionText(action) {
-  if (['PROBE','ADD','BUY','STRONG_BUY'].includes(action)) return '正股方向偏多，可评估杠杆敞口';
-  if (['TRIM','AVOID','REDUCE'].includes(action)) return '正股方向转弱，应减仓或保持空仓';
-  if (['EXIT','SELL','STRONG_SELL'].includes(action)) return '正股退出信号，杠杆敞口必须退出';
+  if (['OPEN','ADD','BUY','STRONG_BUY'].includes(action)) return '正股方向偏多，可评估杠杆敞口';
+  if (['RISK_OFF','REDUCE'].includes(action)) return '正股方向转弱，应减仓或保持空仓';
+  if (['CLOSE','SELL','STRONG_SELL'].includes(action)) return '正股退出信号，杠杆敞口必须退出';
   if (action==='HOLD') return '正股方向中性，维持但不主动增加杠杆';
   return '正股方向尚未确认';
 }
@@ -211,9 +216,9 @@ export function evaluateTrackerSignal(input={}) {
   const navQuality = !datesAligned ? 'date_mismatch' : (input.navQuality || 'aligned');
   const action = underlyingAction(input.underlyingAnalysis);
   const confidence = reliabilityScore(input.underlyingAnalysis);
-  const bullish = ['PROBE','ADD','BUY','STRONG_BUY'].includes(action);
-  const avoid = ['TRIM','AVOID','REDUCE'].includes(action);
-  const exit = ['EXIT','SELL','STRONG_SELL'].includes(action);
+  const bullish = ['OPEN','ADD','BUY','STRONG_BUY'].includes(action);
+  const avoid = ['RISK_OFF','REDUCE'].includes(action);
+  const exit = ['CLOSE','SELL','STRONG_SELL'].includes(action);
   const ret = Number(input.underlyingReturnPct);
   const etfRet = Number(input.etfReturnPct);
   const positionDrawdown = Number(input.positionDrawdownPct);

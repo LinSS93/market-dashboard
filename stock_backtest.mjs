@@ -27,14 +27,14 @@ import {
 } from "./indicators.mjs";
 import { OUTCOME_CONTRACT_VERSION, resolveNextSessionExecution } from "./outcome_contract.mjs";
 import { getKline, auditStoredKline, countKline } from "./stock_kline.mjs";
-import { computeCompositeScore, scoreToState, SCORING_ENGINE_VERSION, TIER_THRESHOLDS } from "./signal_scoring.mjs";
+import { computeCompositeScore, SCORING_ENGINE_VERSION } from "./signal_scoring.mjs";
+import { arbitrateStockDecision } from "./stock_decision_arbiter.mjs";
 import {
   db,
   SIGNAL_ENGINE_VERSION,
   analyzeRowsForBacktest,
   benchmarkFor,
-  buildSwingDecision,
-  resolveFinalSwingState,
+  buildSwingDecisionContext,
 } from "./stock_engine.mjs";
 
 // ── 缓存（仅回测域内部使用） ────────────────────────────────────────────────
@@ -375,10 +375,9 @@ function buildBacktestSeries(symbol, market, days = 320, options = {}) {
       }
       ev.paths[h] = simulateTradePath(rows, i, h, a.tradePlan, direction, market);
     }
-    // v21：保留 analysis 对象引用 + 空仓视角的 v21 state。
-    // - ev._analysis：供 simulatePolicySymbol 在每个 bar 基于真实模拟持仓重算 v21 state
-    //   （hasPosition=true 时才会产生 ADD/TRIM/EXIT/HOLD）。
-    // - ev.v21：空仓视角的 v21 state，仅供报告脚本做信号级统计（"若空仓，v21 会建议什么"）。
+    // 保留 analysis 对象引用 + 空仓视角的正式阶段/动作。
+    // ev._analysis 供策略模拟在每根 K 线按真实模拟持仓重算；ev.v21 只作报告字段，
+    // 名称因历史 API 保持不变，但内容已经是 stage-action 合约。
     if (includeAnalysis) ev._analysis = a;
     if (includeV21) {
       ev._analysis = a; // 完整 analysis 对象引用，不导出
@@ -387,7 +386,7 @@ function buildBacktestSeries(symbol, market, days = 320, options = {}) {
         // the policy simulation: shared scoring, then formal entry gating.
         ev.v21 = computeV21StateForPosition(a, null);
       } catch (e) {
-        ev.v21 = { state: null, error: String(e?.message || e) };
+        ev.v21 = { opportunityStage: null, executionAction: null, error: String(e?.message || e) };
       }
     }
     events.push(ev);
@@ -408,176 +407,52 @@ function buildBacktestSeriesWithV21(symbol, market, days = 320) {
   return buildBacktestSeries(symbol, market, days, { includeV21: true });
 }
 
-// computeV21StateForPosition：基于 analysis + 当前模拟持仓，重算 v21 state。
-// 这是"按信号操作"的核心——持仓时 hasPosition=true，scoreToState 会真实产生
-// ADD/TRIM/EXIT/HOLD，而非空仓视角的 PROBE/WATCH/AVOID。
-// reliability/executionRisk 传 null（用 fallback：reliabilityScore=plan.confidence，
-// executionRisk=0.5 中性），first pass 可接受。
-//
-// config 参数（可选，用于回测调参，不影响生产 signal_scoring.mjs）：
-//   - thresholds: { PROBE, STRONG_PROBE, WATCH } 覆盖默认阈值
-//   - requireInBuyZone: bool，研究性实验中是否额外要求 inBuyZone（默认 false；生产不使用该门控）
-//   - tranchePctOverride: { PROBE, STRONG_PROBE, ADD, TRIM, EXIT } 覆盖默认 tranchePct
+// 以历史时点分析和模拟仓位重放当前唯一仲裁器。
 function computeV21StateForPosition(analysis, position, config = {}) {
-  if (!analysis || !analysis.tradePlan) return null;
+  if (!analysis?.tradePlan) return null;
   try {
-    const baseDecision = buildSwingDecision(analysis, null, position);
-    const scoreResult = computeCompositeScore({
+    const profileId = String(config.profileId || analysis?.signalProfiles?.effectiveProfileId || 'balanced').toLowerCase();
+    const context = buildSwingDecisionContext(analysis, null, position, { profileId });
+    const scoreResult = computeCompositeScore({ analysis, reliability: null, executionRisk: null });
+    const decision = arbitrateStockDecision({
       analysis,
-      reliability: null,
-      executionRisk: null,
-      longTermTrend: analysis.longTermTrend ?? null,
-    });
-    const hasPosition = Number(position?.shares) > 0 && Number(position?.cost) > 0;
-    const cur = analysis.currentPrice;
-    const cost = Number(position?.cost) || 0;
-    const pnlPct = hasPosition && cur && cost > 0 ? (cur / cost - 1) * 100 : null;
-    // Default mode deliberately shares the production state mapping. Historical
-    // reliability/execution-risk cannot be reconstructed
-    // safely from the live cache, so both remain explicit neutral/as-of inputs;
-    // this result is never labelled a full live-reliability replay.
-    // When config changes thresholds or tranches, it is research tuning only.
-    const hasTuningConfig = config.thresholds || config.tranchePctOverride || 'requireInBuyZone' in config;
-    const useGate = !hasTuningConfig && config.useChaseGate !== false;
-    let stateResult;
-    if (useGate) {
-      stateResult = scoreToState(scoreResult.compositeScore, {
-        hasPosition,
-        inBuyZone: !!baseDecision.zones?.inBuyZone,
-        cur,
-        invalidation: baseDecision.zones?.invalidation,
-        pnlPct,
-        overheat: !!baseDecision.zones?.overheat,
-        sma20: analysis.sma20 ?? null,
-        atr: analysis.atr ?? null,
-        marketRegime: analysis.marketRegime?.key || null,
-      });
-    } else {
-      stateResult = scoreToStateWithConfig(scoreResult.compositeScore, {
-        hasPosition,
-        inBuyZone: !!baseDecision.zones?.inBuyZone,
-        cur,
-        invalidation: baseDecision.zones?.invalidation,
-        pnlPct,
-        overheat: !!baseDecision.zones?.overheat,
-      }, config);
-    }
-    const scoredDecision = resolveFinalSwingState({
-      analysis,
-      baseDecision,
-      scoreState: stateResult,
+      context,
       scoreResult,
-      hasPosition,
+      executionRisk: null,
+      extSessionRisk: null,
+      tranchePolicy: config.tranchePctOverride || {},
+      profileId,
     });
     return {
-      state: scoredDecision.state,
-      label: scoredDecision.label,
-      tranchePct: scoredDecision.tranchePct ?? 0,
+      opportunityStage: decision.opportunityStage,
+      executionAction: decision.executionAction,
+      label: decision.label,
+      tranchePct: decision.tranchePct ?? 0,
       compositeScore: scoreResult.compositeScore,
-      inBuyZone: !!baseDecision.zones?.inBuyZone,
-      overheat: !!baseDecision.zones?.overheat,
-      invalidation: baseDecision.zones?.invalidation ?? null,
-      stopLoss: analysis.tradePlan.stopLoss ?? null,
-      takeProfit: analysis.tradePlan.takeProfit ?? null,
-      pnlPct: pnlPct != null ? +pnlPct.toFixed(2) : null,
-      reason: scoredDecision.reason,
-      chaseGate: scoredDecision.chaseGate || null,
-      researchSignal: scoredDecision.researchSignal || null,
-      executionReadiness: scoredDecision.executionReadiness || null,
-      scoringState: scoredDecision.scoringState || null,
-      stateSource: scoredDecision.stateSource || null,
-      validationMode:hasTuningConfig ? 'research_tuning_with_custom_state_mapping' : 'production_state_with_neutral_asof_reliability',
-      reliabilityMode:'neutral_asof_unavailable',
-      executionRiskMode:'neutral_asof_unavailable',
+      inBuyZone: !!context.zones?.inBuyZone,
+      overheat: !!context.zones?.overheat,
+      invalidation: context.zones?.invalidation ?? null,
+      stopLoss: context.zones?.invalidation ?? null,
+      takeProfit: context.zones?.reassessment ?? null,
+      pnlPct: context.position?.pnlPct ?? null,
+      reason: decision.reason,
+      chaseGate: decision.chaseGate || null,
+      executionReadiness: decision.executionReadiness || null,
+      technicalDirection: decision.technicalDirection || null,
+      stateSource: decision.stateSource || null,
+      profileId: decision.profileId || profileId,
+      profileVersion: decision.profileVersion || null,
+      profileStrategyVersion: decision.profileStrategyVersion || null,
+      validationMode: config.tranchePctOverride
+        ? 'production_arbiter_with_research_tranche_override'
+        : 'production_arbiter_with_neutral_asof_quality',
+      reliabilityMode: 'neutral_asof_unavailable',
+      executionRiskMode: 'neutral_asof_unavailable',
     };
-  } catch (e) {
+  } catch {
     return null;
   }
 }
-
-// scoreToStateWithConfig：仅供研究调参的本地状态映射，支持阈值和买入区要求可配置。
-// 默认不要求买入区；生产状态仍使用 signal_scoring.mjs + resolveFinalSwingState。
-// config.thresholds / config.requireInBuyZone / config.tranchePctOverride 用于回测调参。
-function scoreToStateWithConfig(compositeScore, ctx = {}, config = {}) {
-  const { hasPosition = false, inBuyZone = false, cur = null, invalidation = null, pnlPct = null, overheat = false } = ctx;
-  const score = Number(compositeScore) || 0;
-  const T = { ...TIER_THRESHOLDS, ...(config.thresholds || {}) };
-  const requireInBuyZone = config.requireInBuyZone === true;
-  const tp = config.tranchePctOverride || {};
-
-  // 安全网：持仓 + 失效位破位 → 强制 EXIT
-  if (hasPosition && invalidation != null && cur != null && Number(cur) <= Number(invalidation)) {
-    return {
-      state: 'EXIT', label: '清仓',
-      tone: 'bear', urgency: 'urgent', tranchePct: 100,
-      reason: `失效位破位（安全网：价格 ${cur} ≤ 失效位 ${invalidation}）`,
-      safetyNet: true,
-    };
-  }
-
-  // 持仓状态
-  if (hasPosition) {
-    if (overheat && pnlPct != null && pnlPct >= 8) {
-      return {
-        state: 'TRIM', label: '减仓',
-        tone: 'hot', urgency: 'high', tranchePct: tp.TRIM ?? 30,
-        reason: `过热锁利（浮盈 ${pnlPct.toFixed(1)}%，RSI/偏离/布林过热）`,
-      };
-    }
-    if (score < T.WATCH) {
-      return {
-        state: 'TRIM', label: '减仓',
-        tone: 'hot', urgency: 'high', tranchePct: tp.TRIM ?? 30,
-        reason: `评分 ${score.toFixed(2)} < ${T.WATCH}，建议减仓`,
-      };
-    }
-    const probeQualified = score >= T.PROBE && (inBuyZone || !requireInBuyZone);
-    if (probeQualified) {
-      const isStrong = score >= T.STRONG_PROBE;
-      return {
-        state: 'ADD',
-        label: isStrong ? '强加仓' : '加仓',
-        tone: 'bull', urgency: 'medium',
-        tranchePct: isStrong ? (tp.STRONG_PROBE ?? 40) : (tp.ADD ?? 35),
-        reason: `评分 ${score.toFixed(2)} ≥ ${T.PROBE}${requireInBuyZone ? ' 且在买入区' : ''}，加仓`,
-      };
-    }
-    return {
-      state: 'HOLD', label: '持有',
-      tone: 'watch', urgency: 'low', tranchePct: 0,
-      reason: `评分 ${score.toFixed(2)}，持有`,
-    };
-  }
-
-  // 空仓状态
-  if (score >= T.STRONG_PROBE && (inBuyZone || !requireInBuyZone)) {
-    return {
-      state: 'PROBE', label: '强试仓',
-      tone: 'bull', urgency: 'medium', tranchePct: tp.STRONG_PROBE ?? 35,
-      reason: `评分 ${score.toFixed(2)} ≥ ${T.STRONG_PROBE}${requireInBuyZone ? ' 且在买入区' : ''}，强试仓`,
-    };
-  }
-  if (score >= T.PROBE && (inBuyZone || !requireInBuyZone)) {
-    return {
-      state: 'PROBE', label: '试仓',
-      tone: 'bull', urgency: 'medium', tranchePct: tp.PROBE ?? 25,
-      reason: `评分 ${score.toFixed(2)} ≥ ${T.PROBE}${requireInBuyZone ? ' 且在买入区' : ''}，试仓`,
-    };
-  }
-  if (score >= T.WATCH) {
-    return {
-      state: 'WATCH', label: '观察',
-      tone: 'watch', urgency: 'low', tranchePct: 0,
-      reason: `评分 ${score.toFixed(2)} ≥ ${T.WATCH}，观察`,
-    };
-  }
-  return {
-    state: 'WATCH', label: '观察',
-    tone: 'watch', urgency: 'low', tranchePct: 0,
-    reason: `评分 ${score.toFixed(2)} < ${T.WATCH}，研究倾向不足，暂不新开仓`,
-  };
-}
-
 function backtestSymbol(symbol, market, days = 320) {
   const s = buildBacktestSeries(symbol, market, days);
   if (s.error) return s;
@@ -651,13 +526,13 @@ function simulatePolicySymbol(symbol, market, days = 600, useWalkForwardGate = t
     const row = rows[i];
     if (pending) {
       const px = row.open > 0 ? row.open : row.close;
-      if (pending.action === 'BUY' || pending.action === 'ADD') buy(i, px, pending.action, pending.signalDate, pending.tranchePct ?? 0.25);
-      else if (pending.action === 'TRIM') {
-        // 生产 v2 返回百分数（30/50），回测内部统一转小数
+      if (pending.action === 'OPEN' || pending.action === 'ADD') buy(i, px, pending.action, pending.signalDate, pending.tranchePct ?? 0.25);
+      else if (pending.action === 'REDUCE') {
+        // 生产返回百分数（例如 30），回测内部统一转小数
         const trimFraction = Number(pending.tranchePct) > 1 ? Number(pending.tranchePct) / 100 : Number(pending.tranchePct ?? 0.25);
-        sell(i, px, Math.max(lot, shares * trimFraction), 'TRIM', pending.signalDate);
+        sell(i, px, Math.max(lot, shares * trimFraction), 'REDUCE', pending.signalDate);
       }
-      else if (pending.action === 'EXIT') sell(i, px, shares, 'EXIT', pending.signalDate);
+      else if (pending.action === 'CLOSE') sell(i, px, shares, 'CLOSE', pending.signalDate);
       if (pending.stop != null) stop = pending.stop;
       if (pending.target != null) target = pending.target;
       pending = null;
@@ -673,28 +548,25 @@ function simulatePolicySymbol(symbol, market, days = 600, useWalkForwardGate = t
     const ev = eventByIndex.get(i);
     if (!ev || i >= rows.length - 1) continue;
     if (useV21Action) {
-      // v21 模式：基于当前模拟持仓重算 v21 state（"按信号操作"的真正实现）。
-      // 持仓时 hasPosition=true，scoreToState 会真实产生 ADD/TRIM/EXIT/HOLD。
+      // 基于当前模拟持仓重算生产阶段/动作。
       const analysis = ev._analysis;
       if (!analysis) continue;
       const position = shares > 0 ? { shares, cost: avgCost, target_shares: 0 } : null;
       const v21 = computeV21StateForPosition(analysis, position, cfg);
       if (!v21) continue;
       if (shares <= 0) {
-        // 空仓：只有 PROBE 入场
-        if (v21.state === 'PROBE') {
-          pending = { action:'BUY', stop:v21.stopLoss, target:v21.takeProfit, signalDate:ev.date, tranchePct:v21.tranchePct };
+        if (v21.executionAction === 'OPEN') {
+          pending = { action:'OPEN', stop:v21.stopLoss, target:v21.takeProfit, signalDate:ev.date, tranchePct:v21.tranchePct };
         }
       } else {
-        // 持仓：按 v21 state 精细操作
-        if (v21.state === 'EXIT') {
-          pending = { action:'EXIT', signalDate:ev.date };
-        } else if (v21.state === 'TRIM') {
-          pending = { action:'TRIM', signalDate:ev.date, tranchePct:v21.tranchePct };
-        } else if (v21.state === 'ADD' && i - lastEntryIndex >= addCooldown && shares * row.close < initialCapital * maxPositionPct) {
+        if (v21.executionAction === 'CLOSE') {
+          pending = { action:'CLOSE', signalDate:ev.date };
+        } else if (v21.executionAction === 'REDUCE') {
+          pending = { action:'REDUCE', signalDate:ev.date, tranchePct:v21.tranchePct };
+        } else if (v21.executionAction === 'ADD' && i - lastEntryIndex >= addCooldown && shares * row.close < initialCapital * maxPositionPct) {
           pending = { action:'ADD', stop:v21.stopLoss, target:v21.takeProfit, signalDate:ev.date, tranchePct:v21.tranchePct };
         }
-        // HOLD/WATCH/AVOID 持仓时无操作（不是清仓理由）
+        // HOLD/NONE 时无操作。
       }
     } else {
       const direction = actionDirection(ev.action);
@@ -1678,9 +1550,11 @@ function marketPoolThresholdAudit({ symbol, market, direction, latestScore, late
   if (direction === 0) return null;
   const mkt = (market || "US").toUpperCase();
   const wlRows = db.prepare("SELECT symbol, market FROM stock_watchlist WHERE UPPER(market) = ? ORDER BY added_at").all(mkt);
-  const peers = wlRows
+  const universe = wlRows
     .map(x => ({ symbol: String(x.symbol || "").toUpperCase(), market: (x.market || mkt).toUpperCase() }))
-    .filter(x => x.symbol && x.symbol !== String(symbol || "").toUpperCase());
+    .filter(x => x.symbol);
+  const currentSymbol = String(symbol || "").toUpperCase();
+  const peers = universe.filter(x => x.symbol !== currentSymbol);
   if (peers.length < 2) {
     return {
       available: false,
@@ -1705,16 +1579,20 @@ function marketPoolThresholdAudit({ symbol, market, direction, latestScore, late
     marketRegimeKey: latestPlan?.marketRegime?.key || null,
     marketRegimeLabel: latestPlan?.marketRegime?.label || null,
   };
-  const key = [mkt, direction, days, trainRatio, peers.map(x => x.symbol).join(",")].join("|");
+  // Build one reusable market-wide event pool. The prior cache key excluded the
+  // current symbol, so every watchlist stock rebuilt almost the same expensive
+  // backtest set during the same analysis cycle.
+  const key = [mkt, direction, days, trainRatio, universe.map(x => x.symbol).join(",")].join("|");
   const now = Date.now();
   const cached = _poolEvalCache.get(key);
   if (cached && now - cached.ts < 5 * 60_000) {
-    return auditConditionedMarketPool({ allEvents: cached.data.allEvents, market: mkt, direction, latestScore, trainRatio, labels });
+    const peerEvents = cached.data.allEvents.filter(ev => ev.symbol !== currentSymbol);
+    return auditConditionedMarketPool({ allEvents: peerEvents, market: mkt, direction, latestScore, trainRatio, labels });
   }
 
   const allEvents = [];
   const used = [];
-  for (const p of peers) {
+  for (const p of universe) {
     const s = buildBacktestSeries(p.symbol, p.market, days);
     if (s.error || !Array.isArray(s.events) || !s.events.length) continue;
     for (const ev of s.events) {
@@ -1732,7 +1610,8 @@ function marketPoolThresholdAudit({ symbol, market, direction, latestScore, late
     const oldest = _poolEvalCache.keys().next().value;
     if (oldest) _poolEvalCache.delete(oldest);
   }
-  return auditConditionedMarketPool({ allEvents: data.allEvents, market: mkt, direction, latestScore, trainRatio, labels });
+  const peerEvents = data.allEvents.filter(ev => ev.symbol !== currentSymbol);
+  return auditConditionedMarketPool({ allEvents: peerEvents, market: mkt, direction, latestScore, trainRatio, labels });
 }
 
 function conditionalPass(slice, direction, minCount = 8) {

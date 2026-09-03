@@ -29,5 +29,7 @@ export function isEligibleEarningsEvent(summary) {
   return !!summary
     && summary.is_fresh === true
     && summary.event_gate_verified === true
+    && summary.entry_gate_eligible === true
+    && summary.days_to_earnings != null
     && Number.isFinite(Number(summary.days_to_earnings));
 }

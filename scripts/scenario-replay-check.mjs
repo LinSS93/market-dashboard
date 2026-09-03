@@ -12,12 +12,12 @@ function bar(date, open, high, low, close) {
   return { date, open, high, low, close, volume: 1000 };
 }
 
-function decision(state = 'WATCH', sourceAction = 'WATCH') {
+function decision(opportunityStage = 'AWAIT_CONFIRMATION', executionAction = 'NONE') {
   return {
-    state,
-    sourceAction,
+    opportunityStage,
+    executionAction,
     validSessions: 3,
-    zones: { confirmation: 105, invalidation: 95, target1: 112 },
+    zones: { confirmation: 105, invalidation: 95, reassessment: 112 },
   };
 }
 
@@ -33,16 +33,16 @@ const watchTarget = evaluateScenarioPath({
   decision: decision(),
   settlementSessions: 2,
 });
-check(watchTarget.initialStatus === 'confirmed', 'WATCH records a completed close confirmation');
-check(watchTarget.activation?.date === '2026-01-07' && watchTarget.activation?.price === 107, 'WATCH executes at the next session open after confirmation');
-check(watchTarget.finalStatus === 'target_hit' && watchTarget.mature, 'WATCH target settlement is recorded after activation');
+check(watchTarget.initialStatus === 'confirmed', 'AWAIT_CONFIRMATION records a completed close confirmation');
+check(watchTarget.activation?.date === '2026-01-07' && watchTarget.activation?.price === 107, 'AWAIT_CONFIRMATION executes at the next session open after confirmation');
+check(watchTarget.finalStatus === 'reassessment_hit' && watchTarget.mature, 'the reassessment level is settled after activation');
 
 const watchInvalidation = evaluateScenarioPath({
   bars: [bar('2026-01-02', 100, 101, 99, 100), bar('2026-01-05', 99, 101, 93, 94)],
   signalIndex: 0,
   decision: decision(),
 });
-check(watchInvalidation.finalStatus === 'invalidated' && watchInvalidation.activation?.type === 'pre_confirmation_invalidation', 'WATCH invalidation wins before confirmation');
+check(watchInvalidation.finalStatus === 'invalidated' && watchInvalidation.activation?.type === 'pre_confirmation_invalidation', 'pre-confirmation invalidation wins before confirmation');
 
 const conservativeTie = evaluateScenarioPath({
   bars: [
@@ -50,14 +50,14 @@ const conservativeTie = evaluateScenarioPath({
     bar('2026-01-05', 100, 113, 92, 94),
   ],
   signalIndex: 0,
-  decision: decision('PROBE', 'BUY'),
+  decision: decision('READY', 'OPEN'),
 });
 check(conservativeTie.finalStatus === 'invalidated', 'same daily bar target/invalidation ambiguity resolves to invalidation');
 
 const riskReclaim = evaluateScenarioPath({
   bars: [bar('2026-01-02', 100, 101, 99, 100), bar('2026-01-05', 100, 108, 99, 106)],
   signalIndex: 0,
-  decision: decision('WATCH', 'SELL'),
+  decision: decision('RISK_OFF', 'NONE'),
 });
 check(riskReclaim.kind === 'risk_rebuild' && riskReclaim.finalStatus === 'reclaimed', 'risk scenario separately records price reclaim');
 

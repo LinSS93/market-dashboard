@@ -7,6 +7,7 @@ import {
   buildObservedFormalEvaluation,
   evaluateTechnicalResearchPolicy,
 } from './stock_feature_snapshot.mjs';
+import { evaluateOpportunityFacts, opportunityPolicyEvaluation } from './stock_opportunity_model.mjs';
 
 const HORIZONS = Object.freeze([1, 3, 5, 10, 20]);
 
@@ -86,6 +87,13 @@ function insertSnapshotWithEvaluations(db, snapshot, { formalAnalysis = null } =
   const research = evaluateTechnicalResearchPolicy(snapshot);
   evaluations += insertEvaluation.run(stored.id, research.policyId, research.policyVersion, research.status, research.direction,
     0, JSON.stringify(research), snapshot.capturedAt).changes;
+  const opportunityAssessment = formalAnalysis?.opportunityModel
+    || (snapshot.features?.opportunityFacts ? evaluateOpportunityFacts(snapshot.features.opportunityFacts) : null);
+  if (opportunityAssessment) {
+    const opportunity = opportunityPolicyEvaluation(opportunityAssessment);
+    evaluations += insertEvaluation.run(stored.id, opportunity.policyId, opportunity.policyVersion,
+      opportunity.status, opportunity.direction, 0, JSON.stringify(opportunity), snapshot.capturedAt).changes;
+  }
   if (formalAnalysis) {
     const formal = buildObservedFormalEvaluation(formalAnalysis);
     evaluations += insertEvaluation.run(stored.id, formal.policyId, formal.policyVersion, formal.status, formal.direction,
@@ -147,8 +155,13 @@ function tableExists(db, tableName) {
   return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(tableName));
 }
 
+function tableColumns(db, tableName) {
+  return new Set(db.prepare(`PRAGMA table_info(${tableName})`).all().map(row => row.name));
+}
+
 function observedDirection(action) {
-  return ['PROBE', 'ADD'].includes(action) ? 1 : ['TRIM', 'EXIT', 'AVOID'].includes(action) ? -1 : 0;
+  return ['OPEN', 'ADD', 'PROBE'].includes(action) ? 1
+    : ['REDUCE', 'CLOSE', 'TRIM', 'EXIT', 'AVOID', 'RISK_OFF'].includes(action) ? -1 : 0;
 }
 
 /**
@@ -162,7 +175,11 @@ function observedDirection(action) {
 export function importFrozenFormalObservations({ db, capturedAt = Date.now() } = {}) {
   initializeFeatureSnapshotLedger(db);
   if (!tableExists(db, 'stock_signal_log')) return { imported: 0, skippedNoSnapshot: 0, skippedNonFrozen: 0 };
-  const rows = db.prepare(`SELECT id,date,symbol,market,raw_signal,action,action_label,regime,setup,risk,score,confidence,quality,engine_version,sample_origin
+  const columns = tableColumns(db, 'stock_signal_log');
+  const stageSelect = columns.has('opportunity_stage') ? 'opportunity_stage' : 'NULL AS opportunity_stage';
+  const actionSelect = columns.has('execution_action') ? 'execution_action' : 'NULL AS execution_action';
+  const rows = db.prepare(`SELECT id,date,symbol,market,raw_signal,action,action_label,regime,setup,risk,score,confidence,quality,
+      ${stageSelect},${actionSelect},engine_version,sample_origin
     FROM stock_signal_log WHERE sample_origin='live_frozen' ORDER BY id ASC`).all();
   const findSnapshot = db.prepare(`SELECT id FROM stock_feature_snapshots
     WHERE schema_version=? AND source_origin=? AND market=? AND symbol=? AND as_of_date=?`);
@@ -184,12 +201,15 @@ export function importFrozenFormalObservations({ db, capturedAt = Date.now() } =
         skippedNoSnapshot++;
         continue;
       }
-      const action = String(row.action || 'unavailable').toUpperCase();
+      const action = String(row.execution_action || row.action || 'NONE').toUpperCase();
+      const opportunityStage = row.opportunity_stage || null;
       const evaluation = {
         policyId: 'formal_observed',
         policyVersion: String(row.engine_version || 'legacy-live'),
-        status: action,
-        direction: observedDirection(action),
+        status: opportunityStage ? `${opportunityStage}:${action}` : action,
+        opportunityStage,
+        executionAction: action,
+        direction: opportunityStage === 'RISK_OFF' ? -1 : observedDirection(action),
         observedOnly: true,
         evidenceOrigin: 'legacy_live_frozen',
         signalLogId: row.id,

@@ -12,7 +12,7 @@ import {
 } from './scenario_outcome_contract.mjs';
 import { OUTCOME_CONTRACT_VERSION } from './outcome_contract.mjs';
 
-export const SCENARIO_SHADOW_LEDGER_VERSION = 'scenario-shadow-ledger-v1';
+export const SCENARIO_SHADOW_LEDGER_VERSION = 'scenario-shadow-ledger-v2-stage-action';
 export const SCENARIO_SHADOW_ORIGIN = 'live_shadow_v1b';
 export const SCENARIO_RESEARCH_COLLECTION_VERSION = 'scenario-collection-v1c';
 
@@ -133,8 +133,8 @@ function snapshotFromAnalysis(analysis, { engineVersion, capturedAt }) {
     market,
     asOfDate,
     capturedAt: nowMs(capturedAt),
-    state: cleanText(decision.state, null),
-    sourceAction: cleanText(decision.sourceAction || tradePlan.action, null),
+    state: cleanText(decision.opportunityStage, null),
+    sourceAction: cleanText(decision.executionAction, 'NONE'),
     scenarioKind: classification.kind,
     signalAvailable,
     snapshot: {

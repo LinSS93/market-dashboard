@@ -22,7 +22,8 @@ const confirmedPending = {
 };
 const confirmedBull = { ...confirmedPending, status: 'CONFIRMED_BULLISH', confirmed: true };
 
-check(profileStateSignature(responsiveBull) === '1|BULLISH|EARLY_BULLISH|1', 'signature contains actionable state fields');
+check(profileStateSignature(responsiveBull) === '1|BULLISH|EARLY_BULLISH|0', 'responsive signature excludes its invisible confirmation bit');
+check(profileStateSignature({ ...responsiveBull, confirmed:false }) === profileStateSignature(responsiveBull), 'responsive confirmation-bit changes cannot create pseudo-transitions');
 check(eligibleProfileTransition(responsiveBull), 'responsive directional state is eligible');
 check(!eligibleProfileTransition(confirmedPending), 'pending confirmed profile is not an outcome event');
 check(eligibleProfileTransition(confirmedBull), 'confirmed profile becomes eligible only after confirmation');
@@ -47,4 +48,4 @@ check(selected.accepted.some(row => row.horizon === 1), 'separate horizon remain
 check(selected.accepted.some(row => row.profileId === 'confirmed'), 'separate profile remains independently eligible');
 check(selected.accepted.filter(row => row.horizon === 5 && row.profileId === 'responsive').length === 2, 'later non-overlap event remains');
 
-console.log(`stock signal profile backtest checks: ${passed}/12 passed`);
+console.log(`stock signal profile backtest checks: ${passed}/${passed} passed`);

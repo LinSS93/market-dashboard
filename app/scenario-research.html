@@ -42,13 +42,17 @@
     <label>情景类型
       <select id="researchKind"><option value="">全部情景</option><option value="waiting_confirmation">等待确认</option><option value="active_long">持有/进场</option><option value="risk_rebuild">风险重建</option></select>
     </label>
-    <label>决策状态
-      <select id="researchState"><option value="">全部状态</option><option value="WATCH">观察</option><option value="PROBE">试仓</option><option value="ADD">加仓</option><option value="HOLD">持有</option><option value="TRIM">减仓</option><option value="EXIT">清仓</option><option value="AVOID">回避</option></select>
+    <label>机会阶段
+      <select id="researchState"><option value="">全部阶段</option><optgroup label="当前机会阶段"><option value="DATA_UNAVAILABLE">数据不足</option><option value="NO_SETUP">等待机会</option><option value="FORMING">机会形成中</option><option value="AWAIT_CONFIRMATION">等待确认</option><option value="BLOCKED">看多受阻</option><option value="READY">可以执行</option><option value="RISK_OFF">风险回避</option></optgroup><optgroup label="历史旧口径（只读）"><option value="WATCH">历史·观察</option><option value="PROBE">历史·试仓</option><option value="ADD">历史·加仓</option><option value="HOLD">历史·持有</option><option value="TRIM">历史·减仓</option><option value="EXIT">历史·清仓</option><option value="AVOID">历史·回避</option></optgroup></select>
     </label>
     <span id="researchFilterMeta" class="muted"></span>
   </section>
 
-  <section class="research-summary" aria-label="实验室摘要">
+  <section class="research-section-head" aria-labelledby="onlineSampleTitle">
+    <div><span class="research-kicker">Live Validation</span><h3 id="onlineSampleTitle">线上实验样本</h3></div>
+    <p>冻结、结算和覆盖数据只用于验证信号与策略，不构成概率或交易指令。</p>
+  </section>
+  <section class="research-summary" aria-label="线上实验样本摘要">
     <article class="research-stat"><span>冻结观察</span><strong id="rsTotal">—</strong><small>只计真实线上实验</small></article>
     <article class="research-stat"><span>已成熟</span><strong id="rsMature">—</strong><small>可复盘，仍非预测概率</small></article>
     <article class="research-stat"><span>待结算</span><strong id="rsPending">—</strong><small>后续日 K 尚不足</small></article>
@@ -68,10 +72,16 @@
       <p class="research-note">正式漂移只比较当前引擎的真实冻结样本。冷启动观察和历史重放参考均不构成有效性结论，不会自动调参、改写正式信号或改变仓位。</p>
     </article>
 
+    <article id="researchRankingPanel" class="research-panel card research-panel-wide">
+      <div class="research-panel-head"><div><span class="research-kicker">Research Diagnostics</span><h3>研究因子诊断</h3></div><span id="rankingMeta" class="muted">读取当前观察池…</span></div>
+      <div id="rankingRows" class="research-empty">读取技术强度、可靠度与执行质量分布…</div>
+      <p class="research-note">这里展示当前观察池的横截面中位数和四分位区间，用于检查研究口径是否压缩或漂移；不显示综合百分制，不参与动作或仓位。</p>
+    </article>
+
     <article class="research-panel card research-panel-wide">
-      <div class="research-panel-head"><div><span class="research-kicker">Signal Profiles</span><h3>信号人格验证</h3></div><span id="profileMeta" class="muted">读取独立影子样本…</span></div>
+      <div class="research-panel-head"><div><span class="research-kicker">Signal Profiles</span><h3>三人格完整策略验证</h3></div><span id="profileMeta" class="muted">读取独立影子样本…</span></div>
       <div id="profileRows" class="research-empty">读取人格样本与结算…</div>
-      <p class="research-note">三套人格是固定、版本化的研究配置。均衡决策仍是唯一正式动作来源；敏捷观察与稳健确认不改变信号、仓位或提醒。样本达到门槛后仅显示描述性统计，不构成预测或投资建议。</p>
+      <p class="research-note">三套人格分别冻结最终动作、仓位比例、关键价位和后续路径。均衡决策仍是唯一正式动作来源；另外两套只做完整策略影子验证。样本达到门槛后仅显示描述性统计，不构成预测或投资建议。</p>
     </article>
 
     <article class="research-panel card research-panel-wide">

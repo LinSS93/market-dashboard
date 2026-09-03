@@ -32,12 +32,19 @@ const live = {
     rsi6:55, rsi12:58, rsi24:60, sma20:140, sma50:130, sma200:null, macdHist:1.5, prevHist:1.2,
     bollPctB:0.8, bollUpper:150, bollLower:130, volRatio:1.2, atr:2, roc:8,
     dataQuality:{ level:'ok' }, marketRegime:{ key:'bull' }, relativeStrength:{ rel20:3 },
-    swingDecision:{ state:'WATCH', summary:'研究示例' }, engineVersion:'test-engine',
+    opportunityModel:{
+      policyId:'stock_opportunity', policyVersion:'stock-opportunity-model-v1', direction:1,
+      opportunity:{ type:'trend_continuation', label:'趋势延续', direction:1 },
+      profiles:{}, riskBoundary:{ blocked:false, hardReasons:[], cautions:[] }, facts:daily.features.opportunityFacts,
+      researchOnly:true,
+    },
+    swingDecision:{ opportunityStage:'FORMING', executionAction:'NONE', summary:'研究示例' }, engineVersion:'test-engine',
   },
 };
 assert.equal(recordLiveFeatureSnapshots({ db, results:live, completedDateForMarket:() => lastDate, capturedAt:2 }).inserted, 1);
 assert.equal(recordLiveFeatureSnapshots({ db, results:live, completedDateForMarket:() => lastDate, capturedAt:3 }).inserted, 0, 'live completed snapshot is immutable');
-assert.equal(db.prepare('SELECT COUNT(*) c FROM stock_feature_policy_evaluations').get().c, 2, 'research and observed-formal evaluations are separate');
+assert.equal(db.prepare('SELECT COUNT(*) c FROM stock_feature_policy_evaluations').get().c, 3, 'technical, opportunity and observed-formal evaluations are separate');
+assert.equal(db.prepare("SELECT status FROM stock_feature_policy_evaluations WHERE policy_id='stock_opportunity'").get().status, 'trend_continuation');
 const historical = backfillHistoricalFeatureSnapshots({ db, watchlist:[{ symbol:'FEATURE', market:'US' }], getBars:() => bars(), days:70 });
 assert.equal(historical.inserted, 11, 'historical proxy backfill preserves one snapshot per eligible bar');
 assert.equal(db.prepare("SELECT COUNT(*) c FROM stock_feature_snapshots WHERE source_origin='historical_daily_proxy'").get().c, 11);
@@ -61,4 +68,4 @@ const benchmark = bars(70, 200);
 const accrued = accrueFeatureSnapshotOutcomes({ db, getBars:symbol => symbol === 'QQQ' ? benchmark : bars(), benchmarkForMarket:() => ({ symbol:'QQQ' }), evaluatedAt:4 });
 assert.ok(accrued.updated > 0, 'proxy/live snapshots share the common next-open outcome contract');
 assert.ok(db.prepare('SELECT COUNT(*) c FROM stock_feature_snapshot_outcomes').get().c > 0);
-console.log('stock feature snapshot checks: 19/19 passed');
+console.log('stock feature snapshot checks: 20/20 passed');

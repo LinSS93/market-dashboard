@@ -424,23 +424,6 @@ export function registerOptionsRoutes(req, res, p, u) {
     return true;
   }
 
-  // 杠杆 ETF 看板期权扫描：返回所有 US 市场 ETF 的期权情绪徽章
-  if (p === '/tracker/options-scan' && req.method === 'GET') {
-    const out = {};
-    for (const pair of getTrackerPairs()) {
-      if (pair.active === 0) continue;
-      const mkt = String(pair.etf_market || 'HK').toUpperCase();
-      if (mkt !== 'US') { out[pair.etf] = { skip: true }; continue; }
-      const c = optCache.get(String(pair.etf).toUpperCase());
-      const v = c ? c.value : { count: 0, top: [] };
-      const al = (v.top && v.top.find(t => t.notional >= ALERT_NOTIONAL || t.ratio >= ALERT_RATIO)) || null;
-      out[pair.etf] = { ...v, sentiment: v.sentiment || null,
-        alert: al ? { strike: al.strike, type: al.type, ratio: al.ratio, notional: al.notional, premium: al.premium, bias: al.bias, side: al.side, sideConfidence: al.sideConfidence } : null };
-    }
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(out));
-    return true;
-  }
 
   return false;
 }

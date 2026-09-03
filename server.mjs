@@ -20,10 +20,10 @@ function execAsync(cmd, opts = {}) {
     exec(cmd, opts, (err, stdout) => { if (err) reject(err); else resolve(stdout); });
   });
 }
-import { stockHandler, initStockEngine, getWatchlist, getLatestAnalysis, getStockPositions, getStockSignalAudit, getAlertAudit, recordRuntimeMetric, getRuntimeMetrics, getSystemSetting, setSystemSetting, transitionsOnly, createDatabaseBackup, getBackupStatus, verifyDatabaseBackup, restoreDatabaseBackup, getMarketStateFor, getHistoricalAnalysisForDate, getEarningsPolicy, SIGNAL_ENGINE_VERSION } from './stock_engine.mjs';
-import { getTrackerPositions, upsertTrackerPosition, addTrackerPositionLot, voidTrackerPositionLot, getTrackerPositionLots, recordTrackerSignalAudit, getTrackerSignalAudit, recordTrackerFxDaily, getTrackerDailyContext, recordTrackerPremiumDaily, getTrackerPremiumBands, recordTrackerIntradayHistory, getTrackerIntradayHistory, pruneTrackerIntradayHistory, importLegacyTrackerHistory, importTrackerFxRows, getTrackerFxCoverage, getTrackerNavAudit, getPremiumDistribution, importTrackerPairs, migrateLegacyTrackerPairs, getTrackerPairs, addTrackerPair, updateTrackerPairCost, autoVerifyTrackerProducts, getProductEntryStatus, deleteTrackerPair, reorderTrackerPairs } from './tracker_engine.mjs';
+import { stockHandler, initStockEngine, getWatchlist, getLatestAnalysis, getStockPositions, getStockSignalAudit, getAlertAudit, recordRuntimeMetric, getRuntimeMetrics, getSystemSetting, setSystemSetting, transitionsOnly, createDatabaseBackup, getBackupStatus, verifyDatabaseBackup, restoreDatabaseBackup, getMarketStateFor, getHistoricalAnalysisForDate, getEarningsPolicy, refreshSignalDriftReport, SIGNAL_ENGINE_VERSION } from './stock_engine.mjs';
+import { getTrackerPositions, recordTrackerSignalAudit, getTrackerSignalAudit, recordTrackerFxDaily, getTrackerDailyContext, recordTrackerPremiumDaily, getTrackerPremiumBands, recordTrackerIntradayHistory, getTrackerIntradayHistory, pruneTrackerIntradayHistory, importLegacyTrackerHistory, importTrackerFxRows, getTrackerFxCoverage, getTrackerNavAudit, getPremiumDistribution, importTrackerPairs, migrateLegacyTrackerPairs, getTrackerPairs, addTrackerPair, updateTrackerPairCost, autoVerifyTrackerProducts, getProductEntryStatus, deleteTrackerPair, reorderTrackerPairs } from './tracker_engine.mjs';
 import { getPersonalTrades, getPersonalReview, getPersonalCalibration, getPersonalOverview, rebuildPersonalData, minimumEconomicShares, setKrwPerUsd } from './personal_calibration.mjs';
-import { fetchQuote, fetchFxPair } from './quote.mjs'; // 共享行情层：与 /stock 看板共用进程内缓存，避免同标的重复抓取
+import { fetchQuote, fetchFxPair, probeQuote } from './quote.mjs'; // 共享行情层：与 /stock 看板共用进程内缓存，避免同标的重复抓取
 import { advanceAlertState } from './alert_logic.mjs';
 import { evaluateTrackerSignal } from './tracker_signal.mjs';
 import { getAllMarketStatus } from './market_calendar.mjs';
@@ -32,10 +32,10 @@ import { interpretNews, getNewsInterpretations, refreshNewsInterpretations, getL
 import { getAllGroups } from './grouping.mjs';
 import { getCompanyProfile, generateCompanyProfile, pruneCompanyProfileCache } from './llm_company_profile.mjs';
 // 机会雷达只运行 V2；历史财务归档只由显式迁移命令处理。
-import { scheduleRadarV2 } from './radar_v2_scheduler.mjs';
+import { scheduleRadarV2, startAutoAssetAuditLoop } from './radar_v2_scheduler.mjs';
 import { runScan as runRadarV2Scan, getScanStatus as getRadarV2ScanStatus } from './radar_v2_scanner.mjs';
 import { getTopCandidates as getRadarV2TopCandidates, getCandidateDetail as getRadarV2CandidateDetail, getRunHistory as getRadarV2RunHistory, getScanStats as getRadarV2ScanStats, listDossiers as listRadarV2Dossiers, getDossierDetail as getRadarV2DossierDetail, listOpportunities as listRadarV2Opportunities, listDossierEvaluations as listRadarV2Evaluations, listSymbolsAcrossChannels as listRadarV2Symbols, getDossiersBySymbol as getRadarV2DossiersBySymbol, listSparklines as listRadarV2Sparklines, getV2Kline as getRadarV2Kline, listResearchQueue as listRadarV2ResearchQueue, dismissSymbol as dismissRadarV2Symbol, restoreSymbol as restoreRadarV2Symbol, listDismissedSymbols as listRadarV2DismissedSymbols, setAssetAudit as setRadarV2AssetAudit, getRadarV2DigestData } from './radar_v2_query_api.mjs';
-import { tryGenerateShadow as tryRadarV2GenerateShadow, applyShadow as applyRadarV2Shadow, rollbackToDefault as rollbackRadarV2ToDefault, getFeedbackStatus as getRadarV2FeedbackStatus } from './radar_v2_feedback.mjs';
+import { tryGenerateShadow as tryRadarV2GenerateShadow, rollbackToDefault as rollbackRadarV2ToDefault, getFeedbackStatus as getRadarV2FeedbackStatus } from './radar_v2_feedback.mjs';
 import { produceEventDossiers, linkObservationsForMarket, linkObservationsForRun, reconcilePendingRuns } from './radar_v2_dossier_producer.mjs';
 import { produceEventFacts } from './radar_v2_event_facts_producer.mjs';
 import { getRadarV2Db } from './radar_v2_schema.mjs';
@@ -50,6 +50,7 @@ import { refreshEarningsCalendar, getNextEarnings, getAllUpcomingEarnings, getEa
 import { refreshEconomicCalendar, getUpcomingEconomicEvents, getMacroBlackoutStatus, startEconomicCalendarScheduler } from './economic_calendar.mjs';
 import { refreshFxRates, getFxStatus } from './fx_rate.mjs';
 import { getIndexBarSnapshot } from './market_index_bar.mjs';
+import { buildStockDataHealth } from './stock_data_health.mjs';
 import { loadOptionsPersist, saveOptionsCache, scheduleOptionsScan, registerOptionsRoutes, getOptionsFlowFast } from './options_engine.mjs';
 import {
   maybeAlert, checkStockAlerts,
@@ -198,13 +199,13 @@ const MIME = {
 
 // ---------- 控制中心（controlSettings 为 alert/radar/news 共享；alert/radar-alert 函数已拆到 ./alert_engine.mjs） ----------
 const ETF_TIERS = DashboardActions.tiers;
-const STOCK_TIERS = DashboardActions.tiers;
+const STOCK_TIERS = ['OPEN', 'ADD', 'REDUCE', 'CLOSE'];
 const ALL_TIERS = [...new Set([...ETF_TIERS, ...STOCK_TIERS])];
 const DEFAULT_CONTROL_SETTINGS = {
   enabled:true,
   webhookEnabled:true,
   modules:{
-    stock:{enabled:true,tiers:['PROBE','ADD','TRIM','EXIT']},
+    stock:{enabled:true,tiers:STOCK_TIERS.slice()},
     etf:{enabled:true,tiers:['PROBE','ADD','TRIM','EXIT']},
     // 机会雷达通知档位：risk=风险待核验, confirmed=多通道优先研究, new=新变化待验证。
     radar_v2:{enabled:false,tiers:['risk','confirmed','new']},
@@ -212,7 +213,7 @@ const DEFAULT_CONTROL_SETTINGS = {
 };
 const DEFAULT_ALERT_SETTINGS = {
   etfTiers: ['PROBE', 'ADD', 'TRIM', 'EXIT'],
-  stockTiers: ['PROBE', 'ADD', 'TRIM', 'EXIT', 'AVOID'],
+  stockTiers: STOCK_TIERS.slice(),
   feishu: true,
 };
 const RADAR_V2_TIERS = ['risk', 'confirmed', 'new'];
@@ -220,13 +221,19 @@ function normalizeRadarV2Tiers(tiers) {
   const set = new Set(Array.isArray(tiers) ? tiers : []);
   return RADAR_V2_TIERS.filter(t => set.has(t));
 }
+function normalizeStockTiers(tiers) {
+  const legacy = { PROBE:'OPEN', TRIM:'REDUCE', EXIT:'CLOSE' };
+  const allowed = new Set(STOCK_TIERS);
+  const values = Array.isArray(tiers) ? tiers : STOCK_TIERS;
+  return [...new Set(values.map(value => legacy[String(value || '').toUpperCase()] || String(value || '').toUpperCase()).filter(value => allowed.has(value)))];
+}
 function normalizeControlSettings(value={}, fallback=DEFAULT_CONTROL_SETTINGS) {
   const modules=value?.modules||{}, base=fallback?.modules||DEFAULT_CONTROL_SETTINGS.modules;
   return {
     enabled:typeof value.enabled==='boolean'?value.enabled:fallback.enabled!==false,
     webhookEnabled:typeof value.webhookEnabled==='boolean'?value.webhookEnabled:fallback.webhookEnabled!==false,
     modules:{
-      stock:{enabled:typeof modules.stock?.enabled==='boolean'?modules.stock.enabled:base.stock?.enabled!==false,tiers:DashboardActions.normalizeTiers(modules.stock?.tiers||base.stock?.tiers||DEFAULT_ALERT_SETTINGS.stockTiers)},
+      stock:{enabled:typeof modules.stock?.enabled==='boolean'?modules.stock.enabled:base.stock?.enabled!==false,tiers:normalizeStockTiers(modules.stock?.tiers||base.stock?.tiers||DEFAULT_ALERT_SETTINGS.stockTiers)},
       etf:{enabled:typeof modules.etf?.enabled==='boolean'?modules.etf.enabled:base.etf?.enabled!==false,tiers:DashboardActions.normalizeTiers(modules.etf?.tiers||base.etf?.tiers||DEFAULT_ALERT_SETTINGS.etfTiers)},
       radar_v2:{enabled:typeof modules.radar_v2?.enabled==='boolean'?modules.radar_v2.enabled:base.radar_v2?.enabled!==false,tiers:normalizeRadarV2Tiers(modules.radar_v2?.tiers||base.radar_v2?.tiers||RADAR_V2_TIERS)},
     },
@@ -924,10 +931,9 @@ async function computePair(pair) {
   // 正股 swing summary
   const underlyingSwing = underlyingAnalysis?.swingDecision || null;
   const underlyingSignalSummary = underlyingAnalysis ? {
-    state: underlyingSwing?.state || sig.underlyingAction || null,
-    label: DashboardActions.label(underlyingSwing?.state || sig.underlyingAction, { hasPosition: !!underlyingSwing?.position?.hasPosition }),
-    pending_label: (underlyingSwing?.stabilizerGate?.affected && underlyingSwing?.stabilizerGate?.targetState) ? `待确认：${DashboardActions.label(underlyingSwing.stabilizerGate.targetState)}` : null,
-    candidate_state: underlyingSwing?.stabilizerGate?.targetState || null,
+    opportunity_stage: underlyingSwing?.opportunityStage || null,
+    execution_action: underlyingSwing?.executionAction || null,
+    label: underlyingSwing?.label || null,
     summary: underlyingSwing?.summary || underlyingAnalysis?.tradePlan?.summary || null,
     trigger: underlyingSwing?.trigger || null,
     reliability: underlyingSwing?.reliabilityScore ?? sig.underlyingReliability,
@@ -1154,10 +1160,32 @@ function nextPairId() {
   return trackerPairs.reduce((m, p) => Math.max(m, p.id || 0), 0) + 1;
 }
 function dataHealthPayload(){
-  const analysis=getLatestAnalysis()||{},stocks=getWatchlist().map(w=>{const q=analysis[w.symbol]?.liveQuote||{},missing=!q.providerTime&&!q.quoteTs,lag=Number(q.providerLagMinutes);return {name:w.symbol,status:missing?'error':q.stale?'stale':'fresh',source:q.source||'—',provider_time:q.providerTime||null,updated:q.quoteTs?new Date(q.quoteTs).toLocaleString('zh-CN',{hour12:false}):null,detail:missing?'尚无可用报价':q.stale?'行情延迟或正在沿用缓存报价':Number.isFinite(lag)?`源延迟约 ${lag.toFixed(1)} 分钟`:''};});
+  const analysis=getLatestAnalysis()||{},watchlist=getWatchlist(),marketStatus=getAllMarketStatus();
+  const stockHealth=buildStockDataHealth({watchlist,analysis,marketStatus});
+  const stocks=stockHealth.stocks;
   const trackers=[...trkCache.values()].map(x=>({name:(x.etf||'')+(x.underlying?' / '+x.underlying:''),status:x.etf_price==null?'error':x.quote_stale?'stale':'fresh',source:[x.etf_source,x.underlying_source].filter(Boolean).join(' / ')||'—',provider_time:[x.etf_provider_time,x.underlying_provider_time].filter(Boolean).join(' / ')||null,detail:x.data_error||`ETF/正股源延迟 ${x.etf_quote_lag_minutes??'—'} / ${x.underlying_quote_lag_minutes??'—'} 分钟`}));
   const fx=getTrackerFxCoverage().map(x=>({name:x.fx_pair,status:x.count>=100?'fresh':x.count?'stale':'error',source:'Yahoo historical / live',provider_time:x.last_date,detail:`${x.count} 个交易日，起始 ${x.first_date||'—'}`}));
-  const all=[...stocks,...trackers,...fx],bad=all.filter(x=>x.status!=='fresh').length,b=getBackupStatus();return {ts:Date.now(),summary:`共 ${all.length} 项数据，${bad?bad+' 项需要注意':'全部正常'}`,stocks,trackers,fx,backup:b};
+  const all=[...stocks,...trackers,...fx],bad=all.filter(x=>x.status!=='fresh').length,b=getBackupStatus();return {ts:Date.now(),summary:`共 ${all.length} 项数据，${bad?bad+' 项需要注意':'全部正常'}`,markets:stockHealth.markets,stocks,trackers,fx,backup:b};
+}
+
+async function recheckStockDataSources(markets = []) {
+  const marketSet=new Set((Array.isArray(markets)?markets:[]).map(value=>String(value||'').toUpperCase()).filter(value=>['US','HK','KR','CN'].includes(value)));
+  const status=getAllMarketStatus();
+  if(!marketSet.size){for(const market of ['US','HK','KR','CN'])if(status[market]?.open)marketSet.add(market);}
+  const watchlist=getWatchlist();
+  const probes=await Promise.all([...marketSet].map(async market=>{
+    const sample=watchlist.find(row=>String(row.market||'US').toUpperCase()===market);
+    if(!sample)return {market,ok:false,error:'no_watchlist_sample'};
+    const quote=await probeQuote(market,sample.symbol);
+    return {market,symbol:sample.symbol,ok:quote?.price!=null,source:quote?.source||null,provider_time:quote?.providerTime||null};
+  }));
+  indexBarCache=null;
+  void enqueueBackgroundTask('market:index-recheck',async()=>{
+    const payload=await getIndexBarSnapshot({force:true});
+    indexBarCache={payload,ts:Date.now()};
+    return payload;
+  },{priority:'high',dedupeKey:'market:index-recheck'}).catch(error=>console.error('[market] index recheck failed:',error?.message||error));
+  return {ok:probes.some(item=>item.ok),ts:Date.now(),probes};
 }
 
 // ---------- 静态文件 ----------
@@ -1214,7 +1242,8 @@ const server = http.createServer(async (req, res) => {
   const isApiPath = p === '/mcp' || p === '/stock-snapshot' || p === '/stock-analysis'
     || p.startsWith('/stock/') || p.startsWith('/stock-') || p.startsWith('/tracker/')
     || p.startsWith('/radar_v2/') || p.startsWith('/news/') || p.startsWith('/alerts')
-    || p === '/control/status' || p === '/control/settings' || p === '/market/index-bar' || p === '/market/status';
+    || p === '/control/status' || p === '/control/settings' || p === '/market/index-bar' || p === '/market/status'
+    || p === '/data/health' || p === '/data/health/recheck';
   if (isApiPath) {
     res.once('finish', () => {
       const durationMs = Date.now() - requestStartedAt;
@@ -1293,7 +1322,7 @@ const server = http.createServer(async (req, res) => {
       settings:controlSettings,updatedAt:controlUpdatedAt,webhook:feishuIntegrationStatus(),
       radar:{active:radarStatus.active,inFlightMarkets:radarStatus.inFlightMarkets,lastRuns:radarStatus.lastRuns,stats:radarStats.ok ? radarStats.data : []},
       backgroundTasks:getBackgroundTaskStatus(),
-      runtimeMetrics:getRuntimeMetrics({hours:24}),
+      runtimeMetrics:getRuntimeMetrics({hours:24,limit:3000}),
       dataHealth:dataHealthPayload(),news:getNewsStatus(),
       recentAlerts:getAlertAudit({limit:40}),
     }));
@@ -1612,7 +1641,8 @@ const server = http.createServer(async (req, res) => {
   if (p === '/radar_v2/queue' && req.method === 'GET') {
     const market = u.searchParams.get('market') || undefined;
     const limit = Number(u.searchParams.get('limit')) || 30;
-    const result = listRadarV2ResearchQueue({ market, limit });
+    const search = u.searchParams.get('search') || undefined;
+    const result = listRadarV2ResearchQueue({ market, limit, search });
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
@@ -1663,10 +1693,14 @@ const server = http.createServer(async (req, res) => {
   }
 
   // v2 按股票查询全部 dossier（按 channel 分组，全状态）
+  // 审计修正（性能）：默认 summary 首屏瘦身载荷（每通道最近 10 个 dossier、
+  // 每 dossier 最新 3 条 observation，不带 evaluations/source_refs——下钻已走
+  // /radar_v2/dossier/detail 懒加载）；?mode=full 返回完整档案。
   if (p === '/radar_v2/symbol-dossiers' && req.method === 'GET') {
     const market = u.searchParams.get('market') || '';
     const symbol = u.searchParams.get('symbol') || '';
-    const result = getRadarV2DossiersBySymbol(market, symbol, { includeManual: false });
+    const mode = u.searchParams.get('mode') === 'full' ? 'full' : 'summary';
+    const result = getRadarV2DossiersBySymbol(market, symbol, { includeManual: false, mode });
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
@@ -1762,7 +1796,7 @@ const server = http.createServer(async (req, res) => {
   // ===== v2 反馈调权（阶段 3）=====
   // 状态查询：GET /radar_v2/feedback/status?market=US
   // 触发生成 shadow：POST /radar_v2/feedback/trigger?market=US
-  // 应用 shadow：POST /radar_v2/feedback/apply?market=US
+  // 应用 shadow：POST /radar_v2/feedback/apply?market=US（已禁用，见下方说明）
   // 回滚到 default：POST /radar_v2/feedback/rollback?market=US
   if (p === '/radar_v2/feedback/status' && req.method === 'GET') {
     const market = u.searchParams.get('market') || undefined;
@@ -1787,15 +1821,15 @@ const server = http.createServer(async (req, res) => {
     }
   }
   if (p === '/radar_v2/feedback/apply' && req.method === 'POST') {
-    const market = (u.searchParams.get('market') || 'US').toUpperCase();
-    try {
-      const result = applyRadarV2Shadow(market);
-      res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify(result));
-    } catch (e) {
-      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: false, error: e?.message || String(e) }));
-    }
+    // 审计修正：shadow 生成已在 tryGenerateShadow 内置时间切分样本外验证门槛
+    // （train 70% 推导权重 + validation 30% 样本外改善 > 0 才生成 shadow）。
+    // apply 路由仍维持禁用：生产 outcome 样本不足（<50 不生成 shadow），
+    // 且时间外改善只证明"不劣于"，启用 apply 需人工确认后再放开。
+    res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({
+      ok: false,
+      error: 'feedback/apply 已禁用：shadow 生成已内置时间切分样本外验证门槛，但 apply 启用需人工确认（当前 outcome 样本仍在积累）。请使用 GET /radar_v2/feedback/status 查看研究报告。',
+    }));
   }
   if (p === '/radar_v2/feedback/rollback' && req.method === 'POST') {
     const market = (u.searchParams.get('market') || 'US').toUpperCase();
@@ -1963,6 +1997,17 @@ const server = http.createServer(async (req, res) => {
   if (p === '/data/health' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });return res.end(JSON.stringify(dataHealthPayload()));
   }
+  if (p === '/data/health/recheck' && req.method === 'POST') {
+    try {
+      let body={};try{body=JSON.parse(await readBody(req)||'{}')}catch{}
+      const result=await recheckStockDataSources(body.markets);
+      res.writeHead(200,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});
+      return res.end(JSON.stringify(result));
+    } catch (error) {
+      res.writeHead(500,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});
+      return res.end(JSON.stringify({ok:false,error:error.message}));
+    }
+  }
   if (p === '/backup/create' && req.method === 'POST') {
     try{const out=await enqueueBackgroundTask('database:manual-backup',()=>createDatabaseBackup('manual'),{priority:'high',dedupeKey:'database:backup'});res.writeHead(200,{'Content-Type':'application/json; charset=utf-8'});return res.end(JSON.stringify(out));}
     catch(e){res.writeHead(500,{'Content-Type':'application/json; charset=utf-8'});return res.end(JSON.stringify({ok:false,error:e.message}));}
@@ -2017,21 +2062,6 @@ const server = http.createServer(async (req, res) => {
     if (!(pid > 0)) { res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' }); return res.end(JSON.stringify({ error: 'invalid pair_id' })); }
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(getPremiumDistribution(pid, { days, buckets })));
-  }
-  // 杠杆 ETF 看板空头情绪：返回所有 active ETF 的空头缓存（仅 US/HK 有数据源，其他市场标记 unsupported）
-  // 纯缓存响应——不在此处发起网络请求；实际抓取由 backgroundShortScan() 后台完成（已扩展扫描 tracker US/HK ETF）。
-  if (p === '/tracker/short-scan' && req.method === 'GET') {
-    const out = {};
-    for (const pair of getTrackerPairs()) {
-      if (pair.active === 0) continue;
-      const mkt = String(pair.etf_market || 'HK').toUpperCase();
-      const key = String(pair.etf || '').toUpperCase();
-      if (mkt !== 'US' && mkt !== 'HK') { out[pair.etf] = { unsupported: true, market: mkt }; continue; }
-      const c = shortCache.get(key);
-      out[pair.etf] = c ? c.value : { market: mkt, pending: true };
-    }
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify(out));
   }
   if (p === '/stock/signal-audit' && req.method === 'GET') {
     const symbol=String(u.searchParams.get('symbol')||'').toUpperCase().replace(/[^A-Z0-9]/g,''), limit=Math.min(1000,Math.max(1,Number(u.searchParams.get('limit'))||120));
@@ -2092,10 +2122,11 @@ const server = http.createServer(async (req, res) => {
       const plan=analysis&&analysis.tradePlan||null;
       const action=plan&&plan.action||analysis&&analysis.signal||null;
       const swing=analysis&&analysis.swingDecision||null;
-      const signalState=swing&&swing.state||null;
+      const executionAction=swing&&swing.executionAction||null;
+      const opportunityStage=swing&&swing.opportunityStage||null;
 
-      const isLongSignal=['BUY','ADD','PROBE','STRONG_BUY'].includes(action)||signalState==='PROBE'||signalState==='ADD';
-      const isShortSignal=['SELL','REDUCE','TRIM','EXIT','STRONG_SELL'].includes(action)||signalState==='TRIM'||signalState==='EXIT';
+      const isLongSignal=['BUY','ADD','STRONG_BUY'].includes(action)||['OPEN','ADD'].includes(executionAction);
+      const isShortSignal=['SELL','REDUCE','STRONG_SELL'].includes(action)||['REDUCE','CLOSE'].includes(executionAction)||opportunityStage==='RISK_OFF';
       const isNeutralSignal=!isLongSignal&&!isShortSignal;
 
       // 4. 合成判断
@@ -2168,54 +2199,8 @@ const server = http.createServer(async (req, res) => {
   if (p.startsWith('/research/')) return stockHandler(req, res);
 
   // ===== 2x ETF 追踪看板（自建数据层）=====
-  if (p === '/tracker/positions') {
-    if (req.method === 'GET') {
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify(getTrackerPositions()));
-    }
-    if (req.method === 'POST') {
-      const bodyStr=await readBody(req); let b; try{b=JSON.parse(bodyStr||'{}')}catch{b={}};
-      const pairId=Math.round(Number(b.pair_id)||0);
-      if (!trackerPairs.some(x=>x.id===pairId)) { res.writeHead(400,{'Content-Type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ error: 'invalid pair_id' })); }
-      // options 支持 baseCurrency（多币种持仓本位币转换）
-      const options={
-        baseCurrency: b.base_currency || b.baseCurrency || null,
-      };
-      const row=upsertTrackerPosition(pairId,b.shares,b.cost,b.currency,options);
-      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify(row));
-    }
-  }
-  // 加仓阶梯管理（P0-9）：每个 lot 独立记录，自动重算加权平均成本
-  if (p === '/tracker/position-lots') {
-    if (req.method === 'GET') {
-      const pairId=Math.round(Number(u.searchParams.get('pair_id'))||0);
-      if(pairId<=0){res.writeHead(400,{'Content-Type':'application/json; charset=utf-8'});return res.end(JSON.stringify({ error: 'pair_id required' }));}
-      const lots=getTrackerPositionLots(pairId);
-      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
-      return res.end(JSON.stringify(lots));
-    }
-    if (req.method === 'POST') {
-      const bodyStr=await readBody(req); let b; try{b=JSON.parse(bodyStr||'{}')}catch{b={}};
-      if (b.action === 'void') {
-        const pairId=Math.round(Number(b.pair_id)||0);
-        const lotId=b.lot_id;
-        if(pairId<=0||!lotId){res.writeHead(400,{'Content-Type':'application/json; charset=utf-8'});return res.end(JSON.stringify({ error: 'pair_id and lot_id required' }));}
-        const result=voidTrackerPositionLot(pairId, lotId, { reason:b.reason });
-        res.writeHead(result.ok ? 200 : 409, { 'Content-Type':'application/json; charset=utf-8' });
-        return res.end(JSON.stringify(result));
-      }
-      const pairId=Math.round(Number(b.pair_id)||0);
-      if (!trackerPairs.some(x=>x.id===pairId)) { res.writeHead(400,{'Content-Type':'application/json; charset=utf-8'}); return res.end(JSON.stringify({ error: 'invalid pair_id' })); }
-      const lot=addTrackerPositionLot(pairId, b.lot_id || null, b.side || 'BUY', b.shares, b.price, b.tag || null, { fee: b.fee, date: b.date });
-      res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
-      return res.end(JSON.stringify(lot || {error:'invalid lot data'}));
-    }
-    if (req.method === 'DELETE') {
-      res.writeHead(410, { 'Content-Type':'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ error:'操作事件不可物理删除，请使用 POST /tracker/position-lots { action:"void" } 作废。' }));
-    }
-  }
+  // 持仓写入口已收敛到股票监控看板（/stock 事件体系）；
+  // /tracker/positions 与 /tracker/position-lots 路由随 tracker 前端持仓 tab 一并移除。
   if (p === '/tracker/signal-audit' && req.method === 'GET') {
     const pairId=Math.round(Number(u.searchParams.get('pair_id'))||0), limit=Math.min(1000,Math.max(1,Number(u.searchParams.get('limit'))||120));
     res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
@@ -2307,6 +2292,11 @@ server.listen(FRONT_PORT, FRONT_HOST, () => {
   // 只读 API（/radar_v2/candidates、/radar_v2/dossiers 等）不受任何开关限制。
   const v2ScannerEnabled = String(process.env.RADAR_V2_SCANNER_ENABLED || process.env.RADAR_V2_ENABLED || '').trim() === '1';
   const v2DossierEnabled = String(process.env.RADAR_V2_DOSSIER_ENABLED || process.env.RADAR_V2_ENABLED || '').trim() === '1';
+
+  // === 自动资产审计（轻操作：规则分类 provisional，无任何开关依赖） ===
+  // 审计修正：资产分类不能挂在扫描调度开关下（Q07 生产 scanner 默认关闭，
+  // 挂 scheduleRadarV2 会导致审计永不执行）。幂等 + 分批让出，首轮延迟 120s。
+  startAutoAssetAuditLoop();
 
   // === Scanner 调度（重操作：全市场扫描） ===
   if (v2ScannerEnabled) {
@@ -2604,7 +2594,7 @@ server.listen(FRONT_PORT, FRONT_HOST, () => {
   loadAlertState();
   checkStockAlerts();
   setInterval(checkStockAlerts, 30000);
-  console.log('[alert] 信号提醒引擎已启动（股票状态转移：PROBE·ADD·TRIM·EXIT）');
+  console.log('[alert] 信号提醒引擎已启动（股票执行动作：OPEN·ADD·REDUCE·CLOSE）');
   } else {
     console.log('[background] 后台自动任务已关闭（MARKET_DASHBOARD_BACKGROUND_ENABLED=0）');
   }

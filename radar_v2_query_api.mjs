@@ -17,6 +17,7 @@
 import { getRadarV2Db } from './radar_v2_schema.mjs';
 import { SCORING_PROFILE_VERSION } from './radar_v2_scoring.mjs';
 import { classifyByNameFallback } from './radar_v2_universe.mjs';
+import { classifyByMarketRules } from './radar_v2_asset_rules.mjs';
 import { lastCompletedTradingDate } from './market_calendar.mjs';
 
 // === Prepared statement 缓存 ===
@@ -930,16 +931,30 @@ function buildSummaryReason(action, channelSummaries, avgScore, invalidated) {
  * 事件/趋势/基本面档案，每组内联渲染每个 dossier 的完整详情（条件/评分/观测/来源/审计）。
  * 只返回有档案的通道（空通道不返回），按 CHANNEL_ORDER 排序。
  *
+ * mode（审计修正·性能）：
+ *   - 'full'：完整档案（每 dossier 全量 observations/evaluations/source_refs）。
+ *     程序化调用方与需要全量历史的使用场景。
+ *   - 'summary'：首屏瘦身载荷。每通道只带最近 SUMMARY_DOSSIERS_PER_CHANNEL 个
+ *     dossier，每个 dossier 只带最新 SUMMARY_OBS_PER_DOSSIER 条 observation；
+ *     不带 evaluations/source_refs（首屏不渲染，"查看完整档案"下钻已走
+ *     getDossierDetail 懒加载）。组内附 dossier_count 供 UI 提示截断。
+ *     背景：Q07 实测 01496（5 个 dossier）返回 339KB——44 条 observation、
+ *     123 条 evaluation 与完整 evidence 大量浪费在首屏。
+ *
  * @param {string} market - US/HK/CN
  * @param {string} symbol
- * @param {{includeManual?: boolean}} [options]
+ * @param {{includeManual?: boolean, mode?: 'full'|'summary'}} [options]
  * @returns {{ ok, data, error }} data 为 { market, symbol, name, groups: [{channel, dossiers}] } 或 null
  */
-export function getDossiersBySymbol(market, symbol, { includeManual = true } = {}) {
+const SUMMARY_DOSSIERS_PER_CHANNEL = 10;
+const SUMMARY_OBS_PER_DOSSIER = 3;
+
+export function getDossiersBySymbol(market, symbol, { includeManual = true, mode = 'full' } = {}) {
   if (!market || !symbol) {
     return { ok: false, data: null, error: 'market 和 symbol 必填' };
   }
   try {
+    const isSummary = mode === 'summary';
     const ds = dossierStmts();
     const rows = ds.dossiersByMarketSymbol.all(market, symbol);
     if (rows.length === 0) {
@@ -970,7 +985,8 @@ export function getDossiersBySymbol(market, symbol, { includeManual = true } = {
       ? Number(((priceRow.close - priceRow.prev_close) / priceRow.prev_close * 100).toFixed(2))
       : null;
 
-    // 按 channel 分组
+    // 按 channel 分组；summary 模式每通道只保留最近 N 个 dossier（时间线折叠区
+    // 只展示跨通道 top 10，N=10 足够），dossier_count 记录全量供 UI 提示截断
     const byChannel = new Map();
     for (const row of rows) {
       const ch = row.channel || 'event';
@@ -978,13 +994,22 @@ export function getDossiersBySymbol(market, symbol, { includeManual = true } = {
       byChannel.get(ch).push(row);
     }
 
-    // 批量查询所有 dossier 的子数据（消除 N+1）
-    const dossierIds = rows.map(r => r.id);
+    // summary 模式截断后仍参与批量查询的行
+    const includedRows = [];
+    const channelCounts = {};
+    for (const [ch, chRows] of byChannel) {
+      channelCounts[ch] = chRows.length;
+      const kept = isSummary ? chRows.slice(0, SUMMARY_DOSSIERS_PER_CHANNEL) : chRows;
+      includedRows.push(...kept);
+    }
+
+    // 批量查询 dossier 的子数据（消除 N+1）；summary 模式不查 evaluations/source_refs
+    const dossierIds = includedRows.map(r => r.id);
     const idsJson = JSON.stringify(dossierIds);
     const includeManualFlag = includeManual ? 1 : 0;
-    const allSourceRefs = ds.sourceRefsByDossierIds.all(idsJson);
     const allObservations = ds.observationsByDossierIds.all(idsJson, includeManualFlag);
-    const allEvaluations = ds.evaluationsByDossierIds.all(idsJson);
+    const allSourceRefs = isSummary ? [] : ds.sourceRefsByDossierIds.all(idsJson);
+    const allEvaluations = isSummary ? [] : ds.evaluationsByDossierIds.all(idsJson);
 
     // 按 dossier_id 分组
     const refsMap = new Map();
@@ -1002,16 +1027,28 @@ export function getDossiersBySymbol(market, symbol, { includeManual = true } = {
       if (!evalMap.has(e.dossier_id)) evalMap.set(e.dossier_id, []);
       evalMap.get(e.dossier_id).push(decorateEvaluation(e));
     }
+    // summary 模式：每 dossier 只保留最新 M 条 observation（供 summarizeSymbol
+    // 向后找最新评分 + 通道矩阵评分），其余历史留给 getDossierDetail 下钻
+    if (isSummary) {
+      for (const list of obsMap.values()) {
+        if (list.length > SUMMARY_OBS_PER_DOSSIER) list.splice(0, list.length - SUMMARY_OBS_PER_DOSSIER);
+      }
+    }
 
+    const includedIdSet = new Set(dossierIds);
     const groups = [...byChannel.entries()]
       .map(([channel, dossierRows]) => {
-        const dossiers = dossierRows.map((dossier) => ({
-          dossier: decorateDossier(dossier),
-          source_refs: refsMap.get(dossier.id) || [],
-          observations: obsMap.get(dossier.id) || [],
-          evaluations: evalMap.get(dossier.id) || [],
-        }));
-        return { channel, dossiers };
+        const dossiers = dossierRows
+          .filter((dossier) => includedIdSet.has(dossier.id))
+          .map((dossier) => ({
+            dossier: decorateDossier(dossier),
+            source_refs: refsMap.get(dossier.id) || [],
+            observations: obsMap.get(dossier.id) || [],
+            evaluations: evalMap.get(dossier.id) || [],
+          }));
+        return isSummary
+          ? { channel, dossier_count: channelCounts[channel], dossiers }
+          : { channel, dossiers };
       })
       .sort((a, b) => channelSortKey(a.channel) - channelSortKey(b.channel));
 
@@ -1030,6 +1067,7 @@ export function getDossiersBySymbol(market, symbol, { includeManual = true } = {
         name: nameRow ? nameRow.name : null,
         latest_price,
         latest_price_change_pct,
+        mode: isSummary ? 'summary' : 'full',
         groups,
         summary: summarizeSymbol(groups),
         score_breakdown: scoreBreakdown,
@@ -1124,11 +1162,12 @@ export function listDossierEvaluations(dossierId) {
 //
 // 设计目标（P0 修复）：
 //   1. 仅返回 20-30 个真正适合今天研究的普通股对象
-//   2. queue_as_of：各市场最后完成交易日（来自 market_calendar）
+//   2. queue_as_of：应到交易日（市场日历）+ 最后完整扫描日 + 应到日扫描状态/覆盖率
 //   3. eligibility：instrument_type='equity' + 名称正则过滤非普通股（Warrant/Note/ETF...）
-//   4. primary_driver：真正驱动本组归属的非例行披露 dossier（不是 latest_fact）
-//   5. coverage：通道数 + 是否有当前 scheduled_daily 评分
-//   6. bucket：new_signal / cross_confirm / data_gap / risk_review
+//   4. admission_driver：真正驱动准入/分桶的信号 dossier（不是 latest_fact）；
+//      latest_context 另附最近发生的非驱动 dossier
+//   5. coverage：通道数 + 是否有当前 scheduled_daily 评分 + 评分是否随最近完整日扫刷新
+//   6. bucket：new_signal / cross_confirm / risk_review
 //
 // 例行披露（旧 ROUTINE_DISCLOSURE）、ETF/Notes、历史遗留 dossier 留在档案库，不进入队列。
 // 注：ROUTINE_DISCLOSURE 已废弃，新 triage 规则未命中即丢弃，不再兜底产生此类型。
@@ -1208,10 +1247,11 @@ const CHANNEL_HALF_LIFE_DAYS = { event: 2, trend: 7, fundamental: 14 };
 const CHANNEL_MAX_BONUS = { event: 15, trend: 20, fundamental: 15 };
 const AGING_DAYS = 14;
 const AGING_SCORE_THRESHOLD = 50;
-// bucket 定义（内部分类，用于 action/primary_driver 选取；UI 不再按 5 桶分组展示）：
+// bucket 定义（内部分类，用于 action/admission_driver 选取；UI 不再按 5 桶分组展示）：
 //   risk_review     有负面非趋势信号（风险优先可见）
-//   cross_confirm   hasCurrentScore=true AND freshPositiveChannelCount>=2 AND compositeScore>=70
-//   new_signal      hasCurrentScore=true AND (channelCount=1 OR compositeScore<70)
+//   cross_confirm   已审计普通股（非 provisional）AND 评分未过期 AND freshPositiveChannelCount>=2 AND compositeScore>=70
+//   new_signal      有评分但不满足 cross_confirm 条件（含 provisional——审计修正：
+//                   未确认资产类别的对象不得进入多通道高置信，留在待确认信号组）
 //   audit_pending   hasCurrentScore=false AND audit_category='common_stock_provisional'
 //   unscored        hasCurrentScore=false AND audit_category='common_stock'
 const QUEUE_BUCKET_ORDER = ['risk_review', 'cross_confirm', 'new_signal', 'audit_pending', 'unscored'];
@@ -1359,14 +1399,94 @@ function buildScoreBreakdown(db, market, symbol, groups) {
   };
 }
 
-// 候选池分桶（内部分类，用于 action/primary_driver 选取）
+// 候选池分桶（内部分类，用于 action/admission_driver 选取）
 // risk_review 优先；有评分按分数竞争 cross_confirm/new_signal；无评分按审计状态分流。
-// provisional 有评分时按分数分桶（不无脑进 audit_pending），"资产待审计"标签由 eligibility 独立渲染。
-function computePoolBucket({ compositeScore, freshPositiveChannelCount, hasCurrentScore, hasNegativeNonTrend, isProvisional }) {
+// 审计修正：provisional（资产分类未核验）不得进入 cross_confirm——未确认资产类别的
+// 对象不能参与多通道高置信排序，留在 new_signal（卡片带"资产待审计"标签）。
+// 评分未随最近完整日扫刷新（score_stale）的对象同样不参与 cross_confirm，降级为 new_signal 待更新。
+function computePoolBucket({ compositeScore, freshPositiveChannelCount, hasCurrentScore, hasNegativeNonTrend, isProvisional, isScoreStale }) {
   if (hasNegativeNonTrend) return 'risk_review';
   if (!hasCurrentScore) return isProvisional ? 'audit_pending' : 'unscored';
-  if (compositeScore != null && compositeScore >= 70 && freshPositiveChannelCount >= 2) return 'cross_confirm';
+  if (!isScoreStale && !isProvisional && compositeScore != null && compositeScore >= 70 && freshPositiveChannelCount >= 2) return 'cross_confirm';
   return 'new_signal';
+}
+
+// 构造 dossier 摘要（admission_driver / latest_context / reversal_evidence 共用结构）
+function buildDriverSummary(channelRow) {
+  if (!channelRow) return null;
+  return {
+    dossier_id: channelRow.dossier_id,
+    channel: channelRow.channel,
+    change_type: channelRow.change_type,
+    direction: channelRow.direction,
+    available_at: channelRow.available_at,
+    priority_level: channelRow.priority_level,
+    status: channelRow.status,
+    fact: extractFirstFact(channelRow.facts_json),
+  };
+}
+
+// 选取真正驱动准入/分桶的 dossier（审计修正：旧实现非风险组直接取最新 dossier，
+// 会把 neutral 例行披露当成"入池原因"，与实际评分驱动脱节——生产曾出现
+// action=positive 但主驱动显示 neutral 8-K 的矛盾）。
+//   risk_review → 最新负面非趋势 dossier（入组原因，正向证据另见 reversal_evidence）
+//   其他 bucket → signal bonus 贡献（衰减权重 × 通道上限）最大的正向通道 dossier
+function pickAdmissionDriver(entry, bucket, nowMs) {
+  if (bucket === 'risk_review') {
+    const negChannel = entry.channels.find(
+      (c) => c.channel !== 'trend' && c.direction === 'negative'
+    );
+    return negChannel || entry.latestRow;
+  }
+  let best = null;
+  let bestWeight = -1;
+  for (const c of entry.channels) {
+    if (c.direction !== 'positive') continue;
+    const halfLife = CHANNEL_HALF_LIFE_DAYS[c.channel];
+    const maxBonus = CHANNEL_MAX_BONUS[c.channel];
+    if (!halfLife || !maxBonus) continue;
+    const weight = decayWeight(c.available_at, halfLife, nowMs) * maxBonus;
+    if (weight > bestWeight) { bestWeight = weight; best = c; }
+  }
+  return best || entry.latestRow;
+}
+
+// 困境反转的正向证据：仍在有效期内（衰减权重 > 0.1）的最新正向通道 dossier。
+// 让"负面事件 + 正向证据并存"的反转逻辑显式可见，而不是只显示负面公告。
+function pickReversalEvidence(entry, nowMs) {
+  let best = null;
+  let bestWeight = 0;
+  for (const c of entry.channels) {
+    if (c.direction !== 'positive') continue;
+    const halfLife = CHANNEL_HALF_LIFE_DAYS[c.channel];
+    if (!halfLife) continue;
+    const weight = decayWeight(c.available_at, halfLife, nowMs);
+    if (weight > 0.1 && weight > bestWeight) { bestWeight = weight; best = c; }
+  }
+  return best;
+}
+
+// 按市场轮转选取条目：各市场内部保持既定排序，市场间轮流取数，
+// 防止候选规模大的市场（如 CN）占满剩余配额、淹没其他市场。
+function interleaveByMarket(items, quota) {
+  if (quota <= 0) return [];
+  const byMarket = new Map();
+  for (const it of items) {
+    if (!byMarket.has(it.market)) byMarket.set(it.market, []);
+    byMarket.get(it.market).push(it);
+  }
+  const picked = [];
+  let progressed = true;
+  while (picked.length < quota && progressed) {
+    progressed = false;
+    for (const queue of byMarket.values()) {
+      if (queue.length === 0) continue;
+      picked.push(queue.shift());
+      progressed = true;
+      if (picked.length >= quota) break;
+    }
+  }
+  return picked;
 }
 
 /**
@@ -1387,37 +1507,76 @@ function computePoolBucket({ compositeScore, freshPositiveChannelCount, hasCurre
  *   - 趋势通道最新 dossier direction='negative'（趋势变差）
  *   - 14 天无新 dossier 且综合评分 < 50（无评分对象也按 14 天老化）
  *
+ * 排序（审计修正）：risk_review 置顶限量 → cross_confirm 优先占位 →
+ * new_signal 按市场轮转分配剩余名额；评分未随最近完整日扫刷新的对象
+ * （coverage.score_stale）不参与 cross_confirm，且在各组内垫底。
+ *
  * @param {object} [opts]
  * @param {string} [opts.market] - 可选：US/HK/CN，省略则三市场合并（已绑定到 SQL）
  * @param {number} [opts.limit=30] - 返回条数，最大 100
+ * @param {string} [opts.search] - 可选：服务端搜索，按 symbol/name 过滤整个候选池
  * @returns {{ ok, data, error }}
  *   data: {
- *     items: Array,             // 按分数截断后的扁平数组（risk_review 置顶 + 评分降序）
+ *     items: Array,             // risk_review 置顶 + cross_confirm 优先 + new_signal 市场轮转
  *     buckets: { [bucket]: { total, returned } },  // 各 bucket 在候选池中的计数
- *     queue_as_of: {US,HK,CN},
- *     total: number             // 候选池准入后的总条数（未含 limit 截断）
+ *     queue_as_of: { [market]: { expected_date, last_complete_date, scan_status, coverage_pct } },
+ *     total: number             // 候选池准入后的总条数（未含 limit 截断；有 search 时为匹配总数）
  *   }
  */
-export function listResearchQueue({ market, limit = 30 } = {}) {
+export function listResearchQueue({ market, limit = 30, search } = {}) {
   try {
     const safeLimit = Math.min(Math.max(1, Number(limit) || 30), 100);
     const db = getRadarV2Db();
     const nowMs = Date.now();
     const marketFilter = market ? String(market).toUpperCase() : null;
 
-    // 1. 计算 queue_as_of（仅用于展示）
+    // 1. 计算 queue_as_of（审计修正：旧实现直接取市场日历最后交易日，扫描仍
+    //    running/partial 的市场也会显示"当日已就绪"。现在拆为三个真实口径：
+    //    应到交易日（日历）/ 最后完整扫描日（最后一次 complete 日扫 job）/
+    //    应到日扫描状态与覆盖率。completeScanStartedAt 同时用于评分时效判定。
     const targets = marketFilter ? [marketFilter] : QUEUE_MARKETS;
     const queueAsOf = {};
+    const completeScanStartedAt = {};
     for (const m of targets) {
-      queueAsOf[m] = lastCompletedTradingDate(m);
+      const expectedDate = lastCompletedTradingDate(m);
+      const lastCompleteJob = db.prepare(`
+        SELECT j.trade_date, r.started_at AS run_started_at
+        FROM radar_v2_scan_jobs j
+        LEFT JOIN radar_v2_runs r ON r.id = j.run_id
+        WHERE j.market = ? AND j.trigger = 'scheduled_daily' AND j.status = 'complete'
+        ORDER BY j.trade_date DESC
+        LIMIT 1
+      `).get(m);
+      const expectedJob = expectedDate ? db.prepare(`
+        SELECT status, total_symbols, succeeded_count
+        FROM radar_v2_scan_jobs
+        WHERE market = ? AND trigger = 'scheduled_daily' AND trade_date = ?
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `).get(m, expectedDate) : null;
+      queueAsOf[m] = {
+        expected_date: expectedDate,
+        last_complete_date: lastCompleteJob ? lastCompleteJob.trade_date : null,
+        scan_status: expectedJob ? expectedJob.status : 'none',
+        coverage_pct: expectedJob && expectedJob.total_symbols > 0
+          ? Math.round((expectedJob.succeeded_count / expectedJob.total_symbols) * 100)
+          : null,
+      };
+      if (lastCompleteJob && lastCompleteJob.run_started_at != null) {
+        completeScanStartedAt[m] = Number(lastCompleteJob.run_started_at);
+      }
     }
 
     // 2. 先找每个 (market, symbol, channel) 的最新 dossier，再只保留仍有效的证据。
     //    不能先按状态过滤：若最新正向论点已 invalidated/needs_review，较早的
     //    active 论点不能重新浮现并继续给该股票加分。invalidated 仍由后续的
     //    latestPositiveRows 明确触发退出；已失效的负面论点则不再制造风险组。
-    //    P0-1: market 参数已绑定到 eligible_universe 与 channel_latest。
+    //    P0-1: market 参数已绑定到 eligible_universe。
     //    P0-5: LEFT JOIN radar_v2_asset_audit；无审计记录时 JS 侧用 classifyByNameFallback 兜底。
+    //    审计修正（性能）：channel_latest 改读 radar_v2_channel_latest 物化表
+    //    （schema 触发器增量维护），不再每次查询用窗口函数重算全量 dossier。
+    //    语义与旧 CTE 等价：物化行 = 每分区最新一条非 archived dossier，
+    //    再按当前 status 过滤 active/confirmed。
     const dossierRows = db.prepare(`
       WITH eligible_universe AS (
         SELECT DISTINCT m.market, m.symbol, m.name, m.instrument_type,
@@ -1429,27 +1588,15 @@ export function listResearchQueue({ market, limit = 30 } = {}) {
           AND m.active = 1
           AND m.instrument_type = 'equity'
           AND (@market IS NULL OR m.market = @market)
-      ),
-      channel_latest AS (
-        SELECT d.market, d.symbol, d.channel, d.id AS dossier_id, d.change_type,
-               d.direction, d.available_at, d.created_at, d.priority_level, d.status,
-               d.facts_json,
-               ROW_NUMBER() OVER (
-                 PARTITION BY d.market, d.symbol, d.channel
-                 ORDER BY d.available_at DESC, d.created_at DESC
-               ) AS ch_rn
-        FROM radar_v2_dossiers d
-        JOIN eligible_universe eu ON eu.market = d.market AND eu.symbol = d.symbol
-        WHERE d.status != 'archived'
       )
-      SELECT cl.market, cl.symbol, cl.channel, cl.dossier_id, cl.change_type,
-             cl.direction, cl.available_at, cl.created_at, cl.priority_level, cl.status,
-             cl.facts_json, eu.name, eu.instrument_type, eu.audit_category
-      FROM channel_latest cl
+      SELECT cl.market, cl.symbol, cl.channel, d.id AS dossier_id, d.change_type,
+             d.direction, d.available_at, d.created_at, d.priority_level, d.status,
+             d.facts_json, eu.name, eu.instrument_type, eu.audit_category
+      FROM radar_v2_channel_latest cl
+      JOIN radar_v2_dossiers d ON d.id = cl.dossier_id
       JOIN eligible_universe eu ON eu.market = cl.market AND eu.symbol = cl.symbol
-      WHERE cl.ch_rn = 1
-        AND cl.status IN ('active', 'confirmed')
-      ORDER BY cl.available_at DESC
+      WHERE d.status IN ('active', 'confirmed')
+      ORDER BY d.available_at DESC
     `).all({ market: marketFilter });
 
     // 3. P0-5: 资产分类准入——审计表优先，名称正则兜底
@@ -1566,6 +1713,7 @@ export function listResearchQueue({ market, limit = 30 } = {}) {
     //    查询每 (market, symbol) 在 direction='positive' 中的最新 dossier 状态。
     //    若该正向 dossier 的 status='invalidated' → 退出。
     //    旧的负面 dossier 被 invalidated 不影响（用户可能已用新正向论点替代）。
+    //    审计修正（性能）：market 绑定——单市场查询不再全库扫描其余市场的正向 dossier。
     const latestPositiveRows = db.prepare(`
       WITH ranked_pos AS (
         SELECT market, symbol, status,
@@ -1576,9 +1724,10 @@ export function listResearchQueue({ market, limit = 30 } = {}) {
         FROM radar_v2_dossiers
         WHERE direction = 'positive'
           AND status != 'archived'
+          AND (@market IS NULL OR market = @market)
       )
       SELECT market, symbol, status FROM ranked_pos WHERE rn = 1
-    `).all();
+    `).all({ market: marketFilter });
     const latestPositiveStatus = new Map();
     for (const r of latestPositiveRows) {
       latestPositiveStatus.set(r.market + ':' + r.symbol, r.status);
@@ -1613,6 +1762,14 @@ export function listResearchQueue({ market, limit = 30 } = {}) {
       const baseScore = scoreRow ? Number(scoreRow.base_score) : null;
       const compositeScore = computeCompositeScore(baseScore, entry.channels, nowMs);
       const hasCurrentScore = !!scoreRow;
+      // 评分时效（审计修正）：评分写入时间早于该市场最后一次完整日扫的开始时间，
+      // 说明最近一次完整扫描没有刷新该标的（被跳过/失败）。过旧评分不得参与
+      // 高置信排序（降级 new_signal 并标记"数据待更新"），避免用户误以为
+      // 候选池基于最新完整数据。
+      const completeScanStarted = completeScanStartedAt[entry.market];
+      const isScoreStale = hasCurrentScore && completeScanStarted != null &&
+        scoreRow.score_created_at != null &&
+        Number(scoreRow.score_created_at) < completeScanStarted;
 
       // 退出条件 4：老化（14 天无新 dossier 且综合评分 < 50；无评分对象也按 14 天老化）
       const ageDays = entry.latestAvailableAt != null ? (nowMs - entry.latestAvailableAt) / 86400000 : Infinity;
@@ -1634,7 +1791,7 @@ export function listResearchQueue({ market, limit = 30 } = {}) {
       const fallbackCat = classifyByNameFallback(entry);
       const auditCategory = entry.audit_category ||
         (fallbackCat === 'common_provisional' ? 'common_stock_provisional' : fallbackCat);
-      // P0: 未审计资产（provisional）独立成组，不混入 cross_confirm/new_signal
+      // 未审计资产（provisional）：不进 cross_confirm 高置信（审计修正），留在 new_signal
       const isProvisional = auditCategory === 'common_stock_provisional';
       const bucket = computePoolBucket({
         compositeScore,
@@ -1642,28 +1799,20 @@ export function listResearchQueue({ market, limit = 30 } = {}) {
         hasCurrentScore,
         hasNegativeNonTrend,
         isProvisional,
+        isScoreStale,
       });
 
-      // primary_driver（P1 修复）：按 bucket 选取真正驱动分组的 dossier
-      //   risk_review → 取最新负面非趋势 dossier
-      //   其他 bucket → 取最新 dossier（跨通道最近的）
-      let driverChannel = entry.latestRow;
-      if (bucket === 'risk_review') {
-        const negChannel = entry.channels.find(
-          (c) => c.channel !== 'trend' && c.direction === 'negative'
-        );
-        if (negChannel) driverChannel = negChannel;
-      }
-      const primary_driver = {
-        dossier_id: driverChannel.dossier_id,
-        channel: driverChannel.channel,
-        change_type: driverChannel.change_type,
-        direction: driverChannel.direction,
-        available_at: driverChannel.available_at,
-        priority_level: driverChannel.priority_level,
-        status: driverChannel.status,
-        fact: extractFirstFact(driverChannel.facts_json),
-      };
+      // admission_driver（审计修正）：真正驱动准入/分桶的信号，不是"最新一条 dossier"。
+      //   risk_review → 最新负面非趋势 dossier；reversal_evidence 另附最强正向证据
+      //   其他 bucket → signal bonus 贡献最大的正向通道 dossier
+      // latest_context：最近发生但未必驱动准入的 dossier（与 admission_driver 相同时为 null）
+      const driverChannel = pickAdmissionDriver(entry, bucket, nowMs);
+      const admissionDriver = buildDriverSummary(driverChannel);
+      const latestContext = entry.latestRow && driverChannel &&
+        entry.latestRow.dossier_id !== driverChannel.dossier_id
+        ? buildDriverSummary(entry.latestRow) : null;
+      const reversalEvidence = bucket === 'risk_review'
+        ? buildDriverSummary(pickReversalEvidence(entry, nowMs)) : null;
 
       const channels = entry.channels.map((c) => c.channel);
 
@@ -1685,7 +1834,17 @@ export function listResearchQueue({ market, limit = 30 } = {}) {
           asset_category: auditCategory,
           audit_source: entry.audit_category ? 'asset_audit' : 'regex_fallback',
         },
-        primary_driver,
+        admission_driver: admissionDriver,
+        latest_context: latestContext,
+        reversal_evidence: reversalEvidence,
+        // 基本面软门槛（审计修正）：基本面 dossier 覆盖率极低（生产 ~73/16000），
+        // 硬准入会瞬间清空候选池。先显式标注覆盖状态：
+        //   'positive'/'negative'/'neutral' = 有基本面档案及其方向；'uncovered' = 无档案。
+        // 负向基本面已由 risk_review 分桶降级；UI 对高置信组中 uncovered 标的提示。
+        fundamental_coverage: (() => {
+          const fch = entry.channels.find((c) => c.channel === 'fundamental');
+          return fch ? (fch.direction || 'neutral') : 'uncovered';
+        })(),
         coverage: {
           channel_count: channelCount,
           fresh_positive_channel_count: freshPositiveChannelCount,
@@ -1693,6 +1852,7 @@ export function listResearchQueue({ market, limit = 30 } = {}) {
           has_current_score: hasCurrentScore,
           max_score: hasCurrentScore ? baseScore : null,
           score_as_of: scoreRow ? Number(scoreRow.score_created_at) : null,
+          score_stale: isScoreStale,
         },
         bucket,
         composite_score: compositeScore,  // null 表示无评分
@@ -1712,22 +1872,32 @@ export function listResearchQueue({ market, limit = 30 } = {}) {
     //      b) composite_score >= POOL_SCORE_THRESHOLD（高分标的）
     //    单纯风险信号（无正向证据）不进候选池，留在档案库。
     //    无评分标的（unscored/audit_pending）不进候选池，留在档案库。
+    //    服务端搜索（审计修正）：在准入截断前按 symbol/name 过滤，覆盖整个候选池，
+    //    而不只是已返回的 limit 条（旧实现只能搜索前端已加载的 30 条）。
+    const searchQuery = typeof search === 'string' ? search.trim().toUpperCase() : '';
+    const matchesSearch = (it) => !searchQuery ||
+      (it.symbol || '').toUpperCase().includes(searchQuery) ||
+      (it.name || '').toUpperCase().includes(searchQuery);
     const riskItems = allItems.filter((it) =>
-      it.bucket === 'risk_review' && it.has_positive_evidence
+      it.bucket === 'risk_review' && it.has_positive_evidence && matchesSearch(it)
     );
     // risk_review 只允许从“困境反转”路径准入。若不排除它：
     // - 单纯风险标的可借高分旁路正向证据约束；
     // - 合格的困境反转会同时落入两个数组，造成重复卡片和错误 total。
     const scoredItems = allItems.filter((it) =>
       it.bucket !== 'risk_review' &&
-      it.composite_score != null && it.composite_score >= POOL_SCORE_THRESHOLD
+      it.composite_score != null && it.composite_score >= POOL_SCORE_THRESHOLD &&
+      matchesSearch(it)
     );
 
     // 9.1 各组内排序
     //   risk_review：按时间倒序
     riskItems.sort((a, c) => (c.latest_available_at || 0) - (a.latest_available_at || 0));
-    //   有评分：综合评分降序 → 时间倒序
+    //   有评分：评分待更新垫底 → 综合评分降序 → 时间倒序
     scoredItems.sort((a, c) => {
+      const staleA = a.coverage && a.coverage.score_stale ? 1 : 0;
+      const staleC = c.coverage && c.coverage.score_stale ? 1 : 0;
+      if (staleA !== staleC) return staleA - staleC;
       const sa = a.composite_score == null ? -Infinity : a.composite_score;
       const sc = c.composite_score == null ? -Infinity : c.composite_score;
       if (sc !== sa) return sc - sa;
@@ -1743,14 +1913,22 @@ export function listResearchQueue({ market, limit = 30 } = {}) {
       bucketTotals[it.bucket] = (bucketTotals[it.bucket] || 0) + 1;
     }
 
-    // 9.3 配额分配：risk_review 最多 RISK_REVIEW_MAX_DISPLAY 个，剩余给高分标的
-    //    risk_review 置顶，但限量以避免挤占高分标的
+    // 9.3 配额分配（审计修正）：困境反转限量置顶 → 多通道高置信（cross_confirm）
+    //    优先占位 → 剩余名额给单通道新信号，并按市场轮转分配。
+    //    旧实现把 cross_confirm 与 new_signal 混排，单通道 97 分可挤掉多通道 90 分，
+    //    与"多通道高置信"的信息层级冲突。
     const riskQuota = Math.min(RISK_REVIEW_MAX_DISPLAY, riskItems.length, safeLimit);
-    const scoredQuota = Math.min(scoredItems.length, safeLimit - riskQuota);
+    const crossItems = scoredItems.filter((it) => it.bucket === 'cross_confirm');
+    const newSignalItems = scoredItems.filter((it) => it.bucket !== 'cross_confirm');
+    const crossQuota = Math.min(crossItems.length, safeLimit - riskQuota);
+    const newSignalQuota = interleaveByMarket(
+      newSignalItems, safeLimit - riskQuota - crossQuota
+    );
 
     const items = [
       ...riskItems.slice(0, riskQuota),
-      ...scoredItems.slice(0, scoredQuota),
+      ...crossItems.slice(0, crossQuota),
+      ...newSignalQuota,
     ];
 
     const returnedCounts = Object.fromEntries(QUEUE_BUCKET_ORDER.map((b) => [b, 0]));
@@ -1884,6 +2062,134 @@ export function bootstrapAssetAudit() {
 }
 
 /**
+ * 自动资产审计（审计修正 P1：资产审计作为后台任务，不要求用户逐只处理）
+ *
+ * 双路径分类（radar_v2_asset_rules 规则引擎），优先级从高到低：
+ *   1. 规则降级：明确的非普通股标记（CN 基金代码段 / HK 轮证/基金/SPAC /
+ *   US 基金家族、结构词、优先股/权证词）即使存在披露记录也降级——
+ *   EDGAR RSS 同样收录 ETF 的 N 系列注册文件，披露证据不排斥 ETF。
+ *   2. 证据升级：Tier-1 官方披露源（hkex_latest/sec_edgar_rss/cninfo_announcements）
+ *   的 accepted event_fact → common_stock（交易所披露流绝大多数来自上市运营
+ *   公司；基金家族与上市公司同名碰撞由此规避）。
+ *   3. 规则默认推定：无任何非普通股标记 → common_stock
+ *   （CN 交易所代码段确定性 / HK 无标记 / US 无标记）。
+ *   4. 规则无法判定（异常代码段/空名称）→ 保持 provisional 留给人工。
+ *
+ * 守卫式 upsert（不覆盖任何已有判定）：
+ *   - 无审计记录 → 写入分类结果（source='auto_official_disclosure'|'auto_market_rule'）
+ *   - 现为 common_stock_provisional → 更新为规则结果（升级或降级）
+ *   - 已是其他类别（人工审计、其他 auto 结果）→ 不动
+ *
+ * 幂等：重复执行 promoted=0/demoted=0。由调度器周期调用（radar_v2_scheduler check）。
+ *
+ * 分批让出（部署实测修正）：首轮 Q07 存量上万 upsert 一次事务同步执行，
+ * 会与启动期日扫/物化重建叠加阻塞事件循环约 1 分钟，/health 超时。改为每批
+ * 500 个独立事务，批间 setImmediate 让出——任何时点单批阻塞 <100ms。
+ *
+ * @returns {Promise<{ ok, data: { candidates, classified, promoted, demoted }, error }>}
+ */
+const AUTO_AUDIT_BATCH_SIZE = 500;
+
+export async function autoAuditProvisionalAssets() {
+  try {
+    const db = getRadarV2Db();
+    // 无 event_facts 表（极旧库）：证据路径无对象，规则路径仍可继续
+    const hasFactsTable = db.prepare(
+      "SELECT count(*) AS c FROM sqlite_master WHERE type='table' AND name='radar_v2_event_facts'"
+    ).get().c === 1;
+    // 路径 A：有官方披露证据的标的（含 universe 有效性约束）
+    const disclosureSymbols = new Set(hasFactsTable ? db.prepare(`
+      SELECT DISTINCT f.market || ':' || f.symbol AS key
+      FROM radar_v2_event_facts f
+      JOIN radar_universe_members m ON m.market = f.market AND m.symbol = f.symbol
+      JOIN radar_universes u ON u.id = m.universe_id
+      WHERE f.source IN ('hkex_latest', 'sec_edgar_rss', 'cninfo_announcements')
+        AND f.link_status = 'accepted'
+        AND u.enabled = 1 AND m.active = 1
+    `).all().map((r) => r.key) : []);
+
+    // 待分类标的：universe 全量中"无审计记录 或 仍为 provisional"的部分
+    const pending = db.prepare(`
+      SELECT m.market, m.symbol, m.name, aa.asset_category
+      FROM radar_universe_members m
+      JOIN radar_universes u ON u.id = m.universe_id
+      LEFT JOIN radar_v2_asset_audit aa ON aa.market = m.market AND aa.symbol = m.symbol
+      WHERE u.enabled = 1 AND m.active = 1 AND m.instrument_type = 'equity'
+        AND (aa.market IS NULL OR aa.asset_category = 'common_stock_provisional')
+    `).all();
+
+    const now = Date.now();
+    // 参数化分类 upsert：仅"新插入 或 原 provisional"生效，人工/其他 auto 记录不动
+    const upsert = db.prepare(`
+      INSERT INTO radar_v2_asset_audit
+        (market, symbol, asset_category, source, note, audited_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(market, symbol) DO UPDATE SET
+        asset_category = excluded.asset_category,
+        source = excluded.source,
+        note = excluded.note,
+        audited_at = excluded.audited_at,
+        updated_at = excluded.updated_at
+      WHERE radar_v2_asset_audit.asset_category = 'common_stock_provisional'
+    `);
+    const upsertOne = db.transaction((r) =>
+      upsert.run(r.market, r.symbol, r.category, r.source, r.note, now, now, now).changes);
+
+    // 逐标的定级。优先级（审计修正）：
+    //   1. 规则降级（etf/warrant/preferred 等明确标记）> 证据——EDGAR RSS 同样
+    //      收录 ETF 的 N 系列注册文件，披露证据不排斥 ETF；明确的非普通股名称
+    //      标记即使存在披露记录也降级。
+    //   2. 证据升级（官方披露 → common_stock）> 规则默认推定——上市公司与基金
+    //      家族同名碰撞（Invesco Ltd 等）由证据路径规避。
+    //   3. 规则默认推定（无标记 → common_stock）。
+    //   4. 规则返回 null（异常代码段/空名称）→ 保持 provisional 留给人工。
+    const actions = [];
+    for (const m of pending) {
+      const cls = classifyByMarketRules(m.market, m.symbol, m.name);
+      if (cls && cls.category !== 'common_stock') {
+        actions.push({ ...m, category: cls.category, source: 'auto_market_rule',
+          note: `auto: ${cls.reason}` });
+        continue;
+      }
+      if (disclosureSymbols.has(m.market + ':' + m.symbol)) {
+        actions.push({ ...m, category: 'common_stock', source: 'auto_official_disclosure',
+          note: 'auto: Tier-1 official disclosure event facts' });
+        continue;
+      }
+      if (cls) {
+        actions.push({ ...m, category: cls.category, source: 'auto_market_rule',
+          note: `auto: ${cls.reason}` });
+      }
+    }
+
+    let promoted = 0;   // → common_stock
+    let demoted = 0;    // → 非普通股类别（移出候选池）
+    for (let i = 0; i < actions.length; i += AUTO_AUDIT_BATCH_SIZE) {
+      const batch = actions.slice(i, i + AUTO_AUDIT_BATCH_SIZE);
+      for (const a of batch) {
+        if (upsertOne(a) > 0) {
+          if (a.category === 'common_stock') promoted++; else demoted++;
+        }
+      }
+      // 批间让出事件循环，避免长时间阻塞 /health 等请求
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    return {
+      ok: true,
+      data: {
+        candidates: pending.length,
+        classified: actions.length,
+        promoted,
+        demoted,
+      },
+      error: null,
+    };
+  } catch (e) {
+    return { ok: false, data: null, error: toError(e) };
+  }
+}
+
+/**
  * 标记标的为"不感兴趣"（从候选池永久排除）
  * @param {string} market
  * @param {string} symbol
@@ -1955,8 +2261,8 @@ export function getRadarV2DigestData(market) {
       market: it.market,
       symbol: it.symbol,
       name: it.name,
-      direction: it.primary_driver?.direction || it.latest_direction,
-      fact: it.primary_driver?.fact?.content || it.latest_change_type,
+      direction: it.admission_driver?.direction || it.latest_direction,
+      fact: it.admission_driver?.fact?.content || it.latest_change_type,
       composite_score: it.composite_score,
     });
 

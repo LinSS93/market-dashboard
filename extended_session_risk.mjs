@@ -2,7 +2,8 @@ export function evaluateExtendedSessionRisk({ symbol, quote, decision, position 
   const price=Number(quote?.extPrice),regular=Number(quote?.regularPrice||decision?.position?.currentPrice),zones=decision?.zones||{};
   if(!symbol||!Number.isFinite(price)||price<=0||!quote?.extSession||!decision)return null;
   const shares=Number(position.shares)||0,hasPosition=shares>0,cost=Number(position.cost)||0;
-  const buyLow=Number(zones.buyLow),confirmation=Number(zones.confirmation),invalidation=Number(zones.invalidation);
+  const level=value=>{const n=Number(value);return Number.isFinite(n)&&n>0?n:null;};
+  const buyLow=level(zones.buyLow),confirmation=level(zones.confirmation),invalidation=level(zones.invalidation);
   const below=v=>Number.isFinite(v)&&v>0&&price<v;
   const legacyProbe=hasPosition&&(position.position_type==='probe'||position.source==='legacy_signal');
   let severity='normal',action='WAIT_OPEN',label='等待开盘确认',tone='neutral',blocksEntry=false;
@@ -22,8 +23,10 @@ export function evaluateExtendedSessionRisk({ symbol, quote, decision, position 
   return {
     version:'extended-session-risk-v1',symbol,session:quote.extSession,observedAt:quote.extTime||null,price,
     movePct:movePct==null?null:+movePct.toFixed(2),positionPnlPct:positionPnlPct==null?null:+positionPnlPct.toFixed(2),
-    severity,action,label,tone,blocksEntry,formalAction:decision.state,formalActionUnchanged:true,reason,
+    severity,action,label,tone,blocksEntry,
+    referenceProfileId:decision.profileId || null,
+    doesNotChangeFormalAction:true,reason,
     position:{shares,type:position.position_type||'manual',source:position.source||'manual'},
-    levels:{buyLow:Number.isFinite(buyLow)?buyLow:null,confirmation:Number.isFinite(confirmation)?confirmation:null,invalidation:Number.isFinite(invalidation)?invalidation:null},
+    levels:{buyLow,confirmation,invalidation},
   };
 }

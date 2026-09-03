@@ -50,11 +50,46 @@ const DEFAULT_HORIZON = 'excess_return_20d';  // 主窗口：20d 超额收益
 // Keep feedback strictly aligned with scoreCandidate's base-score contract.
 // Event, trend, and fundamental information are channel bonuses, not base-score
 // weights, and therefore must not be fitted or written to scoring profiles.
-const SCORE_DIMENSIONS = Object.freeze(['technical', 'liquidity', 'reliability']);
+// 审计修正 2026.09.02：可靠度改为硬门槛不再是评分维度，反馈维度收窄为 2 因子。
+const SCORE_DIMENSIONS = Object.freeze(['technical', 'liquidity']);
 const SHADOW_PROFILE_NAME = 'feedback_shadow';
 const PURGE_DAYS = 22;                 // purge 重叠窗口（约 1 个月交易日）
 const MIN_GROUP_SIZE = 8;              // 单个 run 最少候选数才参与 IC 计算
 const MIN_GROUPS = 5;                  // 至少 5 个 run 才生成 shadow
+// 审计修正 P0：时间切分样本外验证门槛。
+// shadow 生成必须同时通过：
+//   - train 段（按 run 时间序前 70%）样本内改善 >= MIN_IMPROVEMENT
+//   - validation 段（后 30%）样本外改善 > 0（新权重在未见数据上不劣于现行权重）
+// 消除"新权重与 IC 在同批样本上计算"的样本内拟合风险。
+const TRAIN_SPLIT_RATIO = 0.7;
+const MIN_VAL_GROUPS = 2;
+
+/**
+ * 按 run（asOf 分组）时间序切分样本：前 70% train / 后 30% validation。
+ * @param {Array<object>} samples - collectFeedbackSamples 返回值（asOf 升序）
+ * @returns {{train, validation, trainGroups, valGroups}}
+ */
+function splitSamplesByTime(samples) {
+  const byAsOf = new Map();
+  for (const s of samples) {
+    const key = String(s.asOf);
+    if (!byAsOf.has(key)) byAsOf.set(key, []);
+    byAsOf.get(key).push(s);
+  }
+  const groups = [...byAsOf.keys()].sort((a, b) => Number(a) - Number(b));
+  const trainGroupCount = Math.floor(groups.length * TRAIN_SPLIT_RATIO);
+  const trainKeys = new Set(groups.slice(0, trainGroupCount));
+  const train = [];
+  const validation = [];
+  for (const s of samples) {
+    (trainKeys.has(String(s.asOf)) ? train : validation).push(s);
+  }
+  return {
+    train, validation,
+    trainGroups: trainGroupCount,
+    valGroups: groups.length - trainGroupCount,
+  };
+}
 
 // IC 阈值
 const IC_THRESHOLD_EFFECTIVE = 0.05;   // IC > 0.05：维度有效，可以小幅提权
@@ -138,7 +173,7 @@ export function collectFeedbackSamples(market, lookbackDays = 90) {
  * 按维度计算横截面 IC（每个 run 一个 IC，purge 重叠窗口）。
  *
  * @param {Array<object>} samples - collectFeedbackSamples 返回值
- * @param {string} dimension - technical/liquidity/reliability
+ * @param {string} dimension - technical/liquidity
  * @returns {{status, all, purged, groups, eligibleGroups, purgedGroups}}
  */
 export function computeDimensionIc(samples, dimension) {
@@ -270,7 +305,7 @@ export function computeCompositeIc(samples, weights) {
  *
  * 调整后归一化，确保权重和 = 1.00。
  *
- * @param {object} currentWeights - {technical, liquidity, reliability}
+ * @param {object} currentWeights - {technical, liquidity}
  * @param {Array<object>} dimensionIcs - computeDimensionIc 返回值数组
  * @returns {{newWeights, adjustments, reason}}
  */
@@ -380,33 +415,53 @@ export function tryGenerateShadow(market, opts = {}) {
   const currentWeights = normalizeBaseScoreWeights(activeWeights);
   const usedDefaultWeights = !isValidBaseScoreWeights(activeWeights);
 
-  // 3. 计算各维度 IC
-  const dimensionIcs = SCORE_DIMENSIONS.map(dim => computeDimensionIc(samples, dim));
+  // 3. 时间切分（审计修正 P0：样本外验证门槛）
+  //    按 run 时间序前 70% train / 后 30% validation：train 推导权重，validation 验证。
+  //    任一段组数不足 → 无法做可信的时间外验证，不生成 shadow。
+  const { train, validation, trainGroups, valGroups } = splitSamplesByTime(samples);
+  if (trainGroups < MIN_GROUPS || valGroups < MIN_VAL_GROUPS) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: `时间切分后 run 组数不足(train=${trainGroups} 需要>=${MIN_GROUPS}，validation=${valGroups} 需要>=${MIN_VAL_GROUPS})，无法做样本外验证，不生成 shadow`,
+      sampleCount: samples.length,
+    };
+  }
 
-  // 4. 生成新权重
+  // 4. 各维度 IC 只用 train 段推导（不能用全量拟合后再在全量上验证）
+  const dimensionIcs = SCORE_DIMENSIONS.map(dim => computeDimensionIc(train, dim));
+
+  // 5. 生成新权重（基于 train）
   const { newWeights, adjustments, reason } = suggestWeights(currentWeights, dimensionIcs);
-  const profileReason = `${usedDefaultWeights ? '当前 active profile 不符合三因子 base-score 契约，已按默认权重评估；' : ''}${reason}`;
+  const profileReason = `${usedDefaultWeights ? '当前 active profile 不符合两因子 base-score 契约，已按默认权重评估；' : ''}${reason}`;
 
-  // 5. A/B 验证（样本内——仅证明拟合改善，不证明未来有效）
-  // P1 方法论约束：newWeights 由 dimensionIcs 从 samples 推导，icNew 又在同一 samples 上计算，
-  //   improvement 只能证明"在这批数据上的拟合改善"，不是样本外证据。
-  //   真实 outcome 积累后，apply 前应增加时间切分 train/validate 或滚动 walk-forward 验证门槛，
-  //   并将其作为 applyShadow 的前置条件（当前生产库 outcome 为空，不会触发 apply）。
-  const icOld = computeCompositeIc(samples, currentWeights);
-  const icNew = computeCompositeIc(samples, newWeights);
-  const improvement = (icNew.purged.mean ?? 0) - (icOld.purged.mean ?? 0);
+  // 6. A/B 验证：train 样本内改善 + validation 样本外改善（双重门槛）
+  const icOldTrain = computeCompositeIc(train, currentWeights);
+  const icNewTrain = computeCompositeIc(train, newWeights);
+  const improvement = (icNewTrain.purged.mean ?? 0) - (icOldTrain.purged.mean ?? 0);
+
+  const icOldVal = computeCompositeIc(validation, currentWeights);
+  const icNewVal = computeCompositeIc(validation, newWeights);
+  const oosImprovement = (icNewVal.purged.mean ?? 0) - (icOldVal.purged.mean ?? 0);
 
   const abTest = {
-    icOld: icOld.purged.mean,
-    icNew: icNew.purged.mean,
+    icOld: icOldTrain.purged.mean,
+    icNew: icNewTrain.purged.mean,
     improvement: +improvement.toFixed(4),
-    oldGroups: icOld.purgedGroups,
-    newGroups: icNew.purgedGroups,
-    // P1 标注：此 improvement 为样本内指标，不可单独作为 apply 依据
+    oldGroups: icOldTrain.purgedGroups,
+    newGroups: icNewTrain.purgedGroups,
+    // train 段指标（样本内），不可单独作为 apply 依据
     inSample: true,
+    split: { trainSamples: train.length, valSamples: validation.length, trainGroups, valGroups },
+    oos: {
+      icOld: icOldVal.purged.mean,
+      icNew: icNewVal.purged.mean,
+      improvement: +oosImprovement.toFixed(4),
+      groups: icNewVal.purgedGroups,
+    },
   };
 
-  // 6. improvement 不达标 → 不写入 shadow
+  // 7. 门槛一：train 样本内改善不达标 → 不写入 shadow
   if (improvement < MIN_IMPROVEMENT) {
     return {
       ok: true,
@@ -419,7 +474,31 @@ export function tryGenerateShadow(market, opts = {}) {
     };
   }
 
-  // 7. 写入 shadow profile
+  // 8. 门槛二：validation 样本外改善（审计 P0：时间外无改善的权重调整不可信）
+  if (icOldVal.purged.mean == null || icNewVal.purged.mean == null) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: '样本外验证数据不足（validation 段无可计算的 IC 组），不生成 shadow',
+      sampleCount: samples.length,
+      dimensionIcs,
+      abTest,
+      newWeights,
+    };
+  }
+  if (oosImprovement <= 0) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: `样本外验证未通过(oosImprovement=${oosImprovement.toFixed(4)}<=0)：新权重在时间外数据上无改善，样本内拟合不可信，不生成 shadow`,
+      sampleCount: samples.length,
+      dimensionIcs,
+      abTest,
+      newWeights,
+    };
+  }
+
+  // 9. 写入 shadow profile（双门槛已通过：train 改善 + validation 样本外改善）
   // P0 修复：upsertShadowProfile 在 SQL 层用 WHERE 限制不更新 is_active=1 的行，
   //   前置检查 + SQL 双重保险。若 active 状态被外部并发改写导致 UPSERT 落空，
   //   info.changes=0 提示调用方。
@@ -432,7 +511,7 @@ export function tryGenerateShadow(market, opts = {}) {
     ic_new: abTest.icNew,
     improvement: abTest.improvement,
     sample_count: samples.length,
-    reason: profileReason,
+    reason: `${profileReason}；时间切分验证 train=${trainGroups}组/val=${valGroups}组，oosImprovement=${abTest.oos.improvement}`,
     created_at: now,
   });
 
@@ -489,7 +568,7 @@ export function applyShadow(market) {
     shadowWeights = null;
   }
   if (!isValidBaseScoreWeights(shadowWeights)) {
-    return { ok: false, error: `shadow profile 权重不符合三因子 base-score 契约（market=${market}），拒绝应用。请重新生成 shadow。` };
+    return { ok: false, error: `shadow profile 权重不符合两因子 base-score 契约（market=${market}），拒绝应用。请重新生成 shadow。` };
   }
 
   const active = profiles.find(p => p.is_active === 1);

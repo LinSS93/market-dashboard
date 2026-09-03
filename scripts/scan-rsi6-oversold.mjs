@@ -267,17 +267,34 @@ async function fetchJson(url) {
   }
 }
 
+// fqkline 的三个同构端点：web.ifzq.gtimg.cn 会被腾讯 WAF 间歇性返回 501 挑战页
+// （US/HK/CN 全部代码同时被拦），proxy.finance.qq.com 与 ifzq.gtimg.cn 是同一 API
+// 的可用镜像，返回数据完全一致。运行时优先使用最近一次成功的端点。
+const KLINE_ENDPOINTS = Object.freeze([
+  'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get',
+  'https://proxy.finance.qq.com/ifzqgtimg/appstock/app/fqkline/get',
+  'https://ifzq.gtimg.cn/appstock/app/fqkline/get',
+]);
+let preferredKlineEndpoint = 0;
+
 export async function fetchTencentDailyHistory(market, symbol) {
   const params = marketKlineParams(market, symbol);
+  const endpointOrder = [...new Set([preferredKlineEndpoint, ...KLINE_ENDPOINTS.keys()])];
   for (const param of params) {
-    try {
-      const json = await fetchJson(`https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${param},day,,,80,qfq`);
-      const key = Object.keys(json?.data || {})[0];
-      const node = key ? json.data[key] : null;
-      const rows = normalizeKlines(node?.qfqday?.length ? node.qfqday : node?.day);
-      if (rows.length >= REQUIRED_BARS && !hasSuspiciousBreak(rows)) return rows;
-    } catch {
-      // US 会先尝试 .OQ，再尝试 .N；单个源失败不影响其他标的。
+    for (const endpointIndex of endpointOrder) {
+      try {
+        const json = await fetchJson(`${KLINE_ENDPOINTS[endpointIndex]}?param=${param},day,,,80,qfq`);
+        const key = Object.keys(json?.data || {})[0];
+        const node = key ? json.data[key] : null;
+        const rows = normalizeKlines(node?.qfqday?.length ? node.qfqday : node?.day);
+        if (rows.length >= REQUIRED_BARS && !hasSuspiciousBreak(rows)) {
+          preferredKlineEndpoint = endpointIndex;
+          return rows;
+        }
+      } catch {
+        // 端点被 WAF/网络阻断时自动换镜像重试；US 代码仍保持先 .OQ 后 .N。
+        // 单个标的全端点失败只记入重试退避，不影响其他标的。
+      }
     }
   }
   return null;

@@ -4,6 +4,7 @@
 // be added or refined later and evaluated against the same immutable snapshot.
 
 import { atr14, bollinger, emaSeries, macdHistogramPair, rsiWilder, RSI_PERIODS, smaArr } from './indicators.mjs';
+import { buildOpportunityFactsFromRows } from './stock_opportunity_model.mjs';
 
 export const FEATURE_SNAPSHOT_SCHEMA_VERSION = 'stock-feature-snapshot-v1';
 export const FEATURE_SNAPSHOT_ORIGINS = Object.freeze({
@@ -64,6 +65,15 @@ export function buildDailyFeaturePayload({ symbol, market, rows, sourceOrigin, c
     atr14: atr14(highs, lows, closes, 14),
     roc20: closes.length >= 21 ? (current / closes.at(-21) - 1) * 100 : null,
   };
+  // Additive facts keep the snapshot schema backward compatible. Older frozen
+  // snapshots remain immutable; a new policy evaluation can still be attached
+  // when the daily proxy is replayed from its original bars.
+  features.opportunityFacts = buildOpportunityFactsFromRows(validRows, {
+    rsi6: features.rsi6, rsi12: features.rsi12, rsi24: features.rsi24,
+    sma20: features.sma20, sma50: features.sma50,
+    macdHist: features.macdHistogram, prevHist: features.previousMacdHistogram,
+    bollPctB: features.bollPctB, volRatio: features.volumeRatio,
+  });
   return {
     schemaVersion: FEATURE_SNAPSHOT_SCHEMA_VERSION,
     sourceOrigin,
@@ -105,6 +115,7 @@ export function buildLiveFeaturePayload(analysis, { capturedAt = Date.now() } = 
       quoteStale: analysis.liveQuote?.stale === true,
       quoteSource: analysis.liveQuote?.source || null,
       quoteProviderTime: analysis.liveQuote?.providerTime || null,
+      opportunityFacts: analysis.opportunityModel?.facts || null,
     },
   };
 }
@@ -140,11 +151,17 @@ export function evaluateTechnicalResearchPolicy(snapshot) {
 
 export function buildObservedFormalEvaluation(analysis) {
   const decision = analysis?.swingDecision || null;
+  const opportunityStage = String(decision?.opportunityStage || 'DATA_UNAVAILABLE').toUpperCase();
+  const executionAction = String(decision?.executionAction || 'NONE').toUpperCase();
+  const direction = ['OPEN', 'ADD'].includes(executionAction) ? 1
+    : opportunityStage === 'RISK_OFF' || ['REDUCE', 'CLOSE'].includes(executionAction) ? -1 : 0;
   return {
     policyId: 'formal_observed',
     policyVersion: String(analysis?.engineVersion || 'unknown-engine'),
-    status: decision?.state || 'unavailable',
-    direction: ['PROBE', 'ADD'].includes(decision?.state) ? 1 : ['TRIM', 'EXIT', 'AVOID'].includes(decision?.state) ? -1 : 0,
+    status: `${opportunityStage}:${executionAction}`,
+    opportunityStage,
+    executionAction,
+    direction,
     reason: decision?.summary || '未取得正式决策。',
     observedOnly: true,
   };

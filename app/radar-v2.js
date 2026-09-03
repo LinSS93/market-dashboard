@@ -134,11 +134,12 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
     return { items: json.data || [], meta: json.meta || { total: 0, offset, limit, has_more: false } };
   }
 
-  // 研究候选池（服务端分数截断 ≥60 + risk_review 始终可见，2 组布局）
-  // 返回 { items, queue_as_of, total }
-  async function fetchResearchQueue(market) {
+  // 研究候选池（服务端分数截断 ≥60 + risk_review 始终可见，3 组布局）
+  // 返回 { items, queue_as_of, total }；search 为服务端搜索（覆盖整个候选池）
+  async function fetchResearchQueue(market, search) {
     const params = new URLSearchParams({ limit: '30' });
     if (market) params.set('market', market);
+    if (search && search.trim()) params.set('search', search.trim());
     const resp = await fetch(`/radar_v2/queue?${params}`, { cache: 'no-store' });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const json = await resp.json();
@@ -304,14 +305,15 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
 
   // 研究状态排序优先级（positive > watch > risk）
   const ACTION_ORDER = { positive: 0, watch: 1, risk: 2 };
+  // 注：候选池分组顺序由服务端 API 决定（risk_review → cross_confirm → new_signal），
+  // 前端 BUCKET_ORDER 排序已随本地重排一并移除。
   const ACTION_LABELS = { positive: '正向研究', watch: '观察', risk: '风险待核验' };
   const CONFIDENCE_LABELS = { high: '高置信', medium: '中置信', low: '低置信' };
   const DIR_SHORT = { positive: '正', negative: '负', neutral: '中' };
 
   // 研究候选池分桶标签（简洁功能型命名，用于卡片标签和详情展示）
   // 候选池 3 组布局：困境反转 → 高置信机会 → 待确认信号
-  // bucket 字段由服务端返回，用于分组展示和卡片色标。
-  const BUCKET_ORDER = { risk_review: 0, cross_confirm: 1, new_signal: 2, audit_pending: 3, unscored: 4 };
+  // bucket 字段由服务端返回，用于分组展示和卡片色标；组间顺序由服务端 API 决定。
   const BUCKET_LABELS = {
     risk_review: '困境反转',
     cross_confirm: '高置信机会',
@@ -336,25 +338,14 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
     return (p >= 0 ? '+' : '') + Number(p).toFixed(2) + '%';
   }
 
-  // 排序：queue items 按 bucket 顺序 → 综合评分降序 → 时间倒序；archive items 按 action → 时间倒序
+  // 排序：archive items 按 action → 时间倒序。
+  // 候选池顺序完全由服务端决定（配额优先级 + 市场轮转），前端不再重排。
   function sortSymbols(items) {
     return items.slice().sort((a, b) => {
-      // queue items：先按 bucket 顺序
-      if (a.bucket && b.bucket) {
-        const ba = BUCKET_ORDER[a.bucket] != null ? BUCKET_ORDER[a.bucket] : 99;
-        const bb = BUCKET_ORDER[b.bucket] != null ? BUCKET_ORDER[b.bucket] : 99;
-        if (ba !== bb) return ba - bb;
-        // 同 bucket 内：有评分按分数降序，无评分按时间倒序
-        const sa = a.composite_score != null ? a.composite_score : -Infinity;
-        const sb = b.composite_score != null ? b.composite_score : -Infinity;
-        if (sb !== sa) return sb - sa;
-      } else {
-        // archive items：按 action 排序
-        const sa = a.summary || {}, sb = b.summary || {};
-        const aa = ACTION_ORDER[sa.action] != null ? ACTION_ORDER[sa.action] : 99;
-        const ab = ACTION_ORDER[sb.action] != null ? ACTION_ORDER[sb.action] : 99;
-        if (aa !== ab) return aa - ab;
-      }
+      const sa = a.summary || {}, sb = b.summary || {};
+      const aa = ACTION_ORDER[sa.action] != null ? ACTION_ORDER[sa.action] : 99;
+      const ab = ACTION_ORDER[sb.action] != null ? ACTION_ORDER[sb.action] : 99;
+      if (aa !== ab) return aa - ab;
       const ta = a.latest_available_at != null ? a.latest_available_at : 0;
       const tb = b.latest_available_at != null ? b.latest_available_at : 0;
       return tb - ta;
@@ -363,24 +354,24 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
 
   // 精简卡片：方向徽章 + 代码/名称 + 一句话事实 + 时间
   // 兼容两种数据形态：
-  //   queue item: { bucket, primary_driver: { fact: { content }, direction, available_at, change_type }, coverage }
+  //   queue item: { bucket, admission_driver: { fact: { content }, direction, available_at, change_type }, coverage, reversal_evidence }
   //   archive item: { summary: { action, conflict_detected }, latest_fact, latest_direction, latest_available_at, latest_change_type }
   function renderSymbolCard(s) {
     const isActive = state.selectedSymbol &&
       state.selectedSymbol.market === s.market &&
       state.selectedSymbol.symbol === s.symbol;
-    const isQueueItem = !!s.primary_driver;
+    const isQueueItem = !!s.admission_driver;
     const bucket = s.bucket || null;
     const sm = s.summary || {};
     const action = isQueueItem ? (s.action || 'watch') : (sm.action || 'watch');
     const dir = isQueueItem
-      ? (s.primary_driver.direction || 'neutral')
+      ? (s.admission_driver.direction || 'neutral')
       : (s.latest_direction || 'neutral');
-    // 卡片主文案：queue 用 primary_driver.fact；archive 用 latest_fact
+    // 卡片主文案：queue 用 admission_driver.fact（真正驱动入池的信号）；archive 用 latest_fact
     const fact = isQueueItem
-      ? (s.primary_driver.fact?.content || eventTypeLabel(s.primary_driver.change_type))
+      ? (s.admission_driver.fact?.content || eventTypeLabel(s.admission_driver.change_type))
       : (s.latest_fact || eventTypeLabel(s.latest_change_type));
-    const availableAt = isQueueItem ? s.primary_driver.available_at : s.latest_available_at;
+    const availableAt = isQueueItem ? s.admission_driver.available_at : s.latest_available_at;
     const conflict = isQueueItem ? false : (sm.conflict_detected || false);
     // 通道与评分覆盖（queue item 才有）
     const coverage = isQueueItem ? (s.coverage || {}) : null;
@@ -410,6 +401,23 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
       ? '<span class="audit-pending-tag" title="资产分类未审计，暂按普通股处理">资产待审计</span>'
       : '';
 
+    // 评分待更新标签（最近一次完整日扫未刷新该标的评分，已退出高置信排序）
+    const staleTag = isQueueItem && coverage && coverage.score_stale
+      ? '<span class="stale-score-tag" title="最近一次完整日扫未刷新该标的评分，暂不参与高置信排序">数据待更新</span>'
+      : '';
+
+    // 基本面未覆盖标签（软门槛：高置信组中无基本面档案的标的提示核验基本面，
+    // 负向基本面已由困境反转分桶承接，不在此重复标注）
+    const fundamentalTag = isQueueItem && bucket === 'cross_confirm' && s.fundamental_coverage === 'uncovered'
+      ? '<span class="fundamental-uncovered-tag" title="尚无基本面档案（基本面通道覆盖中），高置信结论仅基于技术/事件/趋势，请人工核验基本面">基本面未覆盖</span>'
+      : '';
+
+    // 困境反转正向证据（负面事件 + 正向证据并存，解释为什么负面标的仍值得研究）
+    const reversalChannel = isQueueItem && s.reversal_evidence ? channelLabel(s.reversal_evidence.channel) : null;
+    const reversalTag = reversalChannel
+      ? '<span class="reversal-tag" title="负面事件与' + esc(reversalChannel) + '正向证据并存（困境反转）">正向证据·' + esc(reversalChannel) + '</span>'
+      : '';
+
     // bucket 标签（候选池卡片才显示，让用户区分高置信机会/待确认信号/风险预警）
     const bucketTag = isQueueItem && s.bucket && BUCKET_LABELS[s.bucket]
       ? '<span class="bucket-tag bucket-tag-' + s.bucket + '" title="' + esc(BUCKET_HINTS[s.bucket] || '') + '">' + esc(BUCKET_LABELS[s.bucket]) + '</span>'
@@ -432,6 +440,9 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
           '<span class="time-tag">' + formatTime(availableAt) + '</span>' +
           (covText ? '<span class="cov-tag">' + esc(covText) + '</span>' : '') +
           bucketTag +
+          staleTag +
+          fundamentalTag +
+          reversalTag +
           auditTag +
           (conflict ? '<span class="conflict-tag">结论冲突</span>' : '') +
           (isQueueItem ? '<button class="dismiss-btn" data-market="' + esc(s.market) + '" data-symbol="' + esc(s.symbol) + '" title="不感兴趣，从候选池移除">不感兴趣</button>' : '') +
@@ -440,30 +451,25 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
     );
   }
 
-  // 机会候选池：2 组布局（风险预警 + 高分标的），不按 5 桶分组
+  // 机会候选池：3 组布局（困境反转 → 高置信机会 → 待确认信号）。
+  // 服务端已按 配额优先级（risk → cross_confirm → new_signal）+ 市场轮转排好序，
+  // 前端只按 bucket 分组、不重排，保证分组配额与市场平衡不被本地排序打散。
+  // 搜索已由服务端完成（覆盖整个候选池，而非仅已加载的 30 条）。
   function renderQueueList() {
-    const q = state.search.trim().toUpperCase();
-    let filtered = state.items.slice();
-    if (q) {
-      filtered = filtered.filter((s) =>
-        (s.symbol || '').toUpperCase().includes(q) ||
-        (s.name || '').toUpperCase().includes(q)
-      );
-    }
-    const sorted = sortSymbols(filtered);
+    const items = state.items;
+    const total = state.queueTotal != null ? state.queueTotal : items.length;
 
-    elCount.textContent = sorted.length + ' / ' + state.items.length;
+    elCount.textContent = items.length + ' / ' + total;
 
-    if (sorted.length === 0) {
-      const msg = state.items.length > 0 ? '当前筛选条件下无匹配股票' : '暂无符合准入条件的研究对象';
+    if (items.length === 0) {
+      const msg = state.search.trim() ? '没有匹配代码或名称的候选' : '暂无符合准入条件的研究对象';
       elList.innerHTML = '<div class="dossier-empty">' + esc(msg) + '</div>';
       return;
     }
 
-    // 3 组：困境反转（risk_review）→ 高置信机会（cross_confirm）→ 待确认信号（new_signal）
-    const riskItems = sorted.filter((s) => s.bucket === 'risk_review');
-    const crossItems = sorted.filter((s) => s.bucket === 'cross_confirm');
-    const newSignalItems = sorted.filter((s) => s.bucket === 'new_signal');
+    const riskItems = items.filter((s) => s.bucket === 'risk_review');
+    const crossItems = items.filter((s) => s.bucket === 'cross_confirm');
+    const newSignalItems = items.filter((s) => s.bucket === 'new_signal');
 
     let html = '';
 
@@ -677,7 +683,6 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
         h += '<div class="opp-metrics opp-metrics-detail">';
         h += renderMetricBar('技术', m.technical);
         h += renderMetricBar('流动性', m.liquidity);
-        h += renderMetricBar('可靠性', m.reliability);
         h += '</div>';
         if (latestObs.evidence && Array.isArray(latestObs.evidence) && latestObs.evidence.length > 0) {
           h += '<div class="detail-facts" style="margin-top:8px">';
@@ -815,9 +820,10 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
     });
   }
 
-  // 研究优先级卡片：行动徽章 + 数据覆盖 + 评分来源 + 更新时间 + 冲突标记
-  // scoreBreakdown 优先：有 composite_score 时显示，与候选池列表口径一致
-  function renderSymbolSummary(s, scoreAsOf, scoreBreakdown) {
+  // 研究优先级卡片（详情页第一层）：候选类型 + 行动徽章 + 数据覆盖 + 研究排序 + 数据时间 + 冲突
+  // 审计修正（UI 瘦身）：完整评分算式移入折叠区，首屏只保留"研究排序 X"一个数字；
+  // queueItem 提供 bucket（候选类型）与 score_stale（数据待更新）。
+  function renderSymbolSummary(s, scoreAsOf, scoreBreakdown, queueItem) {
     if (!s) return '';
     let h = '<div class="symbol-summary action-' + s.action + '">';
     // 冲突时突出"结论冲突、需人工判断"
@@ -825,6 +831,10 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
       h += '<div class="summary-conflict-banner">结论冲突、需人工判断</div>';
     }
     h += '<div class="summary-head">';
+    // 候选类型（queue 条目才有）：困境反转/高置信机会/待确认信号
+    if (queueItem && queueItem.bucket && BUCKET_LABELS[queueItem.bucket]) {
+      h += '<span class="bucket-tag bucket-tag-' + esc(queueItem.bucket) + '" title="' + esc(BUCKET_HINTS[queueItem.bucket] || '') + '">' + esc(BUCKET_LABELS[queueItem.bucket]) + '</span>';
+    }
     h += '<span class="summary-action ' + s.action + '">' + esc(ACTION_LABELS[s.action] || s.action) + '</span>';
     h += '<span class="summary-confidence ' + s.confidence + '">' + esc(CONFIDENCE_LABELS[s.confidence] || s.confidence) + '</span>';
     h += '</div>';
@@ -833,11 +843,14 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
     const displayScore = scoreBreakdown ? scoreBreakdown.composite_score : s.avg_score;
     const asOf = scoreBreakdown ? scoreBreakdown.score_as_of : scoreAsOf;
     if (displayScore != null) {
-      h += '<span class="summary-meta-item" title="研究排序分，非收益预测">候选池综合分 ' + esc(displayScore.toFixed(0)) + '</span>';
+      h += '<span class="summary-meta-item" title="研究排序分，非收益预测；完整算式见折叠区">研究排序 ' + esc(displayScore.toFixed(0)) + '</span>';
     } else {
       h += '<span class="summary-meta-item summary-meta-muted">待评分 · 暂按信号时间排序</span>';
     }
-    if (asOf != null) {
+    // 数据时间：评分未随最近完整日扫刷新 → 显式提示（审计：页面日期不代表数据真的更新到了该日）
+    if (queueItem && queueItem.coverage && queueItem.coverage.score_stale) {
+      h += '<span class="summary-meta-item summary-stale" title="最近一次完整日扫未刷新该标的评分，暂不参与高置信排序">数据待更新</span>';
+    } else if (asOf != null) {
       h += '<span class="summary-meta-item">评分来源 ' + formatTime(asOf) + '</span>';
     }
     h += '</div>';
@@ -856,8 +869,9 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
   }
 
   // 评分构成：拆解 composite_score = base_score + signal_bonus 的计算过程
-  const METRIC_LABELS = { technical: '技术面', liquidity: '流动性', reliability: '可靠度' };
-  const METRIC_ORDER = ['technical', 'liquidity', 'reliability'];
+  // 审计修正 2026.09.02：可靠度改硬门槛不再是评分维度，只剩 2 因子
+  const METRIC_LABELS = { technical: '技术面', liquidity: '流动性' };
+  const METRIC_ORDER = ['technical', 'liquidity'];
   const TIER_LABELS_CN = { high: '高', medium: '中', low: '低' };
   const DIR_LABELS_CN = { positive: '看多', negative: '看空', neutral: '中性' };
 
@@ -1089,6 +1103,7 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
   }
 
   // 层5：关键事件时间线（跨通道合并最近 10 条，按时间倒序）
+  // summary 模式：dossier_count 携带全量数，超出展示数时标注截断
   function renderEventTimeline(groups) {
     const events = [];
     for (const g of groups) {
@@ -1107,9 +1122,13 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
     }
     events.sort((a, b) => (b.time || 0) - (a.time || 0));
     const top = events.slice(0, 10);
+    const totalCount = groups.reduce(
+      (sum, g) => sum + (g.dossier_count != null ? g.dossier_count : g.dossiers.length), 0
+    );
+    const titleSuffix = totalCount > top.length ? '（共 ' + totalCount + ' 条，显示最近 ' + top.length + '）' : '';
 
     let h = '<div class="detail-section">';
-    h += '<div class="detail-section-title">关键事件时间线</div>';
+    h += '<div class="detail-section-title">关键事件时间线' + esc(titleSuffix) + '</div>';
     if (top.length === 0) {
       h += '<div class="observation-empty">暂无事件</div>';
     } else {
@@ -1160,9 +1179,21 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
   }
 
   // 四问：从 groups 数据中提取决策关键信息
-  function renderFourQuestions(groups, summary, latestFact) {
-    // Q1: 为什么进入队列？— 最新变化事实
-    const q1 = latestFact || '暂无明确变化事件';
+  function renderFourQuestions(groups, summary, latestFact, queueItem) {
+    // Q1: 为什么进入队列？— 候选池条目用真正的准入驱动（admission_driver），
+    // 而不是最新一条 dossier（可能是 neutral 例行披露）；
+    // 困境反转附加正向证据，解释"为什么负面标的仍值得研究"
+    let q1 = latestFact || '暂无明确变化事件';
+    let q1Extra = '';
+    if (queueItem && queueItem.admission_driver) {
+      const drv = queueItem.admission_driver;
+      q1 = drv.fact?.content || latestFact || eventTypeLabel(drv.change_type);
+      if (queueItem.bucket === 'risk_review' && queueItem.reversal_evidence) {
+        const rev = queueItem.reversal_evidence;
+        q1Extra = '负面事件与' + channelLabel(rev.channel) + '正向证据并存（困境反转）：'
+          + (rev.fact?.content || eventTypeLabel(rev.change_type));
+      }
+    }
 
     // Q2: 已确认的事实是什么？— confirmed dossier 的 facts
     const confirmedFacts = [];
@@ -1218,7 +1249,8 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
     const q4 = negation.length > 0 ? negation[0] : '暂无明确否定条件';
 
     let h = '<div class="four-questions">';
-    h += '<div class="qq-item"><div class="qq-label">为什么进入队列</div><div class="qq-answer">' + esc(q1) + '</div></div>';
+    h += '<div class="qq-item"><div class="qq-label">为什么进入队列</div><div class="qq-answer">' + esc(q1) +
+      (q1Extra ? '<div class="qq-answer qq-answer-muted">' + esc(q1Extra) + '</div>' : '') + '</div></div>';
     h += '<div class="qq-item"><div class="qq-label">已确认的事实</div><div class="qq-answer qq-answer-muted">' + esc(q2) + '</div></div>';
     h += '<div class="qq-item"><div class="qq-label">下一步该核验什么</div><div class="qq-answer">' + esc(q3) + '</div></div>';
     h += '<div class="qq-item"><div class="qq-label">什么会否定它</div><div class="qq-answer">' + esc(q4) + '</div></div>';
@@ -1239,7 +1271,10 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
     elDetail.className = 'dossier-detail';
 
     const { market, symbol, name, latest_price, latest_price_change_pct, groups, summary, score_breakdown } = data;
-    const totalDossiers = groups.reduce((sum, g) => sum + g.dossiers.length, 0);
+    // summary 模式 dossiers 被截断，dossier_count 携带全量数
+    const totalDossiers = groups.reduce(
+      (sum, g) => sum + (g.dossier_count != null ? g.dossier_count : g.dossiers.length), 0
+    );
     elDetailHint.textContent = totalDossiers + ' 档案 · ' + groups.length + ' 通道';
     state._lastDetailData = data; // 保存当前详情数据，供 LLM 触发后重渲染使用
 
@@ -1265,23 +1300,28 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
     // 资产审计入口（provisional 时显示，阶段 C 人工消化）
     h += renderAssetAuditBar(market, symbol, data.eligibility);
 
-    // 层2：决策卡片（研究优先级）
-    h += renderSymbolSummary(summary, data.score_as_of, score_breakdown);
+    // 候选池条目（bucket/score_stale 供首屏卡片与四问使用）
+    const queueItem = state.items.find(
+      (s) => s.market === market && s.symbol === symbol && s.admission_driver
+    ) || null;
 
-    // 层2.5：评分构成（拆解 composite_score 计算过程）
-    h += renderScoreBreakdown(score_breakdown);
+    // 层1：决策卡片（候选类型 + 数据时间 + 冲突 + 研究排序，完整算式移入层3折叠）
+    h += renderSymbolSummary(summary, data.score_as_of, score_breakdown, queueItem);
 
-    // 层3：四问（为什么进入队列/已确认事实/下一步核验/什么会否定它）
-    h += renderFourQuestions(groups, summary, latestFact);
+    // 层2：四问（为什么进入队列/已确认事实/下一步核验/什么会否定它）
+    // 候选池条目传入 queue item，Q1 用真正的准入驱动而非最新 dossier
+    h += renderFourQuestions(groups, summary, latestFact, queueItem);
 
-    // 层4：折叠证据区（K线、财务、通道矩阵、事件时间线）
+    // 层3：折叠证据区（评分算式、K线、财务、通道矩阵、事件时间线）
+    // 审计修正（UI 瘦身）：完整评分算式与通道矩阵默认折叠，降低首屏信息密度
     h += '<div class="evidence-area">';
+    h += renderCollapsibleSection('scoreBreakdown', '评分构成（研究排序算式）', renderScoreBreakdown(score_breakdown), false);
     h += renderCollapsibleSection('klineSlot', '股价走势', renderKlineSlot(), false);
     h += '<div id="financialSlot">' +
       renderCollapsibleSection('financialHighlight', '财务亮点',
         '<div class="observation-empty">正在读取财务数据…</div>', false) +
     '</div>';
-    h += renderCollapsibleSection('channelMatrix', '通道信号矩阵', renderChannelMatrix(groups), true);
+    h += renderCollapsibleSection('channelMatrix', '通道信号矩阵', renderChannelMatrix(groups), false);
     h += renderCollapsibleSection('eventTimeline', '关键事件时间线', renderEventTimeline(groups), false);
     h += '</div>';
 
@@ -1470,8 +1510,8 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
     if (!appendArchive) elList.innerHTML = '<div class="dossier-empty">正在加载...</div>';
     try {
       if (state.tab === 'queue') {
-        // 机会候选池：服务端分桶 API
-        const data = await fetchResearchQueue(state.market);
+        // 机会候选池：服务端分桶 API（搜索同样走服务端，覆盖整个候选池）
+        const data = await fetchResearchQueue(state.market, state.search);
         if (!loadGuard.isLatest(reqId)) return;
         state.items = data.items || [];
         state.queueAsOf = data.queue_as_of || null;
@@ -1481,10 +1521,8 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
         $('listStatus').textContent = '';
         renderList();
         if (state.selectedSymbol == null && state.items.length > 0) {
-          const sorted = sortSymbols(state.items);
-          if (sorted.length > 0) {
-            void selectSymbol(sorted[0].market, sorted[0].symbol);
-          }
+          // 服务端已排好序（risk → cross_confirm → new_signal 市场轮转），直接取首条
+          void selectSymbol(state.items[0].market, state.items[0].symbol);
         }
         const asOfText = formatQueueAsOf(state.queueAsOf);
         // 显示"显示 X / 总 Y"，让用户看到截断与池规模
@@ -1533,19 +1571,30 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
     }
   }
 
-  // 格式化 queue_as_of 为可读文案（如"US 08/04 · HK 08/04 · CN 08/04"）
+  // 格式化 queue_as_of 为可读文案（如"数据 US 08/04·扫描中 · HK 08/04"）。
+  // 数据日期取"最后完整扫描日"（不是日历最后交易日——扫描未完成的市场不能
+  // 伪装成当日已就绪），并按需附加应到日的扫描状态。
   function formatQueueAsOf(qa) {
     if (!qa) return '';
     const parts = [];
     for (const m of ['US', 'HK', 'CN']) {
-      const dt = qa[m];
-      if (!dt) continue;
-      // dt 是 'YYYY-MM-DD'，转为 MM/DD
-      const m2 = dt.slice(5, 7);
-      const d = dt.slice(8, 10);
-      parts.push(m + ' ' + m2 + '/' + d);
+      const info = qa[m];
+      if (!info) continue;
+      let text;
+      if (info.last_complete_date) {
+        // 'YYYY-MM-DD' → MM/DD
+        text = m + ' ' + info.last_complete_date.slice(5, 7) + '/' + info.last_complete_date.slice(8, 10);
+      } else {
+        text = m + ' 待扫描';
+      }
+      if (info.scan_status === 'running') text += '·扫描中';
+      else if (info.scan_status === 'partial') text += '·部分' + (info.coverage_pct != null ? info.coverage_pct + '%' : '');
+      else if (info.scan_status === 'failed') text += '·扫描失败';
+      else if (info.scan_status === 'pending') text += '·待扫描';
+      else if (info.scan_status === 'none' && info.last_complete_date) text += '·待新扫描';
+      parts.push(text);
     }
-    return parts.length > 0 ? '准入 ' + parts.join(' · ') : '';
+    return parts.length > 0 ? '数据 ' + parts.join(' · ') : '';
   }
 
   function switchTab(tab) {
@@ -1593,14 +1642,15 @@ import { describeCompanyProfileFailure } from './radar-v2-company-profile.mjs';
     });
   });
 
-  // 搜索（输入防抖）
+  // 搜索（输入防抖）：queue/archive 均为服务端搜索（覆盖全部数据），
+  // dismissed 为已加载列表的本地过滤
   let searchTimer = null;
   elSearch.addEventListener('input', () => {
     state.search = elSearch.value;
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => {
-      if (state.tab === 'archive') loadAndRender();
-      else renderList();
+      if (state.tab === 'dismissed') renderList();
+      else loadAndRender();
     }, 250);
   });
 

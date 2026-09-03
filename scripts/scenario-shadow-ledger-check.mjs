@@ -20,13 +20,13 @@ function check(condition, label) {
   else { failures.push(label); console.error('[FAIL] ' + label); }
 }
 function bar(date, open, high, low, close) { return { date, open, high, low, close, volume: 1000 }; }
-function analysis(symbol, asOfDate, state = 'WATCH', sourceAction = 'WATCH') {
+function analysis(symbol, asOfDate, opportunityStage = 'AWAIT_CONFIRMATION', executionAction = 'NONE') {
   return {
     symbol, market: 'US', asOfDate, currentPrice: 100, atr: 5, sma20: 100, score: 0.7,
-    tradePlan: { action: sourceAction, setup: { key: 'trend_pullback' }, regime: { key: 'trend' }, marketRegime: { key: 'uptrend' } },
+    tradePlan: { action: executionAction === 'OPEN' ? 'BUY' : 'WATCH', setup: { key: 'trend_pullback' }, regime: { key: 'trend' }, marketRegime: { key: 'uptrend' } },
     swingDecision: {
-      state, sourceAction, signalAvailable: true, validSessions: 3,
-      zones: { confirmation: 105, invalidation: 95, target1: 112 },
+      opportunityStage, executionAction, signalAvailable: true, validSessions: 3,
+      zones: { confirmation: 105, invalidation: 95, reassessment: 112 },
     },
   };
 }
@@ -57,7 +57,7 @@ const bars = [
 ];
 const accrued = accrueScenarioShadowOutcomes({ db, getBars: () => bars, updatedAt: 300 });
 const settled = getScenarioShadowObservations(db, { symbol: 'TEST' })[0];
-check(accrued.matured === 1 && settled.outcomeStatus === 'target_hit', 'frozen WATCH conditions settle from later bars without changing the snapshot');
+check(accrued.matured === 1 && settled.outcomeStatus === 'reassessment_hit', 'frozen confirmation conditions settle from later bars without changing the snapshot');
 check(settled.outcome?.activation?.date === '2026-01-07' && settled.outcome?.activation?.price === 107, 'settlement uses the next-session open after confirmation');
 const rerun = accrueScenarioShadowOutcomes({ db, getBars: () => bars, updatedAt: 400 });
 check(rerun.scanned === 0, 'completed outcomes are not recalculated on a later scheduler run');
@@ -82,7 +82,7 @@ const resumed = accrueScenarioShadowOutcomes({
   updatedAt: 700,
 });
 const resumedRow = getScenarioShadowObservations(db, { symbol: 'WAIT' })[0];
-check(resumed.matured === 1 && resumedRow.outcomeStatus === 'target_hit', 'pending observations resume after a restart-equivalent accrual run');
+check(resumed.matured === 1 && resumedRow.outcomeStatus === 'reassessment_hit', 'pending observations resume after a restart-equivalent accrual run');
 
 const status = getScenarioShadowStatus(db);
 check(status.totalObservations === 2 && status.matureObservations === 2 && status.pendingObservations === 0, 'ledger status separates total, mature, and pending cohorts');

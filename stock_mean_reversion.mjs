@@ -27,8 +27,10 @@ function finite(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-function blockedState(state) {
-  return ['AVOID', 'EXIT', 'TRIM'].includes(String(state || '').toUpperCase());
+function blocksMeanReversion(decision) {
+  const stage = String(decision?.opportunityStage || '').toUpperCase();
+  const action = String(decision?.executionAction || '').toUpperCase();
+  return stage === 'RISK_OFF' || ['REDUCE', 'CLOSE'].includes(action);
 }
 
 function base({ status, reason, analysis, marketDate, price = null, eventType = null, candidatePrice = null }) {
@@ -61,14 +63,20 @@ export function evaluateMeanReversionObservation({ analysis, priorState = null, 
   const market = String(analysis?.market || '').toUpperCase();
   const quote = analysis?.liveQuote || null;
   const price = finite(quote?.price);
-  const finalState = analysis?.swingDecision?.state || null;
+  const finalDecision = analysis?.swingDecision || null;
+  const formalStage = finalDecision?.opportunityStage || null;
+  const formalAction = finalDecision?.executionAction || null;
 
   if (!marketDate || !market) return base({ status: 'unavailable', reason: '缺少市场日期或市场标识。', analysis, marketDate, price });
   if (!marketOpen) return base({ status: 'unavailable', reason: '市场未开盘，不生成盘中观察。', analysis, marketDate, price });
   if (!analysis || analysis.error || analysis.daily !== true) return base({ status: 'unavailable', reason: '日线分析不可用。', analysis, marketDate, price });
   if (analysis?.dataQuality?.level !== 'ok') return base({ status: 'blocked', reason: '日线数据质量未达标。', analysis, marketDate, price });
   if (!quote?.isRealtime || quote?.stale || price == null || price <= 0) return base({ status: 'blocked', reason: '缺少新鲜的实时价格。', analysis, marketDate, price });
-  if (blockedState(finalState)) return base({ status: 'blocked', reason: `正式风险状态为 ${finalState}，不建立短线反转候选。`, analysis, marketDate, price });
+  if (blocksMeanReversion(finalDecision)) return base({
+    status: 'blocked',
+    reason: `正式决策为 ${formalStage || '未知阶段'} / ${formalAction || '未知动作'}，不建立短线反转候选。`,
+    analysis, marketDate, price,
+  });
 
   const rsi6 = finite(analysis.rsi6);
   const rsi12 = finite(analysis.rsi12);

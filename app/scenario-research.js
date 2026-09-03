@@ -4,8 +4,14 @@
   const esc = value => String(value ?? '').replace(/[&<>'"]/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;' }[char]));
   const MARKET_LABEL = { US:'美股', HK:'港股', CN:'A 股', KR:'韩股' };
   const KIND_LABEL = { waiting_confirmation:'等待确认', active_long:'持有/进场', risk_rebuild:'风险重建', insufficient:'数据不足' };
-  const STATE_LABEL = { WATCH:'观察', PROBE:'试仓', ADD:'加仓', HOLD:'持有', TRIM:'减仓', EXIT:'清仓', AVOID:'回避' };
-  const OUTCOME_LABEL = { target_hit:'触及目标', invalidated:'失效', unresolved:'期满未决', confirmation_expired:'确认过期', expired:'已过期', reclaimed:'价格收复', risk_continues:'风险延续', pending:'待结算', insufficient:'数据不足' };
+  const STATE_LABEL = {
+    DATA_UNAVAILABLE:'数据不足', NO_SETUP:'等待机会', FORMING:'机会形成中', AWAIT_CONFIRMATION:'等待确认',
+    BLOCKED:'看多受阻', READY:'可以执行', RISK_OFF:'风险回避',
+    WATCH:'历史·观察', PROBE:'历史·试仓', ADD:'历史·加仓', HOLD:'历史·持有',
+    TRIM:'历史·减仓', EXIT:'历史·清仓', AVOID:'历史·回避',
+  };
+  const EXECUTION_LABEL = { OPEN:'可试仓', ADD:'可加仓', HOLD:'持有观察', REDUCE:'减仓', CLOSE:'清仓', NONE:'不交易' };
+  const OUTCOME_LABEL = { target_hit:'历史·触及目标', reassessment_hit:'触及复核位', invalidated:'失效', unresolved:'期满未决', confirmation_expired:'确认过期', expired:'已过期', reclaimed:'价格收复', risk_continues:'风险延续', pending:'待结算', insufficient:'数据不足' };
   const PROFILE_STATUS_LABEL = { baseline_collecting:'建立基线', outcome_collecting:'等待结算', sample_insufficient:'样本积累中', descriptive_only:'描述性观察' };
   let payload = null;
 
@@ -136,6 +142,30 @@
     $('driftMeta').textContent = `真实冻结样本 · ${state.label}`;
     panel.innerHTML = '<div class="drift-list">' + rows.map(([labelText, value, detail, valueIsHtml = false]) => '<div class="drift-row"><div class="drift-label">' + esc(labelText) + '</div><div class="drift-value">' + (valueIsHtml ? value : esc(value)) + '</div><div class="drift-detail">' + esc(detail) + '</div></div>').join('') + '</div>';
   }
+  function rankingValue(value) {
+    return value == null || !Number.isFinite(Number(value)) ? '—' : Number(value).toFixed(2);
+  }
+  function renderResearchRanking(data) {
+    const report = data.researchRanking || null;
+    const panel = $('rankingRows');
+    if (!report || !Array.isArray(report.factors) || !report.covered) {
+      $('rankingMeta').textContent = '当前观察池暂无完整研究因子';
+      panel.innerHTML = '<div class="research-empty">等待股票分析完成后汇总横截面分布。该诊断不会触发计算或改变正式动作。</div>';
+      return;
+    }
+    const marketText = report.market ? ` · ${label(MARKET_LABEL, report.market)}` : ' · 全部市场';
+    $('rankingMeta').textContent = `当前观察池${marketText} · 覆盖 ${report.covered}/${report.population}${report.asOfDate ? ` · ${report.asOfDate}` : ''}`;
+    panel.innerHTML = '<div class="ranking-factor-list">' + report.factors.map(factor => {
+      const median = Number.isFinite(Number(factor.median)) ? Number(factor.median) : 0;
+      const width = Math.max(0, Math.min(100, median * 100));
+      const role = factor.isDirectionGate ? '方向强度' : factor.weight != null ? `质量权重 ${Math.round(Number(factor.weight) * 100)}%` : '研究因子';
+      return '<div class="ranking-factor">'
+        + '<div class="ranking-factor-head"><b>' + esc(factor.label || factor.key) + '</b><span>' + esc(role) + '</span></div>'
+        + '<div class="ranking-factor-track"><i style="width:' + width.toFixed(1) + '%"></i></div>'
+        + '<div class="ranking-factor-meta"><strong>中位 ' + esc(rankingValue(factor.median)) + '</strong><span>中间 50%：' + esc(rankingValue(factor.p25)) + ' — ' + esc(rankingValue(factor.p75)) + '</span><span>n=' + Number(factor.samples || 0) + '</span></div>'
+        + '</div>';
+    }).join('') + '</div>';
+  }
   function profileNumber(value, suffix = '%', signed = true) {
     if (value == null || !Number.isFinite(Number(value))) return '—';
     const number = Number(value);
@@ -144,7 +174,35 @@
   function profileHorizonText(horizon, minimum) {
     if (!horizon?.count) return '尚无已结算样本';
     if (!horizon.adequate) return `已结算 ${horizon.count}/${minimum}，继续积累`;
-    return `样本 ${horizon.count} · 胜率 ${profileNumber(horizon.winRatePct, '%', false)} · 方向收益 ${profileNumber(horizon.averageDirectionalReturnPct)} · 超额 ${profileNumber(horizon.averageExcessReturnPct)}`;
+    const long = horizon.long || {};
+    const defensive = horizon.defensive || {};
+    const longText = long.count ? `长仓 n=${long.count}${long.adequate ? `，胜率 ${profileNumber(long.winRatePct, '%', false)}，超额 ${profileNumber(long.averageExcessReturnPct)}` : ''}` : '长仓 n=0';
+    const defensiveText = defensive.count ? `风险保护 n=${defensive.count}${defensive.adequate ? `，命中率 ${profileNumber(defensive.winRatePct, '%', false)}` : ''}` : '风险保护 n=0';
+    return `${longText} · ${defensiveText}`;
+  }
+  function profileActionText(actionCounts) {
+    const order=['OPEN','ADD','HOLD','REDUCE','CLOSE','NONE'];
+    const values=order.filter(key=>Number(actionCounts?.[key]||0)>0)
+      .map(key=>`${label(EXECUTION_LABEL,key)} ${Number(actionCounts[key])}`);
+    return values.length ? values.join(' · ') : '尚无完整策略迁移';
+  }
+  function profileStrategyHorizonText(horizon, minimum) {
+    if(!horizon?.count)return '尚无可结算的完整动作';
+    const entry=horizon.entry||horizon;
+    const defensive=horizon.defensive||{};
+    const entryCounts=entry.count
+      ? `入场 n=${Number(entry.count)}（复核位 ${Number(entry.reassessmentHits||0)} / 失效 ${Number(entry.invalidations||0)} / 未决 ${Number(entry.unresolved||0)}）`
+      : '入场 n=0';
+    const entryPerformance=entry.adequate
+      ? `，复核触及率 ${profileNumber(entry.reassessmentHitRatePct,'%',false)}，路径 ${profileNumber(entry.averageStrategyReturnPct)}，仓位折算 ${profileNumber(entry.averageExposureReturnPct)}`
+      : entry.count ? `，待 ${minimum} 条` : '';
+    const defensiveCounts=defensive.count
+      ? `防守 n=${Number(defensive.count)}（规避 ${Number(defensive.riskAvoided||0)} / 机会成本 ${Number(defensive.opportunityCost||0)} / 未决 ${Number(defensive.unresolved||0)}）`
+      : '防守 n=0';
+    const defensivePerformance=defensive.adequate
+      ? `，规避率 ${profileNumber(defensive.riskAvoidedRatePct,'%',false)}，保护收益 ${profileNumber(defensive.averageProtectionReturnPct)}`
+      : defensive.count ? `，待 ${minimum} 条` : '';
+    return `${entryCounts}${entryPerformance} · ${defensiveCounts}${defensivePerformance}`;
   }
   function renderSignalProfiles(data) {
     const report = data.signalProfiles || null;
@@ -155,19 +213,30 @@
       return;
     }
     const marketText = report.market ? ` · ${label(MARKET_LABEL, report.market)}` : ' · 全部市场';
-    $('profileMeta').textContent = `影子账本${marketText} · 表现统计门槛 ${report.minimumOutcomeSamples} 条`;
+    const flow=report.sampleFlow||{};
+    $('profileMeta').textContent = `完整策略影子账本${marketText} · 技术结果 ${Number(flow.acceptedNonOverlappingOutcomes||0)} · 策略结果 ${Number(flow.acceptedNonOverlappingStrategyOutcomes||0)} · 门槛 ${report.minimumOutcomeSamples} 条`;
     panel.innerHTML = '<div class="profile-grid">' + report.profiles.map(profile => {
       const status = label(PROFILE_STATUS_LABEL, profile.status);
       const role = profile.formalActionEligible ? '唯一正式动作来源' : '仅研究观察';
       const h5 = profileHorizonText(profile.horizons?.[5], report.minimumOutcomeSamples);
       const h20 = profileHorizonText(profile.horizons?.[20], report.minimumOutcomeSamples);
+      const strategy5=profileStrategyHorizonText(profile.strategyHorizons?.[5],report.minimumOutcomeSamples);
+      const strategy20=profileStrategyHorizonText(profile.strategyHorizons?.[20],report.minimumOutcomeSamples);
+      const paired5=Number(report.pairedWithBalanced?.[5]?.[profile.id]||0);
+      const history=(report.historicalCohorts||[]).filter(cohort=>cohort.id===profile.id);
+      const historyText=history.length ? history.map(cohort=>`${cohort.version}：基线 ${Number(cohort.baselines||0)} / 迁移 ${Number(cohort.transitions||0)}`).join('；') : '';
       return '<article class="profile-item role-' + esc(profile.role) + '">'
         + '<div class="profile-title"><div><b>' + esc(profile.label) + '</b><small>' + esc(profile.version) + '</small></div><span class="profile-badge ' + (profile.formalActionEligible ? 'formal' : 'research') + '">' + esc(role) + '</span></div>'
         + '<div class="profile-status">' + esc(status) + '</div>'
-        + '<div class="profile-counts"><span>基线 <b>' + Number(profile.baselines || 0) + '</b></span><span>状态迁移 <b>' + Number(profile.transitions || 0) + '</b></span><span>标的 <b>' + Number(profile.symbols || 0) + '</b></span></div>'
-        + '<div class="profile-horizon"><span>5 日</span><p>' + esc(h5) + '</p></div>'
-        + '<div class="profile-horizon"><span>20 日</span><p>' + esc(h20) + '</p></div>'
+        + '<div class="profile-counts"><span>基线 <b>' + Number(profile.baselines || 0) + '</b></span><span>技术迁移 <b>' + Number(profile.transitions || 0) + '</b></span><span>策略迁移 <b>' + Number(profile.strategyTransitions || 0) + '</b></span><span>标的 <b>' + Number(profile.symbols || 0) + '</b></span></div>'
+        + '<div class="profile-horizon"><span>动作分布</span><p>' + esc(profileActionText(profile.actionCounts)) + '</p></div>'
+        + '<div class="profile-horizon"><span>技术方向 · 5 日</span><p>' + esc(h5) + '</p></div>'
+        + '<div class="profile-horizon"><span>技术方向 · 20 日</span><p>' + esc(h20) + '</p></div>'
+        + '<div class="profile-horizon strategy"><span>完整策略 · 5 日</span><p>' + esc(strategy5) + '</p></div>'
+        + '<div class="profile-horizon strategy"><span>完整策略 · 20 日</span><p>' + esc(strategy20) + '</p></div>'
+        + '<small class="profile-asof">与均衡同标的同日配对（5日）：' + paired5 + '</small>'
         + '<small class="profile-asof">最近冻结：' + esc(profile.latestAsOfDate || '尚无') + '</small>'
+        + (historyText ? '<small class="profile-asof">历史口径（仅留档，不混算）：' + esc(historyText) + '</small>' : '')
         + '</article>';
     }).join('') + '</div>';
   }
@@ -201,7 +270,7 @@
   }
   function render(data) {
     payload = data;
-    renderSummary(data); renderCoverage(data); renderDrift(data); renderSignalProfiles(data); renderCohorts(data); renderDaily(data); renderRecent(data); renderMethod(data);
+    renderSummary(data); renderCoverage(data); renderDrift(data); renderResearchRanking(data); renderSignalProfiles(data); renderCohorts(data); renderDaily(data); renderRecent(data); renderMethod(data);
   }
   async function load() {
     $('researchRefresh').disabled = true;

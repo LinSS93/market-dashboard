@@ -4,9 +4,9 @@ import { resolveRegisteredTrackerProduct, registeredTrackerProductCount } from '
 
 const failures=[];
 function check(cond,msg){if(cond)console.log('[PASS] '+msg);else{failures.push(msg);console.error('[FAIL] '+msg)}}
-const bullish={swingDecision:{state:'PROBE'}};
-const bearish={swingDecision:{state:'EXIT'}};
-const avoid={swingDecision:{state:'AVOID',reliabilityScore:5}};
+const bullish={swingDecision:{opportunityStage:'READY',executionAction:'OPEN'}};
+const bearish={swingDecision:{opportunityStage:'RISK_OFF',executionAction:'CLOSE'}};
+const avoid={swingDecision:{opportunityStage:'RISK_OFF',executionAction:'NONE',reliabilityScore:5}};
 
 check(providerDate('20260713 10:30:00')==='20260713','provider timestamp date is normalized');
 check(registeredTrackerProductCount()===4,'system registry contains the four supported tracker products');
@@ -56,7 +56,7 @@ function makeBaseInput(overrides={}) {
     etfReturnPct: 0,                      // ETF 0%，不触发 etfKill
     etfProviderTime: '20260713',
     underlyingProviderTime: '20260713',   // 日期对齐 → navQuality='aligned'
-    underlyingAnalysis: { swingDecision: { state: 'PROBE' } },  // bullish
+    underlyingAnalysis: { swingDecision: { opportunityStage:'READY', executionAction:'OPEN' } },  // bullish
     positionShares: 0,                    // 默认无持仓
     navQuality: 'aligned',
     ...overrides,
@@ -141,7 +141,7 @@ check((() => {
     etfProviderTime: '20260720',          // HK 周一
     underlyingProviderTime: '20260717',   // KR 上周五（休市）
     navQuality: 'cross_market_exact',     // 调用方误传，应被覆盖
-    underlyingAnalysis: { swingDecision: { state: 'PROBE' } },
+    underlyingAnalysis: { swingDecision: { opportunityStage:'READY', executionAction:'OPEN' } },
   });
   const result = evaluateTrackerSignal(input);
   return result.signal === 'HOLD' && result.gate === 'date_mismatch' && result.navQuality === 'date_mismatch';
@@ -154,7 +154,7 @@ check((() => {
     etfProviderTime: '20260720',
     underlyingProviderTime: '20260717',
     navQuality: 'cross_market_approx',
-    underlyingAnalysis: { swingDecision: { state: 'PROBE' } },
+    underlyingAnalysis: { swingDecision: { opportunityStage:'READY', executionAction:'OPEN' } },
   });
   const result = evaluateTrackerSignal(input);
   return result.signal === 'HOLD' && result.gate === 'date_mismatch';
@@ -167,7 +167,7 @@ check((() => {
     etfProviderTime: '20260720',
     underlyingProviderTime: '20260720',
     navQuality: 'cross_market_exact',
-    underlyingAnalysis: { swingDecision: { state: 'PROBE' } },
+    underlyingAnalysis: { swingDecision: { opportunityStage:'READY', executionAction:'OPEN' } },
   });
   const result = evaluateTrackerSignal(input);
   return result.signal === 'STRONG_BUY' && result.gate === 'pass';

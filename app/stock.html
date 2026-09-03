@@ -41,17 +41,17 @@
       <button class="active" onclick="selectAllMarkets()">全选</button>
     </div>
     <span class="toolbar-spacer"></span>
-    <button class="btn" onclick="toggleAdd()">+ 添加</button>
+    <button class="btn" id="toggleAddBtn" type="button" aria-controls="addForm" aria-expanded="false" onclick="toggleAdd()">+ 添加</button>
     <button class="btn" id="openSettingsBtn" type="button" onclick="openSettingsModal()">看板设置</button>
     <input type="hidden" id="sortSel" value="auto">
   </div>
 
-  <div id="addForm" class="card">
+  <div id="addForm" class="card" hidden>
     <div class="fld">代码<input id="f_sym" placeholder="如 MU / 07709 / 000660 / 600519" oninput="autoDetectMarket()" onkeydown="if(event.key==='Enter')addStock()"></div>
     <div class="fld">市场<select id="f_mkt" onchange="markManualMarket()"><option value="US">美股</option><option value="HK">港股</option><option value="KR">韩股</option><option value="CN">A股</option></select></div>
     <div class="fld">标签<input id="f_label" placeholder="可选，如 海力士"></div>
-    <button class="btn" id="saveBtn" onclick="addStock(this)">保存</button>
-    <button class="btn ghost" onclick="toggleAdd()">取消</button>
+    <button class="btn" id="saveBtn" type="button" onclick="addStock(this)">保存</button>
+    <button class="btn ghost" type="button" onclick="setAddFormOpen(false)">取消</button>
   </div>
 
   <div class="main-layout split-layout">
@@ -60,8 +60,8 @@
       <div class="list-card">
         <div class="list-tools">
           <input id="watchSearch" type="search" placeholder="搜索代码或名称" oninput="reSort()" aria-label="搜索自选股">
-          <select id="signalFilter" onchange="reSort()" aria-label="按动作筛选">
-            <option value="all">全部动作</option><option value="entry">试仓 / 加仓</option><option value="hold">持有</option><option value="observe">观察</option><option value="risk">减仓 / 清仓 / 回避</option>
+          <select id="signalFilter" onchange="reSort()" aria-label="按信号筛选">
+            <option value="all">全部信号</option><option value="entry">可试仓 / 可加仓</option><option value="hold">持有观察</option><option value="observe">观望等待</option><option value="risk">减仓 / 清仓 / 风险回避</option>
           </select>
           <span id="watchCount" class="list-count">0</span>
         </div>
@@ -128,7 +128,7 @@
     </div>
 
     <section class="detail-tab-panel active" data-panel="decision">
-      <!-- 层 1：决策与执行（决策结论 + 评分因子 + 执行计划 + 情景解释） -->
+      <!-- 层 1：决策与执行（正式结论 + 三人格 + 关键计划 + 价格结构） -->
       <div id="d_decision" class="decision-card"></div>
 
       <!-- 层 2：关键风险（聚合风险雷达，始终可见） -->
@@ -142,18 +142,21 @@
         </div>
       </details>
 
-      <!-- 层 4：历史验证（折叠，默认收起） -->
-      <details class="fold fold-history">
-        <summary>历史验证<span class="muted fold-meta" id="d_history_meta"></span></summary>
-        <div class="fold-content">
-          <div id="d_decision_snapshot" class="history-snapshot"></div>
+      <!-- 层 4：与三人格算法同源的解释图 -->
+      <section class="stock-study-panel">
+        <div class="stock-study-head">
+          <div><strong>人格解释图</strong><small id="stockChartProfileNote">图表视角，不改变正式决策</small></div>
+          <div class="stock-study-profile" role="group" aria-label="图表人格视角">
+            <button type="button" data-chart-profile="responsive" onclick="setStockChartProfile('responsive')">敏捷观察</button>
+            <button type="button" data-chart-profile="balanced" class="active" onclick="setStockChartProfile('balanced')">均衡决策</button>
+            <button type="button" data-chart-profile="confirmed" onclick="setStockChartProfile('confirmed')">稳健确认</button>
+          </div>
         </div>
-      </details>
+        <div id="stockChartStudySummary" class="stock-study-summary"></div>
+        <div class="charts"><div id="chPrice" class="chart stock-profile-chart"></div></div>
+      </section>
 
-      <!-- 层 5：K 线图 -->
-      <div class="charts"><div id="chPrice" class="chart"></div></div>
-
-      <!-- 层 6：深度情报（始终展开，6 个子板块） -->
+      <!-- 层 5：深度情报（始终展开，6 个子板块） -->
       <div class="intel-section-title"><h3>深度情报</h3></div>
       <div class="intel-grid intel-grid-open">
         <!-- 子 1：分组事件 -->
@@ -276,13 +279,13 @@
     </div>
 
     <div class="sec">
-      <div class="sec-t">默认动作筛选</div>
-      <select id="settingsDefaultSignalFilter" class="settings-select" aria-label="默认动作筛选">
-        <option value="all">全部动作</option>
-        <option value="entry">试仓 / 加仓</option>
-        <option value="hold">持有</option>
-        <option value="observe">观察</option>
-        <option value="risk">减仓 / 清仓 / 回避</option>
+      <div class="sec-t">默认信号筛选</div>
+      <select id="settingsDefaultSignalFilter" class="settings-select" aria-label="默认信号筛选">
+        <option value="all">全部信号</option>
+        <option value="entry">可试仓 / 可加仓</option>
+        <option value="hold">持有观察</option>
+        <option value="observe">观望等待</option>
+        <option value="risk">减仓 / 清仓 / 风险回避</option>
       </select>
       <div class="settings-hint muted">页面加载时下拉的默认值。</div>
     </div>
@@ -299,9 +302,9 @@
       <div id="settingsFxStatus" class="settings-fx-status muted"></div>
       <div class="setting-row"><div><div class="setting-title">账户金额（CNY）</div><div class="setting-note">人民币基准金额，仓位计算时按实时汇率转换为各市场本币。</div></div><div class="setting-note">默认 100,000</div><div><input id="settingsRiskAccountSize" type="number" min="1" step="1000" class="settings-risk-input" aria-label="账户金额"></div></div>
       <div class="setting-row"><div><div class="setting-title">单笔风险占比 (%)</div><div class="setting-note">每次交易允许的最大亏损占账户金额的比例。</div></div><div class="setting-note">建议 0.5-3%</div><div><input id="settingsRiskPerTradePct" type="number" min="0.1" max="10" step="0.1" class="settings-risk-input" aria-label="单笔风险占比"></div></div>
-      <div class="setting-row"><div><div class="setting-title">试仓 (PROBE) 比例 (%)</div><div class="setting-note">试仓批次的资金占比。</div></div><div class="setting-note">默认 25%</div><div><input id="settingsRiskTrancheProbe" type="number" min="5" max="100" step="5" class="settings-risk-input" aria-label="试仓比例"></div></div>
+      <div class="setting-row"><div><div class="setting-title">试仓比例 (%)</div><div class="setting-note">首次建仓批次的资金占比。</div></div><div class="setting-note">默认 25%</div><div><input id="settingsRiskTrancheOpen" type="number" min="5" max="100" step="5" class="settings-risk-input" aria-label="试仓比例"></div></div>
       <div class="setting-row"><div><div class="setting-title">加仓 (ADD) 比例 (%)</div><div class="setting-note">加仓批次的资金占比。</div></div><div class="setting-note">默认 25%</div><div><input id="settingsRiskTrancheAdd" type="number" min="5" max="100" step="5" class="settings-risk-input" aria-label="加仓比例"></div></div>
-      <div class="setting-row"><div><div class="setting-title">减仓 (TRIM) 比例 (%)</div><div class="setting-note">减仓批次的持仓占比。</div></div><div class="setting-note">默认 30%</div><div><input id="settingsRiskTrancheTrim" type="number" min="5" max="100" step="5" class="settings-risk-input" aria-label="减仓比例"></div></div>
+      <div class="setting-row"><div><div class="setting-title">减仓比例 (%)</div><div class="setting-note">降低风险时卖出的持仓占比。</div></div><div class="setting-note">默认 30%</div><div><input id="settingsRiskTrancheReduce" type="number" min="5" max="100" step="5" class="settings-risk-input" aria-label="减仓比例"></div></div>
       <div class="setting-row"><div><div class="setting-title">单标的最大累计风险 (%)</div><div class="setting-note">单只标的已持仓+新建议的总风险上限。</div></div><div class="setting-note">建议 1-8%</div><div><input id="settingsRiskMaxPositionRiskPct" type="number" min="0.5" max="20" step="0.5" class="settings-risk-input" aria-label="单标的最大累计风险"></div></div>
       <div class="settings-risk-actions">
         <button type="button" class="btn ghost" id="settingsRiskResetBtn">恢复默认</button>

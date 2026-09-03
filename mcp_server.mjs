@@ -178,10 +178,11 @@ function defineTools(deps) {
         properties: {
           market: { type: 'string', description: '市场' },
           limit: { type: 'integer', description: '返回条数上限，默认 30' },
+          search: { type: 'string', description: '按代码/名称服务端搜索整个候选池' },
         },
         additionalProperties: false,
       },
-      handler: async ({ market, limit }) => deps.listRadarV2ResearchQueue({ market, limit: limit || 30 }),
+      handler: async ({ market, limit, search }) => deps.listRadarV2ResearchQueue({ market, limit: limit || 30, search }),
     },
   ];
 }

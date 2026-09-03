@@ -179,6 +179,11 @@ export function backfillHistoricalMarketDay({ market, tradeDate, outcomeLimit = 
           eventFacts: fetchEventFactsAsOf(market, member.symbol, asOfTimestamp),
           asOfTimestamp,
         });
+        // 数据质量门槛不达标（scoreCandidate 返回 skipped）：计入 skipped，不落候选
+        if (scored.skipped != null || typeof scored.score !== 'number') {
+          skipped += 1;
+          continue;
+        }
         const candidateInfo = insertCandidate.run({
           run_id: runId,
           market,
