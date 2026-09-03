@@ -29,8 +29,8 @@ async function main() {
   assert(health.response.status === 200 && health.body?.ok === true, '/health is live');
   assert(/^v26\.(3|[4-9]|[1-9][0-9])\./.test(String(health.body?.node || '')), '/health reports supported Node 26.3+');
 
-  const researchQueue = await fetchJson('/radar_v2/queue?limit=1');
-  assert(researchQueue.response.status === 200 && researchQueue.body?.ok === true, '/radar_v2/queue is directly readable');
+  const researchQueue = await fetchJson('/radar/queue?limit=1');
+  assert(researchQueue.response.status === 200 && researchQueue.body?.ok === true, '/radar/queue is directly readable');
 
   const mcpHandshake = await fetchJson('/mcp', {
     method: 'POST',

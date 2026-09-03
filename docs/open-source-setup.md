@@ -8,8 +8,8 @@ The runtime configuration file is ignored by Git and environment variables take 
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `RADAR_V2_SCANNER_ENABLED` | off | Starts the all-market scan scheduler. |
-| `RADAR_V2_DOSSIER_ENABLED` | off | Produces official-event dossiers and runs their evaluator. |
-| `RADAR_V2_TREND_ENABLED` | off | Enables trend shadow research for explicit markets. |
-| `RADAR_V2_FUNDAMENTAL_ENABLED` | off | Enables fundamental-change research for explicit markets. |
-| `RADAR_V2_THESIS_ENABLED` | off | Enables limited LLM preliminary-research generation. |
+| `RADAR_SCANNER_ENABLED` | off | Starts the all-market scan scheduler. |
+| `RADAR_DOSSIER_ENABLED` | off | Produces official-event dossiers and runs their evaluator. |
+| `RADAR_TREND_ENABLED` | off | Enables trend shadow research for explicit markets. |
+| `RADAR_FUNDAMENTAL_ENABLED` | off | Enables fundamental-change research for explicit markets. |
+| `RADAR_THESIS_ENABLED` | off | Enables limited LLM preliminary-research generation. |

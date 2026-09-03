@@ -18,7 +18,7 @@
   <nav>
     <a href="/stock" class="ac">股票监控</a>
     <a href="/tracker">杠杆 ETF 追踪</a>
-    <a href="/radar-v2">机会雷达</a>
+    <a href="/radar">机会雷达</a>
     <a href="/lab">实验室</a>
     <a href="/control">控制中心</a>
   </nav>
@@ -271,6 +271,26 @@
     <span class="closeX" onclick="closeSettingsModal()">×</span>
     <h2>看板设置</h2>
     <p class="settings-lead muted">股票监控与杠杆 ETF 追踪共用的全局配置。</p>
+
+    <div class="sec">
+      <div class="sec-t">决策人格</div>
+      <div id="settingsProfileGroup" class="settings-profile-group" role="radiogroup" aria-label="决策人格">
+        <button type="button" class="settings-profile-option" data-profile-id="responsive" role="radio" aria-checked="false">
+          <span class="settings-profile-name">敏捷观察</span>
+          <span class="settings-profile-desc">RSI6 短周期，反应快、信号多，适合盯短线变化</span>
+        </button>
+        <button type="button" class="settings-profile-option" data-profile-id="balanced" role="radio" aria-checked="false">
+          <span class="settings-profile-name">均衡决策</span>
+          <span class="settings-profile-desc">趋势/动量/量价均衡打分，默认的正式决策口径</span>
+        </button>
+        <button type="button" class="settings-profile-option" data-profile-id="confirmed" role="radio" aria-checked="false">
+          <span class="settings-profile-name">稳健确认</span>
+          <span class="settings-profile-desc">长周期多确认，信号少但过滤严，适合大级别判断</span>
+        </button>
+      </div>
+      <div id="settingsProfileState" class="save-state"></div>
+      <div class="settings-hint muted">未持仓标的的默认人格；已持仓标的沿用建仓时绑定的人格（需平仓后才跟随此设置）。</div>
+    </div>
 
     <div class="sec">
       <div class="sec-t">默认市场筛选</div>

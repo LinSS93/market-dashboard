@@ -487,8 +487,8 @@ export async function registerAlertRoutes(req, res, p, u, readBody) {
 //   - 受 controlSettings.modules.radar_v2 控制开关和 bucket 筛选
 //   - 3 个 tier 与候选池 3 个 bucket 一一对应：risk→risk_review, confirmed→cross_confirm, new→new_signal
 
-const RADAR_V2_MARKET_LABELS = { US: '美股', HK: '港股', CN: 'A 股' };
-const RADAR_V2_PRIORITY_ITEM_LIMIT = 2;
+const RADAR_MARKET_LABELS = { US: '美股', HK: '港股', CN: 'A 股' };
+const RADAR_PRIORITY_ITEM_LIMIT = 2;
 
 function compactNumber(value, digits = 1) {
   const number = Number(value);
@@ -502,7 +502,7 @@ function firstMatch(text, pattern) {
 
 // 将 producer 的原始 facts 转为一行推送短句。通知只保留“为什么现在要看”，
 // 不平铺 state-machine、RSI 等次要诊断信息。
-function summarizeRadarV2Fact(fact) {
+function summarizeRadarFact(fact) {
   const raw = String(fact || '').replace(/\s+/g, ' ').trim();
   if (!raw) return '触发原因待核验';
 
@@ -527,19 +527,19 @@ function summarizeRadarV2Fact(fact) {
   return cleaned.length > 40 ? `${cleaned.slice(0, 40)}…` : (cleaned || '触发原因待核验');
 }
 
-function formatRadarV2CompactItem(item) {
+function formatRadarCompactItem(item) {
   const score = item.composite_score != null
     ? `${Math.min(100, Math.max(0, Math.round(Number(item.composite_score))))}分`
     : '待评分';
   const name = item.name ? ` ${String(item.name).replace(/\s+/g, ' ').trim()}` : '';
-  return `${item.symbol}${name} ${score}｜${summarizeRadarV2Fact(item.fact)}`;
+  return `${item.symbol}${name} ${score}｜${summarizeRadarFact(item.fact)}`;
 }
 
 /**
  * 构造飞书用的简明盘后摘要。
  * 这是研究优先级通知，不改变候选池分数、准入或任何交易决策。
  */
-export function buildRadarV2DigestMessage(market, digestData, tiers) {
+export function buildRadarDigestMessage(market, digestData, tiers) {
   const risks = digestData?.risks || [];
   const crossConfirm = digestData?.crossConfirm || [];
   const newSignals = digestData?.newSignals || [];
@@ -549,17 +549,17 @@ export function buildRadarV2DigestMessage(market, digestData, tiers) {
   const showRisks = selectedTiers.includes('risk') && risks.length > 0;
   if (!showCrossConfirm && !showNew && !showRisks) return null;
 
-  const marketLabel = RADAR_V2_MARKET_LABELS[market] || market;
+  const marketLabel = RADAR_MARKET_LABELS[market] || market;
   const lines = [
     `【机会雷达｜${marketLabel}盘后】`,
     `优先 ${showCrossConfirm ? crossConfirm.length : 0}｜风险 ${showRisks ? risks.length : 0}｜新变化 ${showNew ? newSignals.length : 0}`,
   ];
-  const priorityItems = showCrossConfirm ? crossConfirm.slice(0, RADAR_V2_PRIORITY_ITEM_LIMIT) : [];
+  const priorityItems = showCrossConfirm ? crossConfirm.slice(0, RADAR_PRIORITY_ITEM_LIMIT) : [];
   if (priorityItems.length > 0) {
-    lines.push(`优先：${formatRadarV2CompactItem(priorityItems[0])}`);
-    for (const item of priorityItems.slice(1)) lines.push(`      ${formatRadarV2CompactItem(item)}`);
+    lines.push(`优先：${formatRadarCompactItem(priorityItems[0])}`);
+    for (const item of priorityItems.slice(1)) lines.push(`      ${formatRadarCompactItem(item)}`);
   }
-  if (showRisks) lines.push(`风险：${formatRadarV2CompactItem(risks[0])}`);
+  if (showRisks) lines.push(`风险：${formatRadarCompactItem(risks[0])}`);
   lines.push('查看：机会雷达 → 持续研究候选池');
   return lines.join('\n');
 }
@@ -568,10 +568,10 @@ export function buildRadarV2DigestMessage(market, digestData, tiers) {
  * 盘后扫描聚合推送：按候选池 bucket 分组推送
  *
  * @param {string} market - 市场代码
- * @param {{ risks: Array, crossConfirm: Array, newSignals: Array }} digestData - 来自 getRadarV2DigestData
+ * @param {{ risks: Array, crossConfirm: Array, newSignals: Array }} digestData - 来自 getRadarDigestData
  * @returns {Promise<{ ok: boolean, skipped?: string, error?: string }>}
  */
-export async function sendRadarV2Digest(market, digestData) {
+export async function sendRadarDigest(market, digestData) {
   if (!moduleWebhookEnabled('radar_v2')) return { ok: false, skipped: 'module-disabled' };
   const risks = digestData?.risks || [];
   const crossConfirm = digestData?.crossConfirm || [];
@@ -579,7 +579,7 @@ export async function sendRadarV2Digest(market, digestData) {
   if (risks.length === 0 && crossConfirm.length === 0 && newSignals.length === 0) return { ok: false, skipped: 'no-events' };
 
   const tiers = _getControlSettings().modules.radar_v2?.tiers || [];
-  const msg = buildRadarV2DigestMessage(market, { risks, crossConfirm, newSignals }, tiers);
+  const msg = buildRadarDigestMessage(market, { risks, crossConfirm, newSignals }, tiers);
   if (!msg) return { ok: false, skipped: 'no-selected-tiers' };
 
   const now = Date.now();

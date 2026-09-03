@@ -8,9 +8,9 @@ const forbiddenNames = new Set(['.deploy-info.json', 'market-dashboard.runtime.e
 const textExtensions = new Set(['.cjs', '.css', '.env', '.example', '.html', '.js', '.json', '.md', '.mjs', '.ps1', '.txt', '.yml', '.yaml']);
 const forbiddenText = [
   new RegExp(['192', '168', '31', '19'].join('\\.'), 'g'),
-  new RegExp('\\\\\\\\' + ['Q', '07'].join(''), 'gi'),
+  new RegExp('\\b' + ['Q', '07'].join('') + '\\b', 'gi'),
   new RegExp(['Kagamine', 'Len', 'Kai2'].join(''), 'g'),
-  new RegExp(['C:', 'Users', 'linch'].join('\\\\'), 'gi'),
+  new RegExp(['C:', 'Users', ('lin' + 'ch')].join('\\\\'), 'gi'),
   new RegExp(['D:', 'Projects', 'market-dashboard'].join('\\\\'), 'gi'),
 ];
 

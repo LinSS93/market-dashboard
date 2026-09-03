@@ -32,19 +32,19 @@ import { interpretNews, getNewsInterpretations, refreshNewsInterpretations, getL
 import { getAllGroups } from './grouping.mjs';
 import { getCompanyProfile, generateCompanyProfile, pruneCompanyProfileCache } from './llm_company_profile.mjs';
 // 机会雷达只运行 V2；历史财务归档只由显式迁移命令处理。
-import { scheduleRadarV2, startAutoAssetAuditLoop } from './radar_v2_scheduler.mjs';
-import { runScan as runRadarV2Scan, getScanStatus as getRadarV2ScanStatus } from './radar_v2_scanner.mjs';
-import { getTopCandidates as getRadarV2TopCandidates, getCandidateDetail as getRadarV2CandidateDetail, getRunHistory as getRadarV2RunHistory, getScanStats as getRadarV2ScanStats, listDossiers as listRadarV2Dossiers, getDossierDetail as getRadarV2DossierDetail, listOpportunities as listRadarV2Opportunities, listDossierEvaluations as listRadarV2Evaluations, listSymbolsAcrossChannels as listRadarV2Symbols, getDossiersBySymbol as getRadarV2DossiersBySymbol, listSparklines as listRadarV2Sparklines, getV2Kline as getRadarV2Kline, listResearchQueue as listRadarV2ResearchQueue, dismissSymbol as dismissRadarV2Symbol, restoreSymbol as restoreRadarV2Symbol, listDismissedSymbols as listRadarV2DismissedSymbols, setAssetAudit as setRadarV2AssetAudit, getRadarV2DigestData } from './radar_v2_query_api.mjs';
-import { tryGenerateShadow as tryRadarV2GenerateShadow, rollbackToDefault as rollbackRadarV2ToDefault, getFeedbackStatus as getRadarV2FeedbackStatus } from './radar_v2_feedback.mjs';
-import { produceEventDossiers, linkObservationsForMarket, linkObservationsForRun, reconcilePendingRuns } from './radar_v2_dossier_producer.mjs';
-import { produceEventFacts } from './radar_v2_event_facts_producer.mjs';
-import { getRadarV2Db } from './radar_v2_schema.mjs';
-import { produceTrendForRunIfEnabledAsync, fullTrendReconcileAsync, isTrendEnabledForMarket } from './radar_v2_trend_producer.mjs';
-import { produceFundamentalDossiers, isFundamentalEnabledForMarket } from './radar_v2_fundamental_producer.mjs';
-import { getV2FinancialHistory } from './radar_v2_financial_store.mjs';
-import { backfillPendingDossierOutcomes, updateMaturedDossierOutcomes, backfillMissingDossierOutcomes, processDueDossierReviews } from './radar_v2_dossier_outcomes.mjs';
-import { processDossierEvaluations } from './radar_v2_dossier_evaluator.mjs';
-import { produceThesesForDossiers, isThesisEnabled, getThesisStatus, pruneThesisCache } from './radar_v2_thesis_producer.mjs';
+import { scheduleRadar, startAutoAssetAuditLoop } from './radar_scheduler.mjs';
+import { runScan as runRadarScan, getScanStatus as getRadarScanStatus } from './radar_scanner.mjs';
+import { getTopCandidates as getRadarTopCandidates, getCandidateDetail as getRadarCandidateDetail, getRunHistory as getRadarRunHistory, getScanStats as getRadarScanStats, listDossiers as listRadarDossiers, getDossierDetail as getRadarDossierDetail, listOpportunities as listRadarOpportunities, listDossierEvaluations as listRadarEvaluations, listSymbolsAcrossChannels as listRadarSymbols, getDossiersBySymbol as getRadarDossiersBySymbol, listSparklines as listRadarSparklines, getV2Kline as getRadarKline, listResearchQueue as listRadarResearchQueue, dismissSymbol as dismissRadarSymbol, restoreSymbol as restoreRadarSymbol, listDismissedSymbols as listRadarDismissedSymbols, setAssetAudit as setRadarAssetAudit, getRadarDigestData } from './radar_query_api.mjs';
+import { tryGenerateShadow as tryRadarGenerateShadow, rollbackToDefault as rollbackRadarToDefault, getFeedbackStatus as getRadarFeedbackStatus } from './radar_feedback.mjs';
+import { produceEventDossiers, linkObservationsForMarket, linkObservationsForRun, reconcilePendingRuns } from './radar_dossier_producer.mjs';
+import { produceEventFacts } from './radar_event_facts_producer.mjs';
+import { getRadarDb } from './radar_schema.mjs';
+import { produceTrendForRunIfEnabledAsync, fullTrendReconcileAsync, isTrendEnabledForMarket } from './radar_trend_producer.mjs';
+import { produceFundamentalDossiers, isFundamentalEnabledForMarket } from './radar_fundamental_producer.mjs';
+import { getV2FinancialHistory } from './radar_financial_store.mjs';
+import { backfillPendingDossierOutcomes, updateMaturedDossierOutcomes, backfillMissingDossierOutcomes, processDueDossierReviews } from './radar_dossier_outcomes.mjs';
+import { processDossierEvaluations } from './radar_dossier_evaluator.mjs';
+import { produceThesesForDossiers, isThesisEnabled, getThesisStatus, pruneThesisCache } from './radar_thesis_producer.mjs';
 import { enqueueBackgroundTask, enqueueMaintenanceTask, enqueueAnalyticsTask, enqueueRadarResearchTask, enqueueIngestionTask, getBackgroundTaskStatus } from './background_tasks.mjs';
 import { refreshEarningsCalendar, getNextEarnings, getAllUpcomingEarnings, getEarningsCalendarStatus, startEarningsCalendarScheduler, summarizeEarningsProximity } from './earnings_calendar.mjs';
 import { refreshEconomicCalendar, getUpcomingEconomicEvents, getMacroBlackoutStatus, startEconomicCalendarScheduler } from './economic_calendar.mjs';
@@ -63,10 +63,16 @@ import {
   feishuIntegrationStatus,
   pushFeishu,
   etfAlertPrimed,
-  sendRadarV2Digest,
+  sendRadarDigest,
 } from './alert_engine.mjs';
 import { handleCompanyProfilePost } from './server_route_handlers.mjs';
 import { registerMcpRoutes } from './mcp_server.mjs';
+// radar v2→radar 改名兼容 + 运行时配置：模块加载即读取 config/market-dashboard.runtime.env
+// 并归一化旧 RADAR_V2_* 键（幂等）。部署机的常驻链路可能是计划任务直连 node server.mjs
+//（不经启动器），必须在此处自读配置，
+// 否则 RADAR_*_ENABLED 调度开关全部失效。
+import { applyRadarRuntimeConfig } from './radar_runtime_config.mjs';
+applyRadarRuntimeConfig();
 
 const FRONT_PORT = 8080;
 const FRONT_HOST = String(process.env.DASHBOARD_HOST || '127.0.0.1').trim() || '127.0.0.1';
@@ -97,14 +103,14 @@ const mcpDeps = {
   getStockPositions,
   getStockSignalAudit,
   getAlertAudit,
-  getRadarV2TopCandidates,
-  getRadarV2CandidateDetail,
-  getRadarV2RunHistory,
-  getRadarV2ScanStats,
-  listRadarV2Dossiers,
-  getRadarV2DossierDetail,
-  listRadarV2Opportunities,
-  listRadarV2ResearchQueue,
+  getRadarTopCandidates,
+  getRadarCandidateDetail,
+  getRadarRunHistory,
+  getRadarScanStats,
+  listRadarDossiers,
+  getRadarDossierDetail,
+  listRadarOpportunities,
+  listRadarResearchQueue,
 };
 const QUOTES_HISTORY_FILE = path.join(APP_DIR, 'quotes_history.json'); // 股票报价/信号/盘前盘后历史（复盘用）
 const LOGS_DIR = path.join(process.cwd(), 'logs');
@@ -216,10 +222,10 @@ const DEFAULT_ALERT_SETTINGS = {
   stockTiers: STOCK_TIERS.slice(),
   feishu: true,
 };
-const RADAR_V2_TIERS = ['risk', 'confirmed', 'new'];
-function normalizeRadarV2Tiers(tiers) {
+const RADAR_TIERS = ['risk', 'confirmed', 'new'];
+function normalizeRadarTiers(tiers) {
   const set = new Set(Array.isArray(tiers) ? tiers : []);
-  return RADAR_V2_TIERS.filter(t => set.has(t));
+  return RADAR_TIERS.filter(t => set.has(t));
 }
 function normalizeStockTiers(tiers) {
   const legacy = { PROBE:'OPEN', TRIM:'REDUCE', EXIT:'CLOSE' };
@@ -235,7 +241,7 @@ function normalizeControlSettings(value={}, fallback=DEFAULT_CONTROL_SETTINGS) {
     modules:{
       stock:{enabled:typeof modules.stock?.enabled==='boolean'?modules.stock.enabled:base.stock?.enabled!==false,tiers:normalizeStockTiers(modules.stock?.tiers||base.stock?.tiers||DEFAULT_ALERT_SETTINGS.stockTiers)},
       etf:{enabled:typeof modules.etf?.enabled==='boolean'?modules.etf.enabled:base.etf?.enabled!==false,tiers:DashboardActions.normalizeTiers(modules.etf?.tiers||base.etf?.tiers||DEFAULT_ALERT_SETTINGS.etfTiers)},
-      radar_v2:{enabled:typeof modules.radar_v2?.enabled==='boolean'?modules.radar_v2.enabled:base.radar_v2?.enabled!==false,tiers:normalizeRadarV2Tiers(modules.radar_v2?.tiers||base.radar_v2?.tiers||RADAR_V2_TIERS)},
+      radar_v2:{enabled:typeof modules.radar_v2?.enabled==='boolean'?modules.radar_v2.enabled:base.radar_v2?.enabled!==false,tiers:normalizeRadarTiers(modules.radar_v2?.tiers||base.radar_v2?.tiers||RADAR_TIERS)},
     },
   };
 }
@@ -1241,7 +1247,7 @@ const server = http.createServer(async (req, res) => {
   // 性能埋点：所有 API 请求（非静态文件）都测量，写入 SQLite runtime_metrics + 慢请求(>=500ms)写 perf.log
   const isApiPath = p === '/mcp' || p === '/stock-snapshot' || p === '/stock-analysis'
     || p.startsWith('/stock/') || p.startsWith('/stock-') || p.startsWith('/tracker/')
-    || p.startsWith('/radar_v2/') || p.startsWith('/news/') || p.startsWith('/alerts')
+    || p.startsWith('/radar/') || p.startsWith('/news/') || p.startsWith('/alerts')
     || p === '/control/status' || p === '/control/settings' || p === '/market/index-bar' || p === '/market/status'
     || p === '/data/health' || p === '/data/health/recheck';
   if (isApiPath) {
@@ -1260,13 +1266,14 @@ const server = http.createServer(async (req, res) => {
   else if (p === '/stock') file = path.join(APP_DIR, 'stock.html');
   else if (p === '/lab') file = path.join(APP_DIR, 'scenario-research.html');
   else if (p === '/tracker') file = path.join(APP_DIR, 'tracker.html');
-  else if (p === '/radar-v2') file = path.join(APP_DIR, 'radar-v2.html');
+  else if (p === '/radar') file = path.join(APP_DIR, 'radar.html');
+  else if (p === '/radar-v2') { res.writeHead(301, { Location: '/radar' }); res.end(); return; } // v2 改名后的旧入口别名
   else if (p === '/control') file = path.join(APP_DIR, 'control.html');
   else if (p === '/scenario-research') { res.writeHead(302, { Location: '/lab' }); res.end(); return; } // 旧技术路由保留为实验室入口别名
   else if (p === '/shared.css') file = path.join(APP_DIR, 'shared.css');
   else if (p === '/workspace-theme.css') file = path.join(APP_DIR, 'workspace-theme.css');
   else if (p === '/land.css') file = path.join(APP_DIR, 'land.css');
-  else if (p === '/radar-v2.css') file = path.join(APP_DIR, 'radar-v2.css');
+  else if (p === '/radar.css') file = path.join(APP_DIR, 'radar.css');
   else if (p === '/tracker.css') file = path.join(APP_DIR, 'tracker.css');
   else if (p === '/stock.css') file = path.join(APP_DIR, 'stock.css');
   else if (p === '/scenario-research.css') file = path.join(APP_DIR, 'scenario-research.css');
@@ -1275,10 +1282,10 @@ const server = http.createServer(async (req, res) => {
   else if (p === '/dashboard-shared.js') file = path.join(APP_DIR, 'dashboard-shared.js');
   else if (p === '/data-health-ui.js') file = path.join(APP_DIR, 'data-health-ui.js');
   else if (p === '/notification-center.js') file = path.join(APP_DIR, 'notification-center.js');
-  else if (p === '/radar-v2.js') file = path.join(APP_DIR, 'radar-v2.js');
-  // Radar V2 的浏览器辅助模块统一以 radar-v2-*.mjs 命名；用受限模式提供，
+  else if (p === '/radar.js') file = path.join(APP_DIR, 'radar.js');
+  // Radar V2 的浏览器辅助模块统一以 radar-*.mjs 命名；用受限模式提供，
   // 避免新增 import 后漏登记白名单，导致整个 ES 模块图因 404 而无法启动。
-  else if (/^\/radar-v2-[a-z0-9-]+\.mjs$/i.test(p)) file = path.join(APP_DIR, p.slice(1));
+  else if (/^\/radar-[a-z0-9-]+\.mjs$/i.test(p)) file = path.join(APP_DIR, p.slice(1));
   else if (p === '/control.js') file = path.join(APP_DIR, 'control.js');
   else if (p === '/stock.js') file = path.join(APP_DIR, 'stock.js');
   else if (p === '/scenario-research.js') file = path.join(APP_DIR, 'scenario-research.js');
@@ -1314,8 +1321,8 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify({ok:false,error:'Method not allowed'}));
   }
   if (p === '/control/status' && req.method === 'GET') {
-    const radarStatus=getRadarV2ScanStatus();
-    const radarStats=getRadarV2ScanStats();
+    const radarStatus=getRadarScanStatus();
+    const radarStats=getRadarScanStats();
     res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
     return res.end(JSON.stringify({
       ts:Date.now(),uptimeSeconds:Math.round(process.uptime()),markets:getAllMarketStatus(),
@@ -1479,20 +1486,20 @@ const server = http.createServer(async (req, res) => {
   // ===== 机会雷达 V2 HTTP 路由（唯一的雷达运行时）=====
 
   // v2 扫描状态
-  if (p === '/radar_v2/status' && req.method === 'GET') {
+  if (p === '/radar/status' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify(getRadarV2ScanStatus()));
+    return res.end(JSON.stringify(getRadarScanStatus()));
   }
 
   // v2 手动触发扫描（不占用生产后台队列，v2 有自己的并发池；setImmediate 异步触发避免阻塞 HTTP 响应）
   // feature flag 关闭时拒绝请求，防止绕过自动调度限制发起全市场扫描
-  if (p === '/radar_v2/refresh' && req.method === 'POST') {
-    // F.2-2: 拆分 feature flag——scanner 写操作受 RADAR_V2_SCANNER_ENABLED 控制
-    // （RADAR_V2_ENABLED=1 作为兼容别名，同时启用 scanner + dossier）
-    const scannerEnabled = String(process.env.RADAR_V2_SCANNER_ENABLED || process.env.RADAR_V2_ENABLED || '').trim() === '1';
+  if (p === '/radar/refresh' && req.method === 'POST') {
+    // F.2-2: 拆分 feature flag——scanner 写操作受 RADAR_SCANNER_ENABLED 控制
+    // （RADAR_ENABLED=1 作为兼容别名，同时启用 scanner + dossier）
+    const scannerEnabled = String(process.env.RADAR_SCANNER_ENABLED || process.env.RADAR_ENABLED || '').trim() === '1';
     if (!scannerEnabled) {
       res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: false, error: 'radar_v2_disabled', message: '设置 RADAR_V2_SCANNER_ENABLED=1 启用 v2 扫描' }));
+      return res.end(JSON.stringify({ ok: false, error: 'radar_v2_disabled', message: '设置 RADAR_SCANNER_ENABLED=1 启用 v2 扫描' }));
     }
     const bodyStr = await readBody(req);
     let body = {}; try { body = JSON.parse(bodyStr || '{}'); } catch {}
@@ -1500,9 +1507,9 @@ const server = http.createServer(async (req, res) => {
     const taskKey = `radar_v2:${market || 'all'}`;
     // F.3-1: 手动扫描完成后补 observation 关联（与 onRunComplete 一致）
     // dossier 未启用时不关联（linkObservationsForRun 需要 dossier 表）
-    const dossierEnabledForRefresh = String(process.env.RADAR_V2_DOSSIER_ENABLED || process.env.RADAR_V2_ENABLED || '').trim() === '1';
+    const dossierEnabledForRefresh = String(process.env.RADAR_DOSSIER_ENABLED || process.env.RADAR_ENABLED || '').trim() === '1';
     setImmediate(() => {
-      runRadarV2Scan({ market, trigger: 'manual', scanMode: 'official' })
+      runRadarScan({ market, trigger: 'manual', scanMode: 'official' })
         .then(result => {
           if (!dossierEnabledForRefresh || !result?.ok) return;
           // 单市场：result.runId 非空
@@ -1534,11 +1541,11 @@ const server = http.createServer(async (req, res) => {
   // v2 手动触发 pending observation 关联（reconcilePendingRuns）
   // dossier producer 默认每小时才跑一次，部署后等待验证时间过长。
   // 此端点允许手动触发一次全局调和，立即为 pending 的 complete/partial run 补 observation。
-  if (p === '/radar_v2/reconcile' && req.method === 'POST') {
-    const dossierEnabled = String(process.env.RADAR_V2_DOSSIER_ENABLED || process.env.RADAR_V2_ENABLED || '').trim() === '1';
+  if (p === '/radar/reconcile' && req.method === 'POST') {
+    const dossierEnabled = String(process.env.RADAR_DOSSIER_ENABLED || process.env.RADAR_ENABLED || '').trim() === '1';
     if (!dossierEnabled) {
       res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
-      return res.end(JSON.stringify({ ok: false, error: 'dossier_disabled', message: '设置 RADAR_V2_DOSSIER_ENABLED=1 启用 dossier 功能' }));
+      return res.end(JSON.stringify({ ok: false, error: 'dossier_disabled', message: '设置 RADAR_DOSSIER_ENABLED=1 启用 dossier 功能' }));
     }
     setImmediate(() => {
       try {
@@ -1553,125 +1560,125 @@ const server = http.createServer(async (req, res) => {
   }
 
   // v2 top 候选
-  if (p === '/radar_v2/candidates' && req.method === 'GET') {
+  if (p === '/radar/candidates' && req.method === 'GET') {
     const market = u.searchParams.get('market');
     const limit = Number(u.searchParams.get('limit')) || 50;
     const tier = u.searchParams.get('tier') || undefined;
-    const result = getRadarV2TopCandidates({ market, limit, tier });
+    const result = getRadarTopCandidates({ market, limit, tier });
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
 
   // v2 候选详情（含 outcome）
-  if (p === '/radar_v2/candidate-detail' && req.method === 'GET') {
+  if (p === '/radar/candidate-detail' && req.method === 'GET') {
     const market = u.searchParams.get('market');
     const symbol = u.searchParams.get('symbol');
-    const result = getRadarV2CandidateDetail(market, symbol);
+    const result = getRadarCandidateDetail(market, symbol);
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
 
   // v2 扫描历史
-  if (p === '/radar_v2/runs' && req.method === 'GET') {
+  if (p === '/radar/runs' && req.method === 'GET') {
     const market = u.searchParams.get('market') || undefined;
     const limit = Number(u.searchParams.get('limit')) || 20;
-    const result = getRadarV2RunHistory({ market, limit });
+    const result = getRadarRunHistory({ market, limit });
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
 
   // v2 扫描统计
-  if (p === '/radar_v2/stats' && req.method === 'GET') {
-    const result = getRadarV2ScanStats();
+  if (p === '/radar/stats' && req.method === 'GET') {
+    const result = getRadarScanStats();
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
 
   // v2 研究档案列表（只读）
   // RESEARCH_ONLY：所有 dossier 都是研究对象，不进入机会排序。
-  // 不受 RADAR_V2_ENABLED 开关限制——即使调度器未运行，历史 dossier 仍可查询。
-  if (p === '/radar_v2/dossiers' && req.method === 'GET') {
+  // 不受 RADAR_ENABLED 开关限制——即使调度器未运行，历史 dossier 仍可查询。
+  if (p === '/radar/dossiers' && req.method === 'GET') {
     const market = u.searchParams.get('market') || undefined;
     // status 未传 → 默认 active；status='' → 透传空串，listDossiers 内部转 null 返回所有状态
     const rawStatus = u.searchParams.get('status');
     const status = rawStatus === null ? 'active' : rawStatus;
     const channel = u.searchParams.get('channel') || undefined;
     const limit = Number(u.searchParams.get('limit')) || 50;
-    const result = listRadarV2Dossiers({ market, status, channel, limit });
+    const result = listRadarDossiers({ market, status, channel, limit });
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
 
   // v2 研究档案详情（含 source_refs、observations、评估审计）
-  if (p === '/radar_v2/dossier-detail' && req.method === 'GET') {
+  if (p === '/radar/dossier-detail' && req.method === 'GET') {
     const id = Number(u.searchParams.get('id'));
     // The archive is a formal model timeline. Manual scans stay queryable for
     // diagnostics but must not visually duplicate historical/formal records.
-    const result = getRadarV2DossierDetail(id, { includeManual: false });
+    const result = getRadarDossierDetail(id, { includeManual: false });
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
 
   // v2 投资机会列表（confirmed dossier + candidate 聚合，按优先级排序）
-  if (p === '/radar_v2/opportunities' && req.method === 'GET') {
+  if (p === '/radar/opportunities' && req.method === 'GET') {
     const market = u.searchParams.get('market') || undefined;
     const channel = u.searchParams.get('channel') || undefined;
     const limit = Number(u.searchParams.get('limit')) || 50;
-    const result = listRadarV2Opportunities({ market, channel, limit });
+    const result = listRadarOpportunities({ market, channel, limit });
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
 
   // v2 按股票聚合列表（跨通道 distinct symbol，全状态）
-  if (p === '/radar_v2/symbols' && req.method === 'GET') {
+  if (p === '/radar/symbols' && req.method === 'GET') {
     const market = u.searchParams.get('market') || undefined;
     const channel = u.searchParams.get('channel') || undefined;
     const limit = Number(u.searchParams.get('limit')) || 100;
     const offset = Number(u.searchParams.get('offset')) || 0;
     const search = u.searchParams.get('search') || '';
-    const result = listRadarV2Symbols({ market, channel, limit, offset, search });
+    const result = listRadarSymbols({ market, channel, limit, offset, search });
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
 
   // v2 研究候选池（持续候选池模型：衰减+综合评分+分桶）
-  // GET  /radar_v2/queue          — 查询候选池（按综合评分降序）
-  // POST /radar_v2/queue/dismiss  — 标记不感兴趣（永久排除）
-  // POST /radar_v2/queue/restore  — 恢复到候选池
-  if (p === '/radar_v2/queue' && req.method === 'GET') {
+  // GET  /radar/queue          — 查询候选池（按综合评分降序）
+  // POST /radar/queue/dismiss  — 标记不感兴趣（永久排除）
+  // POST /radar/queue/restore  — 恢复到候选池
+  if (p === '/radar/queue' && req.method === 'GET') {
     const market = u.searchParams.get('market') || undefined;
     const limit = Number(u.searchParams.get('limit')) || 30;
     const search = u.searchParams.get('search') || undefined;
-    const result = listRadarV2ResearchQueue({ market, limit, search });
+    const result = listRadarResearchQueue({ market, limit, search });
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
-  if (p === '/radar_v2/queue/dismiss' && req.method === 'POST') {
+  if (p === '/radar/queue/dismiss' && req.method === 'POST') {
     const market = (u.searchParams.get('market') || '').toUpperCase();
     const symbol = (u.searchParams.get('symbol') || '').toUpperCase();
-    const result = dismissRadarV2Symbol(market, symbol);
+    const result = dismissRadarSymbol(market, symbol);
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
-  if (p === '/radar_v2/queue/restore' && req.method === 'POST') {
+  if (p === '/radar/queue/restore' && req.method === 'POST') {
     const market = (u.searchParams.get('market') || '').toUpperCase();
     const symbol = (u.searchParams.get('symbol') || '').toUpperCase();
-    const result = restoreRadarV2Symbol(market, symbol);
+    const result = restoreRadarSymbol(market, symbol);
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
 
-  // GET /radar_v2/queue/dismissed — 已"不感兴趣"的标的列表（已隐藏标的管理）
-  if (p === '/radar_v2/queue/dismissed' && req.method === 'GET') {
+  // GET /radar/queue/dismissed — 已"不感兴趣"的标的列表（已隐藏标的管理）
+  if (p === '/radar/queue/dismissed' && req.method === 'GET') {
     const market = u.searchParams.get('market') || undefined;
-    const result = listRadarV2DismissedSymbols(market);
+    const result = listRadarDismissedSymbols(market);
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
 
-  // POST /radar_v2/asset-audit — 设置证券分类审计（P0-5）
+  // POST /radar/asset-audit — 设置证券分类审计（P0-5）
   // body: { market, symbol, asset_category, note? }
-  if (p === '/radar_v2/asset-audit' && req.method === 'POST') {
+  if (p === '/radar/asset-audit' && req.method === 'POST') {
     let body = '';
     req.on('data', (c) => { body += c; if (body.length > 1e5) req.destroy(); });
     req.on('end', () => {
@@ -1681,7 +1688,7 @@ const server = http.createServer(async (req, res) => {
         const symbol = (parsed.symbol || '').toUpperCase();
         const assetCategory = parsed.asset_category || '';
         const note = parsed.note || null;
-        const result = setRadarV2AssetAudit(market, symbol, assetCategory, { source: 'manual', note });
+        const result = setRadarAssetAudit(market, symbol, assetCategory, { source: 'manual', note });
         res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify(result));
       } catch (e) {
@@ -1695,18 +1702,18 @@ const server = http.createServer(async (req, res) => {
   // v2 按股票查询全部 dossier（按 channel 分组，全状态）
   // 审计修正（性能）：默认 summary 首屏瘦身载荷（每通道最近 10 个 dossier、
   // 每 dossier 最新 3 条 observation，不带 evaluations/source_refs——下钻已走
-  // /radar_v2/dossier/detail 懒加载）；?mode=full 返回完整档案。
-  if (p === '/radar_v2/symbol-dossiers' && req.method === 'GET') {
+  // /radar/dossier/detail 懒加载）；?mode=full 返回完整档案。
+  if (p === '/radar/symbol-dossiers' && req.method === 'GET') {
     const market = u.searchParams.get('market') || '';
     const symbol = u.searchParams.get('symbol') || '';
     const mode = u.searchParams.get('mode') === 'full' ? 'full' : 'summary';
-    const result = getRadarV2DossiersBySymbol(market, symbol, { includeManual: false, mode });
+    const result = getRadarDossiersBySymbol(market, symbol, { includeManual: false, mode });
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
 
   // v2 批量 sparkline（POST，body 为 { keys: [{market, symbol}], days: 30 }）
-  if (p === '/radar_v2/sparklines' && req.method === 'POST') {
+  if (p === '/radar/sparklines' && req.method === 'POST') {
     let body = '';
     req.on('data', (c) => { body += c; if (body.length > 1e6) req.destroy(); });
     req.on('end', () => {
@@ -1714,7 +1721,7 @@ const server = http.createServer(async (req, res) => {
         const parsed = JSON.parse(body || '{}');
         const keys = Array.isArray(parsed.keys) ? parsed.keys : [];
         const days = Number(parsed.days) || 30;
-        const result = listRadarV2Sparklines(keys, days);
+        const result = listRadarSparklines(keys, days);
         res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify(result));
       } catch (e) {
@@ -1727,17 +1734,17 @@ const server = http.createServer(async (req, res) => {
 
   // V2-owned context APIs（前端只调用此命名空间）
   // 日K线（从 radar_v2_bars 读取，含复权类型与数据质量标记）
-  if (p === '/radar_v2/kline' && req.method === 'GET') {
+  if (p === '/radar/kline' && req.method === 'GET') {
     const market = u.searchParams.get('market') || '';
     const symbol = u.searchParams.get('symbol') || '';
     const days = Number(u.searchParams.get('days')) || 120;
-    const result = getRadarV2Kline(market, symbol, days);
+    const result = getRadarKline(market, symbol, days);
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
 
   // 公司简介（包装 getCompanyProfile，加 V2 as-of 元信息）
-  if (p === '/radar_v2/company-profile' && req.method === 'GET') {
+  if (p === '/radar/company-profile' && req.method === 'GET') {
     const market = u.searchParams.get('market');
     const symbol = u.searchParams.get('symbol');
     const profile = getCompanyProfile({ market, symbol });
@@ -1750,11 +1757,11 @@ const server = http.createServer(async (req, res) => {
     }));
   }
   // 手动触发 LLM 生成公司简介（V2 专属端点，复用 generateCompanyProfile 底层函数）
-  // POST /radar_v2/company-profile?market=&symbol=&forceRefresh=1
+  // POST /radar/company-profile?market=&symbol=&forceRefresh=1
   //   - 服务端从 radar_universe_members 解析 canonical 公司名（generateCompanyProfile 强制要求 companyName）
   //   - forceRefresh=1 时绕过缓存重新生成；前端"重新生成"按钮必须显式传此参数
   //   - 处理逻辑提取为 handleCompanyProfilePost（模块顶层导出），供 HTTP 路由回归测试
-  if (p === '/radar_v2/company-profile' && req.method === 'POST') {
+  if (p === '/radar/company-profile' && req.method === 'POST') {
     const market = (u.searchParams.get('market') || '').toUpperCase();
     const symbol = (u.searchParams.get('symbol') || '').toUpperCase();
     const forceRefresh = u.searchParams.get('forceRefresh') === '1';
@@ -1768,7 +1775,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   // 财务数据：只读 Radar V2 自有事实表；页面加载绝不触发网络抓取。
-  if (p === '/radar_v2/financial' && req.method === 'GET') {
+  if (p === '/radar/financial' && req.method === 'GET') {
     const market = String(u.searchParams.get('market') || '').toUpperCase();
     const symbol = String(u.searchParams.get('symbol') || '').toUpperCase();
     const history = market && symbol ? getV2FinancialHistory.all(market, symbol, 24) : [];
@@ -1786,22 +1793,22 @@ const server = http.createServer(async (req, res) => {
   }
 
   // v2 评估审计查询
-  if (p === '/radar_v2/dossier-evaluations' && req.method === 'GET') {
+  if (p === '/radar/dossier-evaluations' && req.method === 'GET') {
     const id = Number(u.searchParams.get('id'));
-    const result = listRadarV2Evaluations(id);
+    const result = listRadarEvaluations(id);
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
 
   // ===== v2 反馈调权（阶段 3）=====
-  // 状态查询：GET /radar_v2/feedback/status?market=US
-  // 触发生成 shadow：POST /radar_v2/feedback/trigger?market=US
-  // 应用 shadow：POST /radar_v2/feedback/apply?market=US（已禁用，见下方说明）
-  // 回滚到 default：POST /radar_v2/feedback/rollback?market=US
-  if (p === '/radar_v2/feedback/status' && req.method === 'GET') {
+  // 状态查询：GET /radar/feedback/status?market=US
+  // 触发生成 shadow：POST /radar/feedback/trigger?market=US
+  // 应用 shadow：POST /radar/feedback/apply?market=US（已禁用，见下方说明）
+  // 回滚到 default：POST /radar/feedback/rollback?market=US
+  if (p === '/radar/feedback/status' && req.method === 'GET') {
     const market = u.searchParams.get('market') || undefined;
     try {
-      const result = getRadarV2FeedbackStatus(market);
+      const result = getRadarFeedbackStatus(market);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify(result));
     } catch (e) {
@@ -1809,10 +1816,10 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ ok: false, error: e?.message || String(e) }));
     }
   }
-  if (p === '/radar_v2/feedback/trigger' && req.method === 'POST') {
+  if (p === '/radar/feedback/trigger' && req.method === 'POST') {
     const market = (u.searchParams.get('market') || 'US').toUpperCase();
     try {
-      const result = tryRadarV2GenerateShadow(market);
+      const result = tryRadarGenerateShadow(market);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify(result));
     } catch (e) {
@@ -1820,7 +1827,7 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ ok: false, error: e?.message || String(e) }));
     }
   }
-  if (p === '/radar_v2/feedback/apply' && req.method === 'POST') {
+  if (p === '/radar/feedback/apply' && req.method === 'POST') {
     // 审计修正：shadow 生成已在 tryGenerateShadow 内置时间切分样本外验证门槛
     // （train 70% 推导权重 + validation 30% 样本外改善 > 0 才生成 shadow）。
     // apply 路由仍维持禁用：生产 outcome 样本不足（<50 不生成 shadow），
@@ -1828,13 +1835,13 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify({
       ok: false,
-      error: 'feedback/apply 已禁用：shadow 生成已内置时间切分样本外验证门槛，但 apply 启用需人工确认（当前 outcome 样本仍在积累）。请使用 GET /radar_v2/feedback/status 查看研究报告。',
+      error: 'feedback/apply 已禁用：shadow 生成已内置时间切分样本外验证门槛，但 apply 启用需人工确认（当前 outcome 样本仍在积累）。请使用 GET /radar/feedback/status 查看研究报告。',
     }));
   }
-  if (p === '/radar_v2/feedback/rollback' && req.method === 'POST') {
+  if (p === '/radar/feedback/rollback' && req.method === 'POST') {
     const market = (u.searchParams.get('market') || 'US').toUpperCase();
     try {
-      const result = rollbackRadarV2ToDefault(market);
+      const result = rollbackRadarToDefault(market);
       res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify(result));
     } catch (e) {
@@ -2286,21 +2293,21 @@ server.listen(FRONT_PORT, FRONT_HOST, () => {
   console.log('[news] 新闻采集已启动（港交所公告 10 分钟；新浪 7x24 与财联社电报 5 分钟；本地 SQLite 去重）');
   // v2 调度默认关闭，避免全市场冷启动堵塞生产后台队列。
   // F.2-2: 拆分 feature flag——scanner 和 dossier 可独立启用
-  //   - RADAR_V2_SCANNER_ENABLED=1：启用全市场扫描调度器（重操作）
-  //   - RADAR_V2_DOSSIER_ENABLED=1：启用官方事件 dossier producer（轻操作，可独立 shadow 运行）
-  //   - RADAR_V2_ENABLED=1：兼容别名，同时启用 scanner + dossier
-  // 只读 API（/radar_v2/candidates、/radar_v2/dossiers 等）不受任何开关限制。
-  const v2ScannerEnabled = String(process.env.RADAR_V2_SCANNER_ENABLED || process.env.RADAR_V2_ENABLED || '').trim() === '1';
-  const v2DossierEnabled = String(process.env.RADAR_V2_DOSSIER_ENABLED || process.env.RADAR_V2_ENABLED || '').trim() === '1';
+  //   - RADAR_SCANNER_ENABLED=1：启用全市场扫描调度器（重操作）
+  //   - RADAR_DOSSIER_ENABLED=1：启用官方事件 dossier producer（轻操作，可独立 shadow 运行）
+  //   - RADAR_ENABLED=1：兼容别名，同时启用 scanner + dossier
+  // 只读 API（/radar/candidates、/radar/dossiers 等）不受任何开关限制。
+  const v2ScannerEnabled = String(process.env.RADAR_SCANNER_ENABLED || process.env.RADAR_ENABLED || '').trim() === '1';
+  const v2DossierEnabled = String(process.env.RADAR_DOSSIER_ENABLED || process.env.RADAR_ENABLED || '').trim() === '1';
 
   // === 自动资产审计（轻操作：规则分类 provisional，无任何开关依赖） ===
-  // 审计修正：资产分类不能挂在扫描调度开关下（Q07 生产 scanner 默认关闭，
-  // 挂 scheduleRadarV2 会导致审计永不执行）。幂等 + 分批让出，首轮延迟 120s。
+  // 审计修正：资产分类不能挂在扫描调度开关下（生产环境 scanner 默认关闭，
+  // 挂 scheduleRadar 会导致审计永不执行）。幂等 + 分批让出，首轮延迟 120s。
   startAutoAssetAuditLoop();
 
   // === Scanner 调度（重操作：全市场扫描） ===
   if (v2ScannerEnabled) {
-    scheduleRadarV2({
+    scheduleRadar({
       onRunComplete: ({ market, trigger, result }) => {
         console.log(`[radar_v2] ${market} ${trigger} 完成: ok=${result?.ok}, status=${result?.status ?? 'n/a'}, candidates=${result?.candidatesCount ?? 0}`);
         // F.1-5 + F.2-3: 扫描完成后按本次 run 增量关联（仅当 dossier 也启用时）。
@@ -2328,19 +2335,19 @@ server.listen(FRONT_PORT, FRONT_HOST, () => {
               // 趋势未启用，静默跳过
             } else if (trendResult?.ok) {
               const st = trendResult.stats || {};
-              console.log(`[radar_v2_trend] ${market} run#${result.runId} 趋势生产完成: ${trendResult.incomplete ? 'incomplete' : 'done'} baseline=${st.baseline || 0} transitioned=${st.transitioned || 0} dossiers=${st.dossiers_generated || 0}`);
+              console.log(`[radar_trend] ${market} run#${result.runId} 趋势生产完成: ${trendResult.incomplete ? 'incomplete' : 'done'} baseline=${st.baseline || 0} transitioned=${st.transitioned || 0} dossiers=${st.dossiers_generated || 0}`);
             } else {
-              console.log(`[radar_v2_trend] ${market} run#${result.runId} 趋势生产失败: ${trendResult?.error}`);
+              console.log(`[radar_trend] ${market} run#${result.runId} 趋势生产失败: ${trendResult?.error}`);
             }
-          }).catch(e => console.log(`[radar_v2_trend] ${market} run#${result.runId} 异步任务异常: ${e.message}`));
+          }).catch(e => console.log(`[radar_trend] ${market} run#${result.runId} 异步任务异常: ${e.message}`));
 
           // 盘后扫描聚合推送：风险待核验 + 今日新进入候选池
           // 复用 trend 任务后的时间窗口，避免与重操作并发；通知本身是 fire-and-forget
           setImmediate(() => {
             try {
-              const digestResult = getRadarV2DigestData(market);
+              const digestResult = getRadarDigestData(market);
               if (digestResult?.ok && digestResult.data) {
-                sendRadarV2Digest(market, digestResult.data).catch(e =>
+                sendRadarDigest(market, digestResult.data).catch(e =>
                   console.log(`[radar_v2] ${market} digest 推送异常: ${e.message}`)
                 );
               }
@@ -2351,9 +2358,9 @@ server.listen(FRONT_PORT, FRONT_HOST, () => {
         }
       },
     });
-    console.log('[radar_v2] scanner 调度已启动（RADAR_V2_SCANNER_ENABLED=1；持久化 job + 串行调度 + cursor 续跑）');
+    console.log('[radar_v2] scanner 调度已启动（RADAR_SCANNER_ENABLED=1；持久化 job + 串行调度 + cursor 续跑）');
   } else {
-    console.log('[radar_v2] scanner 调度未启动（默认关闭；设置 RADAR_V2_SCANNER_ENABLED=1 启用）');
+    console.log('[radar_v2] scanner 调度未启动（默认关闭；设置 RADAR_SCANNER_ENABLED=1 启用）');
   }
 
   // === Dossier producer 调度（轻操作：官方事件档案，可独立 shadow 运行） ===
@@ -2401,15 +2408,15 @@ server.listen(FRONT_PORT, FRONT_HOST, () => {
     };
     setTimeout(runDossierProducer, 10 * 60 * 1000);
     setInterval(runDossierProducer, 60 * 60 * 1000);
-    console.log('[radar_v2] dossier producer 调度已启动（RADAR_V2_DOSSIER_ENABLED=1；每小时 shadow 运行）');
+    console.log('[radar_v2] dossier producer 调度已启动（RADAR_DOSSIER_ENABLED=1；每小时 shadow 运行）');
   } else {
-    console.log('[radar_v2] dossier producer 调度未启动（默认关闭；设置 RADAR_V2_DOSSIER_ENABLED=1 启用）');
+    console.log('[radar_v2] dossier producer 调度未启动（默认关闭；设置 RADAR_DOSSIER_ENABLED=1 启用）');
   }
 
-  // === Thesis LLM 论点生成调度（阶段四：受 RADAR_V2_THESIS_ENABLED 控制） ===
+  // === Thesis LLM 论点生成调度（阶段四：受 RADAR_THESIS_ENABLED 控制） ===
   // 独立于 dossier producer，避免 LLM 调用阻塞 producer。
   // 每小时一次，单批最多 20 个 dossier（控制 LLM 成本）。
-  // 受 RADAR_V2_DOSSIER_ENABLED 限制（dossier 必须先启用，否则无 dossier 可处理）。
+  // 受 RADAR_DOSSIER_ENABLED 限制（dossier 必须先启用，否则无 dossier 可处理）。
   // L168 约束：LLM 只生成 thesis_json (bull_points/bear_points/missing_data) with source_ref，
   //           不修改 score/tier/direction。
   if (v2DossierEnabled && isThesisEnabled()) {
@@ -2420,20 +2427,20 @@ server.listen(FRONT_PORT, FRONT_HOST, () => {
         dedupeKey: thesisKey,
       }).then(result => {
         if (result?.processed > 0) {
-          console.log(`[radar_v2_thesis] thesis 生成: processed=${result.processed} generated=${result.generated} cached=${result.cached} failed=${result.failed} skipped=${result.skipped}`);
+          console.log(`[radar_thesis] thesis 生成: processed=${result.processed} generated=${result.generated} cached=${result.cached} failed=${result.failed} skipped=${result.skipped}`);
         }
-      }).catch(e => console.log(`[radar_v2_thesis] 调度异常: ${e.message}`));
+      }).catch(e => console.log(`[radar_thesis] 调度异常: ${e.message}`));
     };
     // 首次延迟 15 分钟（避开 dossier producer 启动峰值，让 dossier 先积累）
     setTimeout(runThesisProducer, 15 * 60 * 1000);
     setInterval(runThesisProducer, 60 * 60 * 1000);
-    console.log('[radar_v2_thesis] thesis 调度已启动（RADAR_V2_THESIS_ENABLED=1；每小时；limit 20/批）');
+    console.log('[radar_thesis] thesis 调度已启动（RADAR_THESIS_ENABLED=1；每小时；limit 20/批）');
   } else {
-    console.log('[radar_v2_thesis] thesis 调度未启动（默认关闭；设置 RADAR_V2_THESIS_ENABLED=1 启用）');
+    console.log('[radar_thesis] thesis 调度未启动（默认关闭；设置 RADAR_THESIS_ENABLED=1 启用）');
   }
 
   // === 趋势 Shadow 调度（轻操作：状态机回放，独立于 scanner/dossier） ===
-  // 步骤 6: RADAR_V2_TREND_ENABLED 控制（默认关闭；US/HK/CN 白名单）
+  // 步骤 6: RADAR_TREND_ENABLED 控制（默认关闭；US/HK/CN 白名单）
   // P0: 启动恢复 + 5 分钟定时 reconcile 走同一后台队列，避免重叠执行
   const v2TrendEnabledMarkets = ['US', 'HK', 'CN'].filter(m => isTrendEnabledForMarket(m));
   if (v2TrendEnabledMarkets.length > 0) {
@@ -2443,19 +2450,19 @@ server.listen(FRONT_PORT, FRONT_HOST, () => {
       return enqueueBackgroundTask(reconKey, () => fullTrendReconcileAsync({ backfillLimit: 50, jobLimit: 10 }), {
         priority: 'low',
         dedupeKey: reconKey,
-      }).catch(e => console.log(`[radar_v2_trend] reconcile 异常: ${e.message}`));
+      }).catch(e => console.log(`[radar_trend] reconcile 异常: ${e.message}`));
     };
     // 启动恢复：延迟 30 秒（避开启动峰值），补建遗漏 run + 续跑未完成 job
     setTimeout(runTrendReconcile, 30 * 1000);
     // 定时 reconcile：每 5 分钟一次，续跑 incomplete job + 输出健康报告
     setInterval(runTrendReconcile, 5 * 60 * 1000);
-    console.log(`[radar_v2_trend] Shadow 调度已启动（RADAR_V2_TREND_ENABLED=${process.env.RADAR_V2_TREND_ENABLED}; markets=${enabledMarkets.join(',')}; 5min reconcile）`);
+    console.log(`[radar_trend] Shadow 调度已启动（RADAR_TREND_ENABLED=${process.env.RADAR_TREND_ENABLED}; markets=${enabledMarkets.join(',')}; 5min reconcile）`);
   } else {
-    console.log('[radar_v2_trend] Shadow 调度未启动（默认关闭；设置 RADAR_V2_TREND_ENABLED=US,HK,CN 启用）');
+    console.log('[radar_trend] Shadow 调度未启动（默认关闭；设置 RADAR_TREND_ENABLED=US,HK,CN 启用）');
   }
 
   // === Fundamental 研究档案调度（仅消费 V2 财务事实并产出 dossier，RESEARCH_ONLY） ===
-  // 步骤 7: RADAR_V2_FUNDAMENTAL_ENABLED 控制（默认关闭；US/HK/CN 白名单）
+  // 步骤 7: RADAR_FUNDAMENTAL_ENABLED 控制（默认关闭；US/HK/CN 白名单）
   // 与 trend/event 通道独立，不参与评分/交易动作（docs 明确契约）。
   // 财报按季度发布，低频操作：每 6 小时一次 produce，避开高频调度。
   const v2FundamentalEnabledMarkets = ['US', 'HK', 'CN'].filter(m => isFundamentalEnabledForMarket(m));
@@ -2464,33 +2471,33 @@ server.listen(FRONT_PORT, FRONT_HOST, () => {
       const taskKey = `fundamental:produce:${v2FundamentalEnabledMarkets.join(',')}`;
       return enqueueBackgroundTask(taskKey, async () => {
         // 产出 fundamental dossier（RESEARCH_ONLY，不影响评分/交易）。
-        // 历史归档如需迁移，必须由 npm run migrate:radar-v2-financial-archive 显式执行。
+        // 历史归档如需迁移，必须由 npm run migrate:radar-financial-archive 显式执行。
         for (const code of v2FundamentalEnabledMarkets) {
           try {
             const result = await produceFundamentalDossiers({ market: code, lookbackDays: 45, limit: 200, importRetiredArchive: false });
             if (result.created > 0) {
-              console.log(`[radar_v2_fundamental] ${code} 产出: considered=${result.considered} created=${result.created} existing=${result.existing} skipped=${result.skipped}`);
+              console.log(`[radar_fundamental] ${code} 产出: considered=${result.considered} created=${result.created} existing=${result.existing} skipped=${result.skipped}`);
             }
           } catch (e) {
-            console.log(`[radar_v2_fundamental] ${code} 产出异常: ${e.message}`);
+            console.log(`[radar_fundamental] ${code} 产出异常: ${e.message}`);
           }
         }
-      }, { priority: 'low', dedupeKey: taskKey }).catch(e => console.log(`[radar_v2_fundamental] 调度异常: ${e.message}`));
+      }, { priority: 'low', dedupeKey: taskKey }).catch(e => console.log(`[radar_fundamental] 调度异常: ${e.message}`));
     };
     // 启动恢复：延迟 60 秒（避开 trend/scanner/dossier 启动峰值）
     setTimeout(runFundamentalProduce, 60 * 1000);
     // 定时产出：每 6 小时一次（财报低频，无需高频调度）
     setInterval(runFundamentalProduce, 6 * 60 * 60 * 1000);
-    console.log(`[radar_v2_fundamental] 研究档案调度已启动（RADAR_V2_FUNDAMENTAL_ENABLED=${process.env.RADAR_V2_FUNDAMENTAL_ENABLED}; markets=${v2FundamentalEnabledMarkets.join(',')}; 6h produce; RESEARCH_ONLY）`);
+    console.log(`[radar_fundamental] 研究档案调度已启动（RADAR_FUNDAMENTAL_ENABLED=${process.env.RADAR_FUNDAMENTAL_ENABLED}; markets=${v2FundamentalEnabledMarkets.join(',')}; 6h produce; RESEARCH_ONLY）`);
   } else {
-    console.log('[radar_v2_fundamental] 研究档案调度未启动（默认关闭；设置 RADAR_V2_FUNDAMENTAL_ENABLED=US,CN 启用）');
+    console.log('[radar_fundamental] 研究档案调度未启动（默认关闭；设置 RADAR_FUNDAMENTAL_ENABLED=US,CN 启用）');
   }
 
   // === 条件评估 + outcome + 到期复核 独立调度（解耦自 trend） ===
   // 阶段三：评估器不再绑定 trend reconcile，改为独立 5 分钟调度。
-  // 受 RADAR_V2_DOSSIER_ENABLED 控制（与 dossier producer 同开关）。
+  // 受 RADAR_DOSSIER_ENABLED 控制（与 dossier producer 同开关）。
   // 这是"全市场事件研究 Shadow"——markets=null 不限市场，event 通道 dossier
-  // （US/HK/CN 官方披露）均参与评估。与 trend Shadow（受 RADAR_V2_TREND_ENABLED
+  // （US/HK/CN 官方披露）均参与评估。与 trend Shadow（受 RADAR_TREND_ENABLED
   // 控制，仅 US/HK）是两套独立调度，职责不同：trend 做趋势状态机回放，
   // 评估器做 confirmation/invalidation 条件判定。
   // 顺序：outcome 回填 → 条件评估（active→confirmed/invalidated）→ 到期复核（active→needs_review）
@@ -2538,9 +2545,9 @@ server.listen(FRONT_PORT, FRONT_HOST, () => {
     setTimeout(runDossierEvaluation, 45 * 1000);
     // 定时评估：每 5 分钟一次
     setInterval(runDossierEvaluation, 5 * 60 * 1000);
-    console.log('[radar_v2] 评估调度已启动（全市场事件研究 Shadow；RADAR_V2_DOSSIER_ENABLED=1；5min）');
+    console.log('[radar_v2] 评估调度已启动（全市场事件研究 Shadow；RADAR_DOSSIER_ENABLED=1；5min）');
   } else {
-    console.log('[radar_v2] 评估调度未启动（默认关闭；设置 RADAR_V2_DOSSIER_ENABLED=1 启用）');
+    console.log('[radar_v2] 评估调度未启动（默认关闭；设置 RADAR_DOSSIER_ENABLED=1 启用）');
   }
   const scheduleSignalDrift = () => enqueueBackgroundTask('signal:weekly-drift', () => refreshSignalDriftReport(), { priority:'high', dedupeKey:'signal:weekly-drift' })
     .then(report => console.log(`[signal-drift] ${report.status} as-of=${report.asOfDate || 'none'}`))

@@ -27,7 +27,7 @@
   --ws-green-soft:#dceee3;
   --ws-red-soft:#f4e0dc;
   --ws-amber-soft:#f0e8d1;
-  /* 辅助语义色：purple 用于趋势/方向标记，orange 为 amber 别名（兼容 radar-v2 旧引用） */
+  /* 辅助语义色：purple 用于趋势/方向标记，orange 为 amber 别名（兼容 radar 旧引用） */
   --ws-purple:#6b5cb8;
   --ws-purple-soft:#ece8f5;
   --ws-orange:var(--ws-amber);
@@ -242,9 +242,6 @@
 .stock-workspace .lifecycle-main { color:var(--ws-ink-soft); font-size:12px; font-weight:700; }
 .stock-workspace .lifecycle-meta,.stock-workspace .lifecycle-outcomes { margin-top:4px; color:var(--ws-muted-soft); font-size:11px; line-height:1.5; }
 .stock-workspace .lifecycle-outcomes .disc,.stock-workspace .lifecycle-outcomes .prem { margin-right:8px; }
-.stock-workspace .posrow { flex-wrap:wrap; }
-.stock-workspace .posrow .fld { display:flex; width:140px; flex-direction:column; gap:5px; color:var(--ws-muted-soft); font-size:12px; }
-.stock-workspace .posrow input,.stock-workspace .posrow select { width:100%; min-height:36px; margin:0; padding:7px 9px; border:1px solid var(--ws-line-strong); border-radius:5px; background:var(--ws-surface); }
 
 /* Stock workspace composition. Tracker can reuse the tokens above independently. */
 .stock-workspace .wrap { width:calc(100vw - 24px); max-width:1920px; margin:12px auto; padding:0; }
