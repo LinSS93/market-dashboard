@@ -25,7 +25,7 @@
     "check:all": "npm run check && npm run check:scenarios && npm run check:scenario-shadow && npm run check:scenario-baseline && npm run verify:public"
   },
   "dependencies": {
-    "better-sqlite3": "^12.11.1",
+    "better-sqlite3": "^13.0.3",
     "csv-parse": "^6.2.1",
     "pdf-parse": "^2.4.5"
   },
