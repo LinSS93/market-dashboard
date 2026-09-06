@@ -2,6 +2,7 @@
 //
 // 这个模块故意不产生 PROBE/ADD/TRIM/EXIT。排序分只用于研究排序，
 // 不映射另一套方向标签，也不参与仓位；最终交易动作只由仲裁器生成。
+import { selectedStockProfile, selectedStockStrategy } from './stock_signal_contract.mjs';
 export const SCORING_ENGINE_VERSION = 'v2.5.0-research-ranking-only';
 
 const QUALITY_WEIGHTS = Object.freeze({ reliability: 0.55, executionRisk: 0.45 });
@@ -11,9 +12,10 @@ function clamp01(value) {
 }
 
 function technicalFactor(analysis) {
-  const rawScore = Number(analysis?.score) || 0;
+  const profile = selectedStockProfile(analysis);
+  const rawScore = Number(profile?.score) || 0;
   const score = clamp01(rawScore);
-  const signal = analysis?.signal || 'NEUTRAL';
+  const signal = profile?.signal || 'NEUTRAL';
   return {
     key: 'technical', label: '技术面', score,
     raw: { value: +rawScore.toFixed(3), unit: 'score', signal },
@@ -69,7 +71,7 @@ export function computeCompositeScore({ analysis, reliability, executionRisk }) 
     + executionQuality.score * QUALITY_WEIGHTS.executionRisk
   );
   const exposure = technicalEdge * qualityMultiplier;
-  const regime = analysis?.tradePlan?.marketRegime?.key || 'range';
+  const regime = selectedStockStrategy(analysis)?.regime?.key || 'range';
 
   return {
     compositeScore: +exposure.toFixed(4),

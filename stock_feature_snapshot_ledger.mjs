@@ -4,7 +4,7 @@ import {
   FEATURE_SNAPSHOT_SCHEMA_VERSION,
   buildDailyFeaturePayload,
   buildLiveFeaturePayload,
-  buildObservedFormalEvaluation,
+  buildObservedDecisionEvaluation,
   evaluateTechnicalResearchPolicy,
 } from './stock_feature_snapshot.mjs';
 import { evaluateOpportunityFacts, opportunityPolicyEvaluation } from './stock_opportunity_model.mjs';
@@ -72,7 +72,7 @@ export function initializeFeatureSnapshotLedger(db) {
   `);
 }
 
-function insertSnapshotWithEvaluations(db, snapshot, { formalAnalysis = null } = {}) {
+function insertSnapshotWithEvaluations(db, snapshot, { currentAnalysis = null } = {}) {
   const insert = db.prepare(`INSERT OR IGNORE INTO stock_feature_snapshots(
     snapshot_key,schema_version,source_origin,time_quality,captured_at,symbol,market,as_of_date,features_json
   ) VALUES(?,?,?,?,?,?,?,?,?)`);
@@ -87,17 +87,17 @@ function insertSnapshotWithEvaluations(db, snapshot, { formalAnalysis = null } =
   const research = evaluateTechnicalResearchPolicy(snapshot);
   evaluations += insertEvaluation.run(stored.id, research.policyId, research.policyVersion, research.status, research.direction,
     0, JSON.stringify(research), snapshot.capturedAt).changes;
-  const opportunityAssessment = formalAnalysis?.opportunityModel
+  const opportunityAssessment = currentAnalysis?.opportunityModel
     || (snapshot.features?.opportunityFacts ? evaluateOpportunityFacts(snapshot.features.opportunityFacts) : null);
   if (opportunityAssessment) {
     const opportunity = opportunityPolicyEvaluation(opportunityAssessment);
     evaluations += insertEvaluation.run(stored.id, opportunity.policyId, opportunity.policyVersion,
       opportunity.status, opportunity.direction, 0, JSON.stringify(opportunity), snapshot.capturedAt).changes;
   }
-  if (formalAnalysis) {
-    const formal = buildObservedFormalEvaluation(formalAnalysis);
-    evaluations += insertEvaluation.run(stored.id, formal.policyId, formal.policyVersion, formal.status, formal.direction,
-      1, JSON.stringify(formal), snapshot.capturedAt).changes;
+  if (currentAnalysis) {
+    const observed = buildObservedDecisionEvaluation(currentAnalysis);
+    evaluations += insertEvaluation.run(stored.id, observed.policyId, observed.policyVersion, observed.status, observed.direction,
+      1, JSON.stringify(observed), snapshot.capturedAt).changes;
   }
   return { inserted: info.changes, evaluations };
 }
@@ -113,7 +113,7 @@ export function recordLiveFeatureSnapshots({ db, results, completedDateForMarket
       if (!completedDate || analysis?.asOfDate !== completedDate) continue;
       const snapshot = buildLiveFeaturePayload(analysis, { capturedAt });
       if (!snapshot) continue;
-      const result = insertSnapshotWithEvaluations(db, snapshot, { formalAnalysis: analysis });
+      const result = insertSnapshotWithEvaluations(db, snapshot, { currentAnalysis: analysis });
       inserted += result.inserted;
       evaluations += result.evaluations;
     }
@@ -151,85 +151,6 @@ export function backfillHistoricalFeatureSnapshots({ db, watchlist, getBars, day
   return { inserted, evaluations, scannedSymbols, sourceOrigin: FEATURE_SNAPSHOT_ORIGINS.HISTORICAL_DAILY_PROXY };
 }
 
-function tableExists(db, tableName) {
-  return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(tableName));
-}
-
-function tableColumns(db, tableName) {
-  return new Set(db.prepare(`PRAGMA table_info(${tableName})`).all().map(row => row.name));
-}
-
-function observedDirection(action) {
-  return ['OPEN', 'ADD', 'PROBE'].includes(action) ? 1
-    : ['REDUCE', 'CLOSE', 'TRIM', 'EXIT', 'AVOID', 'RISK_OFF'].includes(action) ? -1 : 0;
-}
-
-/**
- * Bridge old, truly frozen engine outputs to same-day technical snapshots.
- *
- * This preserves old actions as observations of the policy that actually ran;
- * it never recomputes them with today's engine and deliberately ignores
- * historical_replay rows. The shared outcomes remain a normalised next-open
- * comparison, not a claim that legacy execution was reproduced tick-for-tick.
- */
-export function importFrozenFormalObservations({ db, capturedAt = Date.now() } = {}) {
-  initializeFeatureSnapshotLedger(db);
-  if (!tableExists(db, 'stock_signal_log')) return { imported: 0, skippedNoSnapshot: 0, skippedNonFrozen: 0 };
-  const columns = tableColumns(db, 'stock_signal_log');
-  const stageSelect = columns.has('opportunity_stage') ? 'opportunity_stage' : 'NULL AS opportunity_stage';
-  const actionSelect = columns.has('execution_action') ? 'execution_action' : 'NULL AS execution_action';
-  const rows = db.prepare(`SELECT id,date,symbol,market,raw_signal,action,action_label,regime,setup,risk,score,confidence,quality,
-      ${stageSelect},${actionSelect},engine_version,sample_origin
-    FROM stock_signal_log WHERE sample_origin='live_frozen' ORDER BY id ASC`).all();
-  const findSnapshot = db.prepare(`SELECT id FROM stock_feature_snapshots
-    WHERE schema_version=? AND source_origin=? AND market=? AND symbol=? AND as_of_date=?`);
-  const insertEvaluation = db.prepare(`INSERT OR IGNORE INTO stock_feature_policy_evaluations(
-    snapshot_id,policy_id,policy_version,status,direction,observed_only,evaluation_json,evaluated_at
-  ) VALUES(?,?,?,?,?,?,?,?)`);
-  let imported = 0;
-  let skippedNoSnapshot = 0;
-  const tx = db.transaction(() => {
-    for (const row of rows) {
-      const snapshot = findSnapshot.get(
-        FEATURE_SNAPSHOT_SCHEMA_VERSION,
-        FEATURE_SNAPSHOT_ORIGINS.HISTORICAL_DAILY_PROXY,
-        String(row.market || '').toUpperCase(),
-        String(row.symbol || '').toUpperCase(),
-        row.date,
-      );
-      if (!snapshot?.id) {
-        skippedNoSnapshot++;
-        continue;
-      }
-      const action = String(row.execution_action || row.action || 'NONE').toUpperCase();
-      const opportunityStage = row.opportunity_stage || null;
-      const evaluation = {
-        policyId: 'formal_observed',
-        policyVersion: String(row.engine_version || 'legacy-live'),
-        status: opportunityStage ? `${opportunityStage}:${action}` : action,
-        opportunityStage,
-        executionAction: action,
-        direction: opportunityStage === 'RISK_OFF' ? -1 : observedDirection(action),
-        observedOnly: true,
-        evidenceOrigin: 'legacy_live_frozen',
-        signalLogId: row.id,
-        signalDate: row.date,
-        rawSignal: row.raw_signal || null,
-        actionLabel: row.action_label || null,
-        regime: row.regime || null,
-        setup: row.setup || null,
-        risk: row.risk || null,
-        score: numeric(row.score),
-        confidence: numeric(row.confidence),
-        quality: row.quality || null,
-      };
-      imported += insertEvaluation.run(snapshot.id, evaluation.policyId, evaluation.policyVersion, evaluation.status,
-        evaluation.direction, 1, JSON.stringify(evaluation), capturedAt).changes;
-    }
-  });
-  tx();
-  return { imported, skippedNoSnapshot, skippedNonFrozen: 0, sourceOrigin: 'legacy_live_frozen' };
-}
 
 export function accrueFeatureSnapshotOutcomes({ db, getBars, benchmarkForMarket, limit = 500, evaluatedAt = Date.now() } = {}) {
   initializeFeatureSnapshotLedger(db);

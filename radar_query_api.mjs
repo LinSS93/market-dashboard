@@ -586,20 +586,27 @@ export function listSymbolsAcrossChannels({ market, channel, limit = 100, offset
     // P0: 评分来源限定 scheduled_daily + complete + 当前评分版本 + 当前活跃 profile 权重
     // P1: 评分按通道键 (market, symbol, channel) 查全部 observation，不限于最新 dossier
     //     → 最新 dossier 无 observation 时可从同通道旧 dossier 回退
-    const pageKeys = JSON.stringify(rows.map((r) => ({ m: r.market, s: r.symbol })));
+    // 与候选池相同：把当前页键放进有索引的 TEMP 表。SQLite 对 json_each
+    // 虚表的基数估计很弱，生产库 observation 已很大时会错误选择全表扫描计划。
+    db.prepare(`CREATE TEMP TABLE IF NOT EXISTS _archive_symbols (
+      market TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      PRIMARY KEY (market, symbol)
+    ) WITHOUT ROWID`).run();
+    const replacePageSymbols = db.transaction(() => {
+      db.prepare('DELETE FROM _archive_symbols').run();
+      const insert = db.prepare('INSERT OR IGNORE INTO _archive_symbols (market, symbol) VALUES (?, ?)');
+      for (const row of rows) insert.run(row.market, row.symbol);
+    });
+    replacePageSymbols();
     const channelRows = db.prepare(`
-      WITH page_symbols AS (
-        SELECT json_extract(value, '$.m') AS market,
-               json_extract(value, '$.s') AS symbol
-        FROM json_each(?)
-      ),
-      ranked_dossiers AS (
+      WITH ranked_dossiers AS (
         SELECT d.market, d.symbol, d.channel, d.direction, d.priority_level, d.status,
                d.change_type, d.available_at, d.id AS dossier_id,
           ROW_NUMBER() OVER (PARTITION BY d.market, d.symbol, d.channel
             ORDER BY d.available_at DESC, d.created_at DESC) AS rn
         FROM radar_v2_dossiers d
-        JOIN page_symbols ps ON ps.market = d.market AND ps.symbol = d.symbol
+        JOIN _archive_symbols ps ON ps.market = d.market AND ps.symbol = d.symbol
       ),
       channel_latest_score AS (
         SELECT d.market, d.symbol, d.channel, c.score, c.tier, o.observed_at AS score_as_of,
@@ -607,7 +614,7 @@ export function listSymbolsAcrossChannels({ market, channel, limit = 100, offset
             ORDER BY o.observed_at DESC, o.id DESC) AS score_rn
         FROM radar_v2_dossier_observations o
         JOIN radar_v2_dossiers d ON d.id = o.dossier_id
-        JOIN page_symbols ps ON ps.market = d.market AND ps.symbol = d.symbol
+        JOIN _archive_symbols ps ON ps.market = d.market AND ps.symbol = d.symbol
         JOIN radar_v2_candidates c ON c.id = o.candidate_id
         JOIN radar_v2_runs r2 ON r2.id = c.run_id
         JOIN radar_v2_scoring_profiles p ON p.market = c.market AND p.is_active = 1
@@ -626,7 +633,7 @@ export function listSymbolsAcrossChannels({ market, channel, limit = 100, offset
         ON cls.market = rd.market AND cls.symbol = rd.symbol AND cls.channel = rd.channel
         AND cls.score_rn = 1
       WHERE rd.rn = 1
-    `).all(pageKeys, SCORING_PROFILE_VERSION);
+    `).all(SCORING_PROFILE_VERSION);
 
     // 按 (market, symbol) 分组 channel summaries
     const channelMap = new Map();
@@ -1544,9 +1551,10 @@ export function listResearchQueue({ market, limit = 30, search } = {}) {
         FROM radar_v2_scan_jobs j
         LEFT JOIN radar_v2_runs r ON r.id = j.run_id
         WHERE j.market = ? AND j.trigger = 'scheduled_daily' AND j.status = 'complete'
+          AND j.trade_date <= ?
         ORDER BY j.trade_date DESC
         LIMIT 1
-      `).get(m);
+      `).get(m, expectedDate || '0000-00-00');
       const expectedJob = expectedDate ? db.prepare(`
         SELECT status, total_symbols, succeeded_count
         FROM radar_v2_scan_jobs

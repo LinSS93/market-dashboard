@@ -5,7 +5,7 @@
 // observation, confirmation, entry, defence and review. It never promotes a
 // signal and never invents a generic current-price +/- ATR fallback.
 
-export const STOCK_STAGE_PRICE_PLAN_VERSION = 'stock-stage-price-plan-v1';
+export const STOCK_STAGE_PRICE_PLAN_VERSION = 'stock-stage-price-plan-v2-three-assessments';
 
 function price(value) {
   const number = Number(value);
@@ -34,6 +34,16 @@ function observationLevel(decision, strategy) {
   if (setupKey === 'trend_pullback') {
     return level('pullback_reference', '回踩观察价', reference, 'observe', {
       active: false, note: '价格回到人格趋势参考线附近时重新检查形态。',
+    });
+  }
+  if (setupKey === 'extended') {
+    return level('pullback_review', '回踩复核参考', reference, 'observe', {
+      active:false, note:'短线过热时只等待价格回到人格趋势参考线附近重新评估。',
+    });
+  }
+  if (setupKey === 'momentum_recovery') {
+    return level('recovery_reference', '修复确认参考', reference, 'observe', {
+      active:false, note:'快速修复后需等待价格在参考线上方保持稳定。',
     });
   }
   return level('profile_reference', '人格观察参考', reference, 'observe', {

@@ -102,9 +102,9 @@ export function buildScenarioReplaySymbol(symbol, market, days = 320, options = 
       }
       // A historical position ledger is intentionally not synthesized. The
       // replay evaluates price conditions, not position-dependent P&L.
-      const context = buildSwingDecisionContext(baseEvent._analysis, null, null);
+      const context = buildSwingDecisionContext(baseEvent._analysis, null);
       const scoreResult = computeCompositeScore({ analysis: baseEvent._analysis, reliability: null, executionRisk: null });
-      const decision = { ...context, ...arbitrateStockDecision({ analysis: baseEvent._analysis, context, scoreResult }) };
+      const decision = { ...context, ...arbitrateStockDecision({ analysis: baseEvent._analysis, context }) };
       const outcome = evaluateScenarioPath({
         bars: base.rows,
         signalIndex: baseEvent.barIndex,

@@ -20,7 +20,6 @@ const DEFAULT_CONFIG_PATH = join(__dirname, 'config', 'market-dashboard.runtime.
 const LEGACY_ENV_PREFIX = 'RADAR_V2_';
 const ENV_PREFIX = 'RADAR_';
 const ALLOWED_KEYS = new Set([
-  'SIGNAL_ALGO_VERSION',
   // 人格选择器总闸：开启后看板设置中的决策人格切换才真正生效
   // （未开启时 effectiveProfileId 永远回落 balanced，偏好仅存储不生效）。
   'STOCK_SIGNAL_PROFILE_SELECTOR_ENABLED',
@@ -44,8 +43,8 @@ export function normalizeLegacyRadarEnv(env = process.env) {
   }
   return env;
 }
-// 模块加载即归一化：无论从生产启动器还是直接 node server.mjs 进入，
-// 后续所有 process.env.RADAR_* 读取都能看到旧变量回填的值。
+// 导入时先归一化环境中的旧键；正式启动器随后在导入业务模块前读取
+// host-local 配置，确保后续模块只看到新变量名。
 normalizeLegacyRadarEnv();
 
 export function parseRuntimeConfig(text) {

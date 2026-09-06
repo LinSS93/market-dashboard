@@ -42,12 +42,14 @@ check(unchanged.kind === 'unchanged' && unchanged.changed === false, 'same techn
 const analysisSnapshot = snapshotFromAnalysis({
   daily: true,
   asOfDate: '2026-08-20',
-  tradePlan: { action: 'BUY', setup: { key: 'trend_pullback', label: '趋势回踩' } },
+  signalProfiles:{ effectiveProfileId:'balanced', profiles:{ balanced:{
+    profileId:'balanced', strategy:{ profileId:'balanced', action:'BUY', setup:{ key:'trend_pullback', label:'趋势回踩' } },
+  } } },
   swingDecision: { opportunityStage:'READY', executionAction:'OPEN', executionReadiness: { status: 'ready', setupKey: 'trend_pullback', setupLabel: '趋势回踩' } },
 });
 check(analysisSnapshot.daily === true && analysisSnapshot.setupKey === 'trend_pullback' && analysisSnapshot.readiness === 'ready' && analysisSnapshot.opportunityStage === 'READY' && analysisSnapshot.executionAction === 'OPEN', 'analysis snapshot keeps stage and action explicit');
 
-const storedSnapshot = snapshotFromStoredPayload({ date: '2026-08-19', opportunity_stage:'NO_SETUP', execution_action:'NONE', payload: JSON.stringify({ tradePlan: { setup: { key: 'none' } }, swingDecision: { executionReadiness: { status: 'waiting' } } }) });
+const storedSnapshot = snapshotFromStoredPayload({ date: '2026-08-19', payload: JSON.stringify({ profileStrategy:{ setup:{ key:'none' } }, swingDecision:{ profileId:'balanced', opportunityStage:'NO_SETUP', executionAction:'NONE', executionReadiness:{ status:'waiting' } } }) });
 check(storedSnapshot.setupKey === 'none' && storedSnapshot.opportunityStage === 'NO_SETUP' && storedSnapshot.executionAction === 'NONE', 'stored payload snapshot parses stage-action history safely');
 
 if (failures) process.exitCode = 1;

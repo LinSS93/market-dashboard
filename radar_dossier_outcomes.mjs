@@ -25,6 +25,7 @@ import {
   updateDossierOutcomeReturns,
   getDossierOutcomesNeedingInit,
   getDossierOutcomesNeedingUpdate,
+  deferDossierOutcomeRetry,
   getTrendDossiersMissingOutcomes,
   getDossiersDueForReview,
   markDossierNeedsReview,
@@ -40,6 +41,21 @@ const HORIZONS = [5, 20, 60];
 const EXCESS_HORIZONS = [5, 20, 60];
 // MFE/MAE 仅计算 5d/20d（60d 窗口太长，偏移意义减弱）
 const MFE_MAE_HORIZONS = [5, 20];
+const RETRY_DELAY = Object.freeze({
+  stale: 6 * 60 * 60 * 1000,
+  insufficient: 24 * 60 * 60 * 1000,
+  immature: 24 * 60 * 60 * 1000,
+  error: 60 * 60 * 1000,
+});
+
+function deferOutcomeRetry(dossierId, delayMs) {
+  const now = Date.now();
+  deferDossierOutcomeRetry.run({
+    dossier_id: dossierId,
+    next_retry_at: now + delayMs,
+    updated_at: now,
+  });
+}
 
 // 从 radar_daily_bars 读取K线（数据财富，只读）。缓存 prepared statement。
 let _wealthBarsStmt = null;
@@ -189,11 +205,13 @@ export function backfillDossierOutcome({ dossierId, market, symbol, availableAt 
   const timeZone = MARKET_TIMEZONES[market];
   const benchSymbol = BENCHMARK_SYMBOLS[market];
   if (!timeZone || !benchSymbol) {
+    try { deferOutcomeRetry(dossierId, RETRY_DELAY.error); } catch {}
     return { dossierId, status: 'error', error: 'unknown_market' };
   }
 
   // 防御1: 拒绝 available_at=null（避免 Number(null)=0 被解析为 1970-01-01）
   if (availableAt == null || !Number.isFinite(Number(availableAt))) {
+    try { deferOutcomeRetry(dossierId, RETRY_DELAY.error); } catch {}
     return { dossierId, status: 'error', error: 'invalid_available_at' };
   }
 
@@ -220,6 +238,7 @@ export function backfillDossierOutcome({ dossierId, market, symbol, availableAt 
         data_quality: 'insufficient_bars',
         updated_at: now,
       });
+      deferOutcomeRetry(dossierId, RETRY_DELAY.insufficient);
       return { dossierId, status: 'ok', dataQuality: 'insufficient_bars', maturity: 0, absoluteMaturity: 0 };
     }
 
@@ -236,6 +255,7 @@ export function backfillDossierOutcome({ dossierId, market, symbol, availableAt 
         data_quality: 'stale_bars',
         updated_at: now,
       });
+      deferOutcomeRetry(dossierId, RETRY_DELAY.stale);
       return { dossierId, status: 'pending', dataQuality: 'stale_bars' };
     }
 
@@ -310,8 +330,11 @@ export function backfillDossierOutcome({ dossierId, market, symbol, availableAt 
       updated_at: Date.now(),
     });
 
+    if (maturity < 3) deferOutcomeRetry(dossierId, RETRY_DELAY.immature);
+
     return { dossierId, status: 'ok', dataQuality, maturity, absoluteMaturity };
   } catch (error) {
+    try { deferOutcomeRetry(dossierId, RETRY_DELAY.error); } catch {}
     return { dossierId, status: 'error', error: error?.message || String(error) };
   }
 }
@@ -352,7 +375,7 @@ export function backfillMissingDossierOutcomes(limit = 200) {
  * @returns {{ total, ok, pending, errors }}
  */
 export function backfillPendingDossierOutcomes(limit = 50) {
-  const pending = getDossierOutcomesNeedingInit.all(limit);
+  const pending = getDossierOutcomesNeedingInit.all({ now: Date.now(), limit });
   let ok = 0;
   let pendingCount = 0;
   const errors = [];
@@ -378,7 +401,7 @@ export function backfillPendingDossierOutcomes(limit = 50) {
  * @returns {{ total, updated, errors }}
  */
 export function updateMaturedDossierOutcomes(limit = 50) {
-  const pending = getDossierOutcomesNeedingUpdate.all(limit);
+  const pending = getDossierOutcomesNeedingUpdate.all({ now: Date.now(), limit });
   let updated = 0;
   const errors = [];
 

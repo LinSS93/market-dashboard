@@ -2,10 +2,8 @@
 // 前后端共享：浏览器通过 <script> 加载挂到 globalThis.MarketThresholds，
 // Node 端通过 require('./app/market-thresholds.cjs') 引入。
 //
-// 阈值分三层语义，严格度递减：
-//   DAILY_*    — 日线正式信号投票（analyzeDaily / analyzeRowsForBacktest）
-//   INTRADAY_* — 日 K 不足时的分时快照回退投票（analyzeIntraday）
-//   DISPLAY_*  — 前端 UI 标签 / 雷达评分（不影响交易信号）
+// 本文件只保留前端展示阈值。人格信号参数由 stock_signal_profiles.mjs
+// 独立拥有；日 K 不足时也不再生成分时回退信号。
 (function (root, factory) {
   const api = factory();
   if (typeof module === 'object' && module.exports) module.exports = api;
@@ -14,15 +12,7 @@
   'use strict';
 
   const VOLUME_RATIO = Object.freeze({
-    // ── 日线正式信号投票（最严格，用于交易信号判定）──
-    DAILY_HEAVY: 1.8,        // 放量确认投票：volR > 1.8 → vote #5 投票 ±0.4
-    DAILY_LIGHT: 0.6,        // 缩量：volR < 0.6 → vote #5 投票 0
-    // ── 交易计划（buildTradePlan）──
-    BREAKOUT_FOLLOW: 1.3,    // 突破跟随形态：volR > 1.3 且 MACD/ROC 同向
-    RISK_EXTREME: 2.5,       // 极端放量 → 风险等级升至"高"
-    // ── 盘中分时快照回退（analyzeIntraday，日 K 不足时使用）──
-    INTRADAY_HEAVY: 1.5,     // 盘中放量确认/派发：volRatio > 1.5 → ±1 分
-    // ── 前端显示标签 / 雷达评分（最宽松，仅影响 UI 和雷达评分）──
+    // 前端显示标签，不影响人格技术判断或交易动作。
     DISPLAY_HEAVY: 1.25,     // indText "放量"标签 / radar volumeExpansion
     DISPLAY_LIGHT: 0.75,     // indText "缩量"标签
     DISPLAY_EXTREME: 2.0,    // volK "异常放量"标签

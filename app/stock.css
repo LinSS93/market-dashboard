@@ -1,7 +1,33 @@
   * { box-sizing: border-box; }
   body { margin: 0; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background: var(--ws-canvas); color: var(--ws-ink); }
-  .stock-workspace { --stock-decision-amber:#d4a017; }
+  .stock-workspace {
+    --stock-decision-amber:#d19a00;
+    --stock-state-data-unavailable:#6b7280;
+    --stock-state-waiting:#475569;
+    --stock-state-forming:#0891b2;
+    --stock-state-confirming:#7c3aed;
+    --stock-state-blocked:#d19a00;
+    --stock-state-probe:#2e9e74;
+    --stock-state-add:#147d5a;
+    --stock-state-hold:#3266a3;
+    --stock-state-trim:#c46a1b;
+    --stock-state-exit:#c8554a;
+    --stock-state-avoid:#9f344a;
+    --stock-state-exit-pending:#a16207;
+  }
   .stock-workspace .badge.b-tone-amber { background:var(--stock-decision-amber); }
+  .stock-workspace .badge.b-state-data-unavailable { background:var(--stock-state-data-unavailable); }
+  .stock-workspace .badge.b-state-waiting { background:var(--stock-state-waiting); }
+  .stock-workspace .badge.b-state-forming { background:var(--stock-state-forming); }
+  .stock-workspace .badge.b-state-confirming { background:var(--stock-state-confirming); }
+  .stock-workspace .badge.b-state-blocked { background:var(--stock-state-blocked); }
+  .stock-workspace .badge.b-state-probe { background:var(--stock-state-probe); }
+  .stock-workspace .badge.b-state-add { background:var(--stock-state-add); }
+  .stock-workspace .badge.b-state-hold { background:var(--stock-state-hold); }
+  .stock-workspace .badge.b-state-trim { background:var(--stock-state-trim); }
+  .stock-workspace .badge.b-state-exit { background:var(--stock-state-exit); }
+  .stock-workspace .badge.b-state-avoid { background:var(--stock-state-avoid); }
+  .stock-workspace .badge.b-state-exit-pending { background:#fff7ed; color:var(--stock-state-exit-pending); border:1px dashed var(--stock-state-exit-pending); }
   /* header/nav 样式已统一由 workspace-theme.css 管理 */
   .wrap { width: calc(100vw - 32px); margin: 16px auto; padding: 0 16px; }
   /* ===== 左右分栏主布局（布局规则由 shared.css .split-layout 接管） ===== */
@@ -502,6 +528,18 @@
   .decision-card.tone-watch { border-left-color:var(--ws-blue); background:var(--ws-blue-soft); }
   .decision-card.tone-amber { border-left-color:var(--stock-decision-amber); background:#fff8db; }
   .decision-card.tone-neutral { border-left-color:#5a606b; background:#f3f6fa; }
+  .decision-card.state-data-unavailable { border-left-color:var(--stock-state-data-unavailable); background:#f3f4f6; }
+  .decision-card.state-waiting { border-left-color:var(--stock-state-waiting); background:#f1f5f9; }
+  .decision-card.state-forming { border-left-color:var(--stock-state-forming); background:#ecfeff; }
+  .decision-card.state-confirming { border-left-color:var(--stock-state-confirming); background:#f5f3ff; }
+  .decision-card.state-blocked { border-left-color:var(--stock-state-blocked); background:#fffbeb; }
+  .decision-card.state-probe { border-left-color:var(--stock-state-probe); background:#ecfdf5; }
+  .decision-card.state-add { border-left-color:var(--stock-state-add); background:#e8f7f0; }
+  .decision-card.state-hold { border-left-color:var(--stock-state-hold); background:#eff6ff; }
+  .decision-card.state-trim { border-left-color:var(--stock-state-trim); background:#fff7ed; }
+  .decision-card.state-exit { border-left-color:var(--stock-state-exit); background:#fef2f2; }
+  .decision-card.state-avoid { border-left-color:var(--stock-state-avoid); background:#fff1f2; }
+  .decision-card.state-exit-pending { border-left:4px dashed var(--stock-state-exit-pending); background:#fff7ed; }
 
   /* 决策结论行只保留当前人格的正式执行状态 */
   .dc-conclusion { display:flex; align-items:center; flex-wrap:wrap; gap:8px 14px; margin-bottom:10px; }
@@ -515,6 +553,28 @@
   .dc-state .dc-state-tag.tone-amber { background:var(--stock-decision-amber); color:#fff; }
   .dc-state .dc-state-tag.tone-neutral { background:#5a606b; color:#fff; }
   .dc-state .dc-state-tag.tone-hot { background:var(--ws-amber); color:#fff; }
+  .dc-state .dc-state-tag.state-data-unavailable { background:var(--stock-state-data-unavailable); color:#fff; }
+  .dc-state .dc-state-tag.state-waiting { background:var(--stock-state-waiting); color:#fff; }
+  .dc-state .dc-state-tag.state-forming { background:var(--stock-state-forming); color:#fff; }
+  .dc-state .dc-state-tag.state-confirming { background:var(--stock-state-confirming); color:#fff; }
+  .dc-state .dc-state-tag.state-blocked { background:var(--stock-state-blocked); color:#fff; }
+  .dc-state .dc-state-tag.state-probe { background:var(--stock-state-probe); color:#fff; }
+  .dc-state .dc-state-tag.state-add { background:var(--stock-state-add); color:#fff; }
+  .dc-state .dc-state-tag.state-hold { background:var(--stock-state-hold); color:#fff; }
+  .dc-state .dc-state-tag.state-trim { background:var(--stock-state-trim); color:#fff; }
+  .dc-state .dc-state-tag.state-exit { background:var(--stock-state-exit); color:#fff; }
+  .dc-state .dc-state-tag.state-avoid { background:var(--stock-state-avoid); color:#fff; }
+  .dc-state .dc-state-tag.state-exit-pending { background:#fff7ed; color:var(--stock-state-exit-pending); border:1px dashed var(--stock-state-exit-pending); }
+  .dc-assessment-strip { display:flex; flex-wrap:wrap; gap:6px; margin:-2px 0 10px; }
+  .dc-assessment { display:inline-flex; align-items:center; gap:5px; padding:4px 8px; border:1px solid var(--ws-line); border-radius:var(--ws-radius-pill); background:var(--ws-surface); }
+  .dc-assessment small { color:var(--ws-muted-soft); font-size:10px; }
+  .dc-assessment b { color:var(--ws-ink-soft); font-size:11px; }
+  .dc-assessment.tone-bull { border-color:#9bd4bc; }
+  .dc-assessment.tone-bull b { color:var(--ws-green); }
+  .dc-assessment.tone-bear { border-color:#efaaa5; }
+  .dc-assessment.tone-bear b { color:var(--ws-red); }
+  .dc-assessment.tone-amber { border-color:#e9c76f; }
+  .dc-assessment.tone-amber b { color:#8a5c00; }
   .dc-decision-why { margin:-2px 0 10px; padding:9px 11px; border:1px solid var(--ws-line); border-radius:var(--ws-radius-sm); background:var(--ws-surface); }
   .dc-decision-why-title { color:var(--ws-muted-soft); font-size:11px; font-weight:700; }
   .dc-decision-why-summary { margin:4px 0 0; color:var(--ws-ink); font-size:13px; font-weight:650; line-height:1.5; }
@@ -536,6 +596,7 @@
   .dc-persona-verdict.tone-bull { border-left-color:var(--ws-green); }
   .dc-persona-verdict.tone-bear { border-left-color:var(--ws-red); }
   .dc-persona-verdict.tone-watch { border-left-color:var(--ws-blue); }
+  .dc-persona-verdict.tone-amber,.dc-persona-verdict.tone-hot { border-left-color:var(--stock-state-blocked); }
   .dc-persona-verdict-head { display:flex; align-items:center; justify-content:space-between; gap:6px; }
   .dc-persona-name { color:var(--ws-muted); font-size:11px; font-weight:650; }
   .dc-persona-verdict-head em { padding:1px 5px; border:1px solid var(--ws-blue); border-radius:var(--ws-radius-pill); color:var(--ws-blue); font-size:9.5px; font-style:normal; font-weight:700; }
@@ -547,6 +608,8 @@
   .dc-persona-reason { display:block; margin-top:4px; color:var(--ws-muted-soft); font-size:10.5px; line-height:1.4; }
   .dc-persona-foot { margin-top:7px; color:var(--ws-muted-soft); font-size:10.5px; line-height:1.4; }
   @media(max-width:760px){ .dc-persona-grid{grid-template-columns:1fr;} }
+  .stock-signal-cell { display:inline-flex; flex-direction:column; align-items:flex-start; gap:3px; }
+  .stock-signal-cell small { color:var(--ws-muted-soft); font-size:9.5px; line-height:1.25; white-space:nowrap; }
   /* 独立的 RSI6 均值回归观察，不使用正式动作的绿色/红色语义。 */
   .dc-mean-reversion { margin:-2px 0 10px; padding:8px 10px; border:1px solid #c9d9ee; border-left:3px solid var(--ws-blue); background:#f6f9fd; font-size:12px; line-height:1.5; }
   .dc-mean-reversion.candidate { border-color:#f0d89a; border-left-color:#d4a017; background:#fffaf0; }
@@ -568,7 +631,7 @@
   .dc-change-detail { color:var(--ws-muted); }
   .dc-change-review { margin-left:auto; color:var(--ws-muted-soft); font-size:11px; white-space:nowrap; }
 
-  /* 数据状态/可靠度行 */
+  /* 当前运行数据状态行 */
   .dc-meta-row { display:flex; flex-wrap:wrap; gap:6px 16px; margin-bottom:10px; font-size:12.5px; }
   .dc-meta-item { display:inline-flex; align-items:baseline; gap:5px; }
   .dc-meta-k { color:var(--ws-muted-soft); font-weight:500; }
@@ -712,6 +775,18 @@
   .basis-step-value.tone-neutral { color:var(--ws-ink-soft); }
   .basis-step-value.tone-watch { color:var(--ws-blue); }
   .basis-step-value.tone-hot { color:var(--ws-amber); }
+  .basis-step-value.state-data-unavailable { color:var(--stock-state-data-unavailable); }
+  .basis-step-value.state-waiting { color:var(--stock-state-waiting); }
+  .basis-step-value.state-forming { color:var(--stock-state-forming); }
+  .basis-step-value.state-confirming { color:var(--stock-state-confirming); }
+  .basis-step-value.state-blocked { color:var(--stock-state-blocked); }
+  .basis-step-value.state-probe { color:var(--stock-state-probe); }
+  .basis-step-value.state-add { color:var(--stock-state-add); }
+  .basis-step-value.state-hold { color:var(--stock-state-hold); }
+  .basis-step-value.state-trim { color:var(--stock-state-trim); }
+  .basis-step-value.state-exit { color:var(--stock-state-exit); }
+  .basis-step-value.state-avoid { color:var(--stock-state-avoid); }
+  .basis-step-value.state-exit-pending { color:var(--stock-state-exit-pending); }
   .basis-step-note { font-size:11.5px; color:var(--ws-muted-soft); line-height:1.6; padding-left:26px; }
 
   /* 门控检查内的 alert 块（4 状态：pass/warn/danger/disabled/conflict）

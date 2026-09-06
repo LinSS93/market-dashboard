@@ -15,7 +15,7 @@
 // backtestDashboardSummary / walkForwardSymbol / evaluateActionReliability /
 // getCachedActionReliability /
 // buildBacktestSeries 等。stock_engine 顶部 `import { ... } from './stock_backtest.mjs'`，
-// 在 attachReliability / rebuildHistoricalSignalReplay / HTTP 路由中调用。
+// 在实验室研究、历史重放和相应 HTTP 研究端点中调用。
 //
 // 这形成 ESM 循环依赖，但 stock_backtest 顶层只有函数定义与两个缓存 Map（不立即调用 db），
 // 不会在模块加载阶段访问 db；运行时通过 ESM live binding 拿到的 db 已是有效实例，安全。
@@ -29,6 +29,7 @@ import { OUTCOME_CONTRACT_VERSION, resolveNextSessionExecution } from "./outcome
 import { getKline, auditStoredKline, countKline } from "./stock_kline.mjs";
 import { computeCompositeScore, SCORING_ENGINE_VERSION } from "./signal_scoring.mjs";
 import { arbitrateStockDecision } from "./stock_decision_arbiter.mjs";
+import { hasCurrentStockSignalContract, selectedStockProfile, selectedStockStrategy } from './stock_signal_contract.mjs';
 import {
   db,
   SIGNAL_ENGINE_VERSION,
@@ -341,25 +342,27 @@ function buildBacktestSeries(symbol, market, days = 320, options = {}) {
   const events = [];
   for (let i = 59; i < rows.length - 1; i++) {
     const a = analyzeRowsForBacktest(symbol, market, rows.slice(0, i + 1), benchmark);
-    if (!a || !a.tradePlan) continue;
-    const action = a.tradePlan.action;
-    const label = a.tradePlan.actionLabel;
+    const profile = selectedStockProfile(a);
+    const strategy = selectedStockStrategy(a);
+    if (!profile || !strategy?.available) continue;
+    const action = strategy.action;
+    const label = strategy.actionLabel;
     const direction = actionDirection(action);
     const betaInfo = rollingBetaPct(rows, benchmark, i, 60);
-    const execution = resolveNextSessionExecution(rows, { signalIndex: i, fallbackPrice: a.tradePlan.entry });
+    const execution = resolveNextSessionExecution(rows, { signalIndex: i, fallbackPrice: strategy.entry });
     if (!execution) continue;
     const ev = {
       date: rows[i].date, barIndex: i, close: rows[i].close, action, label,
       entryDate: execution.date, entryPrice: execution.price, entryPriceSource: Number(execution.bar.open) > 0 ? 'next_session_open' : 'next_session_close_fallback',
-      score: a.score != null ? +a.score.toFixed(4) : null,
-      rawSignal: a.signal || null,
-      regime: a.tradePlan.regime.label, regimeKey: a.tradePlan.regime.key,
-      setup: a.tradePlan.setup.label, setupKey: a.tradePlan.setup.key,
-      marketRegime: a.tradePlan.marketRegime?.label || null,
-      marketRegimeKey: a.tradePlan.marketRegime?.key || null,
-      risk: a.tradePlan.risk.label, stopLoss:a.tradePlan.stopLoss ?? null, takeProfit:a.tradePlan.takeProfit ?? null,
-      confidence: a.tradePlan.confidence ?? a.confidence ?? null,
-      quality: a.tradePlan.dataQuality?.label ?? null,
+      profileId: profile.profileId,
+      profileVersion: profile.profileVersion,
+      strategyVersion: strategy.strategyVersion,
+      score: profile.score != null ? +profile.score.toFixed(4) : null,
+      rawSignal: profile.signal || null,
+      regime: strategy.regime.label, regimeKey: strategy.regime.key,
+      setup: strategy.setup.label, setupKey: strategy.setup.key,
+      risk: strategy.risk.label, stopLoss:null, takeProfit:null,
+      quality: strategy.dataQuality?.label ?? null,
       atr: a.atr ?? null,
       longTermTrend: a.longTermTrend ?? null,
       beta: betaInfo ? betaInfo.beta : null, betaSamples: betaInfo ? betaInfo.samples : 0, returns: {}, excess: {}, alpha: {}, paths: {}
@@ -373,7 +376,7 @@ function buildBacktestSeries(symbol, market, days = 320, options = {}) {
           if (betaInfo && betaInfo.beta != null) ev.alpha[h] = ev.returns[h] - betaInfo.beta * br;
         }
       }
-      ev.paths[h] = simulateTradePath(rows, i, h, a.tradePlan, direction, market);
+      ev.paths[h] = simulateTradePath(rows, i, h, strategy, direction, market);
     }
     // 保留 analysis 对象引用 + 空仓视角的正式阶段/动作。
     // ev._analysis 供策略模拟在每根 K 线按真实模拟持仓重算；ev.v21 只作报告字段，
@@ -409,15 +412,14 @@ function buildBacktestSeriesWithV21(symbol, market, days = 320) {
 
 // 以历史时点分析和模拟仓位重放当前唯一仲裁器。
 function computeV21StateForPosition(analysis, position, config = {}) {
-  if (!analysis?.tradePlan) return null;
+  if (!hasCurrentStockSignalContract(analysis, config.profileId || null)) return null;
   try {
     const profileId = String(config.profileId || analysis?.signalProfiles?.effectiveProfileId || 'balanced').toLowerCase();
-    const context = buildSwingDecisionContext(analysis, null, position, { profileId });
+    const context = buildSwingDecisionContext(analysis, position, { profileId });
     const scoreResult = computeCompositeScore({ analysis, reliability: null, executionRisk: null });
     const decision = arbitrateStockDecision({
       analysis,
       context,
-      scoreResult,
       executionRisk: null,
       extSessionRisk: null,
       tranchePolicy: config.tranchePctOverride || {},
@@ -863,7 +865,7 @@ function walkForwardSymbol(symbol, market, days = 320, trainRatio = 0.7) {
     train: { count: trainEvents.length, start: trainEvents[0]?.date || null, end: trainEvents[trainEvents.length - 1]?.date || null, purgedCount: split.purgedCount || 0, actions: train },
     test: { count: testEvents.length, start: testEvents[0]?.date || null, end: testEvents[testEvents.length - 1]?.date || null, actions: test },
     stability,
-    latestAction: s.latest?.tradePlan?.action || null,
+    latestAction: selectedStockStrategy(s.latest)?.action || null,
   };
 }
 
@@ -1740,7 +1742,8 @@ function reliabilityConfidence(verdict, all5, test5, stability, direction, path5
 function evaluateActionReliability(symbol, market, days = 320, trainRatio = 0.7) {
   const s = buildBacktestSeries(symbol, market, days);
   if (s.error) return s;
-  const latestPlan = s.latest?.tradePlan || null;
+  const latestPlan = selectedStockStrategy(s.latest);
+  const latestProfile = selectedStockProfile(s.latest);
   const action = latestPlan?.action || null;
   const label = latestPlan?.actionLabel || actionDisplay(action);
   if (!action) return { symbol, market, error: "no current action" };
@@ -1773,7 +1776,7 @@ function evaluateActionReliability(symbol, market, days = 320, trainRatio = 0.7)
   const rollingAudit = rollingWalkForwardAudit({ events: s.events, direction });
   const thresholdAudit = scoreThresholdAudit({
     direction,
-    latestScore: s.latest?.score ?? null,
+    latestScore: latestProfile?.score ?? null,
     trainEvents,
     testEvents,
     allEvents: s.events,
@@ -1782,7 +1785,7 @@ function evaluateActionReliability(symbol, market, days = 320, trainRatio = 0.7)
     symbol,
     market,
     direction,
-    latestScore: s.latest?.score ?? null,
+    latestScore: latestProfile?.score ?? null,
     latestPlan,
     days,
     trainRatio,
@@ -1945,14 +1948,15 @@ function evaluateActionReliability(symbol, market, days = 320, trainRatio = 0.7)
 }
 
 function getCachedActionReliability(symbol, market, baseAnalysis, days = 320, trainRatio = 0.7) {
-  if (!baseAnalysis || baseAnalysis.error || !baseAnalysis.tradePlan || !baseAnalysis.daily) return null;
-  const plan = baseAnalysis.tradePlan;
+  if (!baseAnalysis || baseAnalysis.error || !hasCurrentStockSignalContract(baseAnalysis) || !baseAnalysis.daily) return null;
+  const profile = selectedStockProfile(baseAnalysis);
+  const plan = selectedStockStrategy(baseAnalysis);
   const b = benchmarkFor(market);
   const benchBars = b ? (countKline.get(b.symbol)?.c || 0) : 0;
   const key = [
     symbol, market, baseAnalysis.asOfDate || "", plan.action || "",
     plan.setup?.key || "", plan.regime?.key || "", plan.marketRegime?.key || "",
-    baseAnalysis.score != null ? Number(baseAnalysis.score).toFixed(4) : "", benchBars, days, trainRatio
+    profile?.score != null ? Number(profile.score).toFixed(4) : "", benchBars, days, trainRatio
   ].join("|");
   const now = Date.now();
   const cached = _actionEvalCache.get(key);

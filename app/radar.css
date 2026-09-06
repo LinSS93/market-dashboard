@@ -7,7 +7,7 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
 .radar-workspace header { flex-shrink:0; }
 .radar-workspace .radar-wrap {
   width: min(1920px, calc(100vw - 24px));
-  margin: 12px auto;
+  margin: 12px auto 0;
   flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
 }
 .radar-workspace .radar-tabs { flex-shrink: 0; }
@@ -19,10 +19,9 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
-  background: rgba(255,255,255,.82);
+  background: var(--ws-surface);
   border: 1px solid var(--ws-line);
   border-radius: var(--ws-radius);
-  backdrop-filter: blur(8px);
   flex-wrap: wrap;
   min-height: 48px;
   margin-bottom: 8px;
@@ -80,12 +79,13 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
 .radar-workspace .radar-layout {
   display: flex;
   gap: var(--ws-space-3);
-  margin-top: var(--ws-space-2);
+  margin-top: 0;
   flex: 1 1 0; min-height: 0; overflow: hidden; align-items: stretch;
 }
 
 .radar-workspace .panel {
   background: var(--ws-surface);
+  border: 1px solid var(--ws-line);
   border-radius: var(--ws-radius);
   box-shadow: var(--ws-shadow-sm);
   overflow: hidden;
@@ -96,17 +96,19 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: var(--ws-space-3) var(--ws-space-4);
+  min-height: 48px;
+  padding: 10px var(--ws-space-3);
+  background: var(--ws-canvas);
   border-bottom: 1px solid var(--ws-line);
 }
 .radar-workspace .panel-head h2 {
   margin: 0;
   font-size: var(--ws-font-xl);
-  font-weight: 600;
+  font-weight: 700;
 }
 
 /* === 列表面板 === */
-.radar-workspace .dossier-list-panel { flex: 0 0 42%; min-width: 0; }
+.radar-workspace .dossier-list-panel { flex: 0 1 46%; min-width: 0; box-shadow:var(--ws-shadow-sm); }
 
 .radar-workspace .dossier-list {
   flex: 1; min-height: 0; overflow-y: auto;
@@ -138,13 +140,13 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
 
 /* === 档案卡片 === */
 .radar-workspace .dossier-card {
-  padding: var(--ws-space-3) var(--ws-space-4);
+  padding: 10px 14px;
   border-bottom: 1px solid var(--ws-line-soft);
   cursor: pointer;
   transition: background .12s;
 }
 .radar-workspace .dossier-card:hover { background: var(--ws-surface-soft); }
-.radar-workspace .dossier-card.active { background: var(--ws-blue-soft); border-left: 3px solid var(--ws-blue); padding-left: calc(var(--ws-space-4) - 3px); }
+.radar-workspace .dossier-card.active { background: var(--ws-blue-soft); border-left: 3px solid var(--ws-blue); padding-left: 11px; }
 
 .radar-workspace .dossier-card-head {
   display: flex;
@@ -198,11 +200,11 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
 }
 
 /* === 详情面板 === */
-.radar-workspace .dossier-detail-panel { flex: 1 1 58%; min-width: 0; }
+.radar-workspace .dossier-detail-panel { flex: 1 1 54%; min-width: 0; box-shadow:var(--ws-shadow-md); }
 
 .radar-workspace .dossier-detail {
   flex: 1; min-height: 0; overflow-y: auto;
-  padding: var(--ws-space-4);
+  padding: var(--ws-space-3) 18px 18px;
 }
 
 .radar-workspace .dossier-detail-empty {
@@ -234,7 +236,7 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
 }
 
 /* 详情区块 */
-.radar-workspace .detail-section { margin-bottom: var(--ws-space-5); }
+.radar-workspace .detail-section { margin-bottom: var(--ws-space-4); }
 .radar-workspace .detail-section-title {
   font-size: var(--ws-font-sm);
   font-weight: 600;
@@ -403,8 +405,12 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
 .radar-workspace .radar-tabs {
   display: flex;
   gap: 4px;
-  margin-bottom: 16px;
-  border-bottom: 1px solid var(--ws-line);
+  min-height:44px;
+  margin-bottom: 8px;
+  padding:0 8px;
+  border: 1px solid var(--ws-line);
+  border-radius:var(--ws-radius);
+  background:var(--ws-surface);
 }
 .radar-workspace .radar-tab {
   padding: 10px 16px;
@@ -848,8 +854,11 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
 /* === 详情页：公司概览（置顶，不折叠） === */
 .radar-workspace .company-overview {
   margin-bottom: var(--ws-space-4);
-  padding-bottom: var(--ws-space-3);
-  border-bottom: 1px solid var(--ws-line-soft);
+  padding:14px 16px;
+  border:1px solid var(--ws-line);
+  border-left:4px solid var(--ws-blue);
+  border-radius:var(--ws-radius-sm);
+  background:var(--ws-canvas);
 }
 .radar-workspace .overview-head {
   display: flex;
@@ -1112,7 +1121,7 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
 
 /* 队列分组 */
 .radar-workspace .queue-group {
-  margin-bottom: var(--ws-space-4);
+  margin-bottom: var(--ws-space-3);
 }
 .radar-workspace .queue-group-head {
   display: flex;
@@ -1121,9 +1130,11 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
   font-size: var(--ws-font-sm);
   font-weight: 600;
   color: var(--ws-ink-soft);
-  padding: var(--ws-space-2) var(--ws-space-3);
-  border-bottom: 1px solid var(--ws-line-soft);
-  margin-bottom: var(--ws-space-2);
+  min-height:36px;
+  padding: var(--ws-space-2) 12px;
+  border-bottom: 1px solid var(--ws-line);
+  margin-bottom: 0;
+  background:var(--ws-surface-alt);
 }
 .radar-workspace .queue-group-label { color: var(--ws-ink-soft); }
 .radar-workspace .queue-group-count {
@@ -1138,17 +1149,17 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
 }
 
 /* 队列分组色带（左侧细条标识组别） */
-.radar-workspace .queue-group.bucket-risk_review { border-left: 2px solid var(--ws-red); padding-left: var(--ws-space-2); }
-.radar-workspace .queue-group.bucket-cross_confirm { border-left: 2px solid var(--ws-green); padding-left: var(--ws-space-2); }
-.radar-workspace .queue-group.bucket-new_signal { border-left: 2px solid var(--ws-blue); padding-left: var(--ws-space-2); }
-.radar-workspace .queue-group.bucket-dismissed { border-left: 2px solid var(--ws-muted-soft); padding-left: var(--ws-space-2); }
+.radar-workspace .queue-group.bucket-risk_review,
+.radar-workspace .queue-group.bucket-cross_confirm,
+.radar-workspace .queue-group.bucket-new_signal,
+.radar-workspace .queue-group.bucket-dismissed { border-left:0; padding-left:0; }
 
 /* 卡片 bucket 样式（未选中统一白底 + 3px 左色标标识 bucket）：
    - risk_review：浅红底 + 红色左色标（风险组首屏醒目）
-   - cross_confirm：白底 + 绿色左色标（高置信机会）
+   - cross_confirm：白底 + 绿色左色标（多通道共振）
    - new_signal：白底 + 蓝色左色标（待确认信号）
    - 选中：蓝底覆盖 bucket 背景 */
-.radar-workspace .symbol-card.bucket-risk_review { background: var(--ws-red-soft); border-left: 3px solid var(--ws-red); }
+.radar-workspace .symbol-card.bucket-risk_review { background: var(--ws-surface); border-left: 3px solid var(--ws-red); }
 .radar-workspace .symbol-card.bucket-cross_confirm { background: var(--ws-surface); border-left: 3px solid var(--ws-green); }
 .radar-workspace .symbol-card.bucket-new_signal { background: var(--ws-surface); border-left: 3px solid var(--ws-blue); }
 .radar-workspace .symbol-card.bucket-audit_pending { background: var(--ws-surface); border-left: 3px solid var(--ws-amber); }
@@ -1166,7 +1177,7 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
   font-weight: 500;
 }
 
-/* 评分待更新：最近一次完整日扫未刷新该标的评分，已退出高置信排序 */
+/* 评分待更新：最近一次完整日扫未刷新该标的评分，已退出多通道共振组 */
 .radar-workspace .stale-score-tag {
   font-size: var(--ws-font-xs);
   color: var(--ws-red);
@@ -1186,7 +1197,7 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
   font-weight: 500;
 }
 
-/* 基本面未覆盖（软门槛提示）：高置信组中无基本面档案 */
+/* 基本面未覆盖（软门槛提示）：共振组中无基本面档案 */
 .radar-workspace .fundamental-uncovered-tag {
   font-size: var(--ws-font-xs);
   color: var(--ws-blue);
@@ -1248,9 +1259,10 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
+  min-width: 24px;
+  height: 20px;
+  padding:0 5px;
+  border-radius: var(--ws-radius-sm);
   font-size: var(--ws-font-xs);
   font-weight: 600;
   flex-shrink: 0;
@@ -1270,6 +1282,7 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
 .radar-workspace .card-row-meta {
   display: flex;
   align-items: center;
+  flex-wrap:wrap;
   gap: var(--ws-space-2);
 }
 .radar-workspace .cov-tag {
@@ -1287,7 +1300,7 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
   border-radius: var(--ws-radius-sm);
 }
 
-/* bucket 标签（候选池卡片，区分高置信机会/待确认信号/风险预警） */
+/* bucket 标签（候选池卡片，区分多通道共振/待确认信号/风险预警） */
 .radar-workspace .bucket-tag {
   font-size: var(--ws-font-xs);
   padding: 1px 6px;
@@ -1297,6 +1310,7 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
 .radar-workspace .bucket-tag-risk_review { color: var(--ws-red); background: var(--ws-red-soft); }
 .radar-workspace .bucket-tag-cross_confirm { color: var(--ws-green); background: var(--ws-green-soft, #ecfdf5); }
 .radar-workspace .bucket-tag-new_signal { color: var(--ws-blue); background: var(--ws-blue-soft); }
+.radar-workspace .symbol-card .bucket-tag { display:none; }
 
 /* 四问空状态文案：muted 样式（避免用户把空白误读为系统故障） */
 .radar-workspace .qq-answer-muted {

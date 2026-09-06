@@ -312,18 +312,18 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
   const DIR_SHORT = { positive: '正', negative: '负', neutral: '中' };
 
   // 研究候选池分桶标签（简洁功能型命名，用于卡片标签和详情展示）
-  // 候选池 3 组布局：困境反转 → 高置信机会 → 待确认信号
+  // 候选池 3 组布局：困境反转 → 多通道共振 → 待确认信号
   // bucket 字段由服务端返回，用于分组展示和卡片色标；组间顺序由服务端 API 决定。
   const BUCKET_LABELS = {
     risk_review: '困境反转',
-    cross_confirm: '高置信机会',
+    cross_confirm: '多通道共振',
     new_signal: '待确认信号',
     audit_pending: '待审计',
     unscored: '无评分',
   };
   const BUCKET_HINTS = {
     risk_review: '负面信号+正向证据并存，潜在困境反转候选',
-    cross_confirm: '多通道且高评分，研究排序分非收益预测',
+    cross_confirm: '两个以上正向通道共同指向，仅表示研究证据共振，不代表基本面已核验',
     new_signal: '单通道或中低评分，待进一步确认',
     audit_pending: '资产分类未审计，暂按普通股处理',
     unscored: '尚无当前评分',
@@ -401,15 +401,15 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
       ? '<span class="audit-pending-tag" title="资产分类未审计，暂按普通股处理">资产待审计</span>'
       : '';
 
-    // 评分待更新标签（最近一次完整日扫未刷新该标的评分，已退出高置信排序）
+    // 评分待更新标签（最近一次完整日扫未刷新该标的评分，已退出多通道共振组）
     const staleTag = isQueueItem && coverage && coverage.score_stale
-      ? '<span class="stale-score-tag" title="最近一次完整日扫未刷新该标的评分，暂不参与高置信排序">数据待更新</span>'
+      ? '<span class="stale-score-tag" title="最近一次完整日扫未刷新该标的评分，暂不进入多通道共振组">数据待更新</span>'
       : '';
 
-    // 基本面未覆盖标签（软门槛：高置信组中无基本面档案的标的提示核验基本面，
+    // 基本面未覆盖标签（软门槛：共振组中无基本面档案的标的提示核验基本面，
     // 负向基本面已由困境反转分桶承接，不在此重复标注）
     const fundamentalTag = isQueueItem && bucket === 'cross_confirm' && s.fundamental_coverage === 'uncovered'
-      ? '<span class="fundamental-uncovered-tag" title="尚无基本面档案（基本面通道覆盖中），高置信结论仅基于技术/事件/趋势，请人工核验基本面">基本面未覆盖</span>'
+      ? '<span class="fundamental-uncovered-tag" title="尚无基本面档案；当前共振只来自技术、事件或趋势通道">基本面未覆盖</span>'
       : '';
 
     // 困境反转正向证据（负面事件 + 正向证据并存，解释为什么负面标的仍值得研究）
@@ -418,7 +418,7 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
       ? '<span class="reversal-tag" title="负面事件与' + esc(reversalChannel) + '正向证据并存（困境反转）">正向证据·' + esc(reversalChannel) + '</span>'
       : '';
 
-    // bucket 标签（候选池卡片才显示，让用户区分高置信机会/待确认信号/风险预警）
+    // bucket 标签（候选池卡片才显示，让用户区分多通道共振/待确认信号/风险预警）
     const bucketTag = isQueueItem && s.bucket && BUCKET_LABELS[s.bucket]
       ? '<span class="bucket-tag bucket-tag-' + s.bucket + '" title="' + esc(BUCKET_HINTS[s.bucket] || '') + '">' + esc(BUCKET_LABELS[s.bucket]) + '</span>'
       : '';
@@ -451,7 +451,7 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
     );
   }
 
-  // 机会候选池：3 组布局（困境反转 → 高置信机会 → 待确认信号）。
+  // 机会候选池：3 组布局（困境反转 → 多通道共振 → 待确认信号）。
   // 服务端已按 配额优先级（risk → cross_confirm → new_signal）+ 市场轮转排好序，
   // 前端只按 bucket 分组、不重排，保证分组配额与市场平衡不被本地排序打散。
   // 搜索已由服务端完成（覆盖整个候选池，而非仅已加载的 30 条）。
@@ -489,7 +489,7 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
       html += '</div>';
     }
 
-    // 组 2：高置信机会（多通道+高分，cross_confirm）
+    // 组 2：多通道共振（多通道+高分，cross_confirm）
     if (crossItems.length > 0) {
       const bk = state.queueBuckets && state.queueBuckets.cross_confirm;
       const countText = bk && bk.total > crossItems.length
@@ -831,7 +831,7 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
       h += '<div class="summary-conflict-banner">结论冲突、需人工判断</div>';
     }
     h += '<div class="summary-head">';
-    // 候选类型（queue 条目才有）：困境反转/高置信机会/待确认信号
+    // 候选类型（queue 条目才有）：困境反转/多通道共振/待确认信号
     if (queueItem && queueItem.bucket && BUCKET_LABELS[queueItem.bucket]) {
       h += '<span class="bucket-tag bucket-tag-' + esc(queueItem.bucket) + '" title="' + esc(BUCKET_HINTS[queueItem.bucket] || '') + '">' + esc(BUCKET_LABELS[queueItem.bucket]) + '</span>';
     }
@@ -849,7 +849,7 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
     }
     // 数据时间：评分未随最近完整日扫刷新 → 显式提示（审计：页面日期不代表数据真的更新到了该日）
     if (queueItem && queueItem.coverage && queueItem.coverage.score_stale) {
-      h += '<span class="summary-meta-item summary-stale" title="最近一次完整日扫未刷新该标的评分，暂不参与高置信排序">数据待更新</span>';
+      h += '<span class="summary-meta-item summary-stale" title="最近一次完整日扫未刷新该标的评分，暂不进入多通道共振组">数据待更新</span>';
     } else if (asOf != null) {
       h += '<span class="summary-meta-item">评分来源 ' + formatTime(asOf) + '</span>';
     }

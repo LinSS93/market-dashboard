@@ -21,9 +21,16 @@ function check(condition, label) {
 }
 function bar(date, open, high, low, close) { return { date, open, high, low, close, volume: 1000 }; }
 function analysis(symbol, asOfDate, opportunityStage = 'AWAIT_CONFIRMATION', executionAction = 'NONE') {
+  const strategy = {
+    strategyVersion:'strategy-test', profileId:'balanced', profileVersion:'balanced-test', available:true,
+    action:executionAction === 'OPEN' ? 'BUY' : 'WATCH', actionLabel:executionAction === 'OPEN' ? '入场形态' : '关注',
+    setup:{ key:'trend_pullback' }, regime:{ key:'uptrend' }, risk:{ level:'low' }, dataQuality:{ level:'ok' },
+  };
   return {
-    symbol, market: 'US', asOfDate, currentPrice: 100, atr: 5, sma20: 100, score: 0.7,
-    tradePlan: { action: executionAction === 'OPEN' ? 'BUY' : 'WATCH', setup: { key: 'trend_pullback' }, regime: { key: 'trend' }, marketRegime: { key: 'uptrend' } },
+    symbol, market:'US', asOfDate, currentPrice:100, atr:5, sma20:100,
+    signalProfiles:{ effectiveProfileId:'balanced', profiles:{ balanced:{
+      profileId:'balanced', profileVersion:'balanced-test', available:true, score:0.7, signal:'BULLISH', direction:1, strategy,
+    } } },
     swingDecision: {
       opportunityStage, executionAction, signalAvailable: true, validSessions: 3,
       zones: { confirmation: 105, invalidation: 95, reassessment: 112 },
@@ -106,6 +113,21 @@ check(operations.status === 'blocked' && operations.counts.healthy === 1 && oper
 
 const symbolSummary = getScenarioResearchSymbolSummary(db, { symbol:'TEST', market:'US' });
 check(symbolSummary.researchOnly && symbolSummary.doesNotChangeFormalAction && symbolSummary.observations === 1 && symbolSummary.mature === 1 && !('snapshot' in symbolSummary), 'per-symbol research summary exposes frozen sample counts without exposing snapshot terms');
+
+db.prepare(`INSERT INTO scenario_research_observations(
+  captured_at,as_of_date,symbol,market,state,source_action,scenario_kind,signal_available,engine_version,ledger_version,snapshot_json
+) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(
+  900, '2026-03-03', 'OLD', 'US', 'READY', 'OPEN', 'bullish_entry', 1,
+  'retired-engine', 'scenario-shadow-ledger-v2', '{}',
+);
+const isolatedStatus = getScenarioShadowStatus(db);
+const isolatedDashboard = getScenarioResearchDashboard(db);
+check(
+  isolatedStatus.totalObservations === 2
+    && isolatedDashboard.summary.observations === 2
+    && !isolatedDashboard.recent.some(row => row.symbol === 'OLD'),
+  'retired ledger versions remain stored for audit but cannot enter current personality research cohorts',
+);
 
 const legacy = new Database(':memory:');
 legacy.exec('CREATE TABLE scenario_research_observations (id INTEGER PRIMARY KEY)');

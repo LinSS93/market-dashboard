@@ -8,8 +8,9 @@ import {
   chaseGate,
   isChaseGateEnabledForRegime,
 } from './signal_scoring.mjs';
+import { selectedStockProfile, selectedStockStrategy } from './stock_signal_contract.mjs';
 
-export const STOCK_DECISION_ARBITER_VERSION = 'stock-decision-arbiter-v4-evidence-advisory';
+export const STOCK_DECISION_ARBITER_VERSION = 'stock-decision-arbiter-v6-three-assessments';
 export const STOCK_EXECUTION_RISK_CRITICAL = 55;
 export const DEFAULT_STOCK_TRANCHE_POLICY = Object.freeze({ OPEN: 25, ADD: 25, REDUCE: 30 });
 
@@ -36,24 +37,25 @@ function normalizedSignal(value) {
   return String(value || '').trim().toUpperCase().replaceAll('_', ' ');
 }
 
+function finiteOrNull(value) {
+  if (value == null || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
 function activeProfileSnapshot(analysis, profileIdOverride = null) {
-  const bundle = analysis?.signalProfiles;
-  const requestedId = String(profileIdOverride || bundle?.effectiveProfileId || 'balanced').toLowerCase();
-  const profileId = bundle?.profiles?.[requestedId] ? requestedId : 'balanced';
-  const profile = bundle?.profiles?.[profileId];
-  if (profileId !== 'balanced') {
-    if (profile?.role === 'confirm' && profile.confirmed !== true) {
-      return {
-        profileId, score:0, signal:'NEUTRAL', source:'profile_awaiting_confirmation',
-        rawScore:Number.isFinite(Number(profile.score)) ? Number(profile.score) : null,
-        rawSignal:profile.signal || null,
-      };
-    }
-    return profile?.available
-      ? { profileId, score: Number(profile.score), signal: profile.signal, source: 'profile_bundle' }
-      : { profileId, score: null, signal: null, source: 'profile_unavailable' };
+  const profile = selectedStockProfile(analysis, profileIdOverride);
+  if (!profile) return { profileId:null, score:null, signal:null, source:'profile_missing' };
+  if (profile?.role === 'confirm' && profile.confirmed !== true) {
+    return {
+      profileId:profile.profileId, score:0, signal:'NEUTRAL', source:'profile_awaiting_confirmation',
+      rawScore:Number.isFinite(Number(profile.score)) ? Number(profile.score) : null,
+      rawSignal:profile.signal || null,
+    };
   }
-  return { profileId: 'balanced', score: Number(analysis?.score), signal: analysis?.signal, source: 'formal_analysis' };
+  return profile.available
+    ? { profileId:profile.profileId, score:Number(profile.score), signal:profile.signal, source:'profile_bundle' }
+    : { profileId:profile.profileId, score:null, signal:null, source:'profile_unavailable' };
 }
 
 export function resolveActiveTechnicalDirection(analysis, { profileId = null } = {}) {
@@ -70,17 +72,13 @@ export function resolveActiveTechnicalDirection(analysis, { profileId = null } =
 }
 
 export function getStockExecutionReadiness(analysis, context, { profileId = null } = {}) {
-  const selectedId = String(profileId || analysis?.signalProfiles?.effectiveProfileId || 'balanced').toLowerCase();
-  const plan = analysis?.signalProfiles?.profiles?.[selectedId]?.strategy || analysis?.tradePlan || {};
+  const plan = selectedStockStrategy(analysis, profileId) || {};
+  const timing = plan.timingAssessment || {};
   const technicalAction = normalizedSignal(plan.action || 'WAIT');
   const setupKey = String(plan.setup?.key || 'none').toLowerCase();
   const setupLabel = plan.setup?.label || '等待确认';
   const dataQuality = String(plan.dataQuality?.level || '').toLowerCase();
   const executionContext = context?.executionContext || {};
-  const validationEvidence = executionContext.validationEvidence || {
-    level: 'insufficient', label: '历史样本待积累',
-    reasons: ['历史验证尚未完成或样本不足，不改变当前技术形态判断'],
-  };
   const readySetups = new Set(['trend_pullback', 'breakout_follow', 'mean_reversion']);
 
   if (!plan.action || dataQuality !== 'ok' || analysis?.daily === false || context?.valid === false) {
@@ -89,17 +87,17 @@ export function getStockExecutionReadiness(analysis, context, { profileId = null
       technicalAction, setupKey, setupLabel, reason: '技术计划或正式日线数据尚未就绪。',
     };
   }
+  if (timing.status === 'invalidated') {
+    return { status:'risk_off', label:timing.label, tone:'bear', technicalAction, setupKey, setupLabel, reason:timing.reason };
+  }
+  if (timing.status === 'extended') {
+    return { status:'defer', label:timing.label, tone:'amber', technicalAction, setupKey, setupLabel, reason:timing.reason };
+  }
   if (technicalAction === 'SELL' || setupKey === 'risk_off') {
     return {
       status: 'risk_off', label: '技术面偏空', tone: 'bear',
       technicalAction, setupKey, setupLabel,
       reason: `技术计划为${plan.actionLabel || technicalAction} / ${setupLabel}。`,
-    };
-  }
-  if (executionContext.riskHigh === true) {
-    return {
-      status: 'defer', label: '高风险，暂缓执行', tone: 'watch',
-      technicalAction, setupKey, setupLabel, reason: '个股波动或数据风险偏高，暂不新增仓位。',
     };
   }
   if (technicalAction === 'REDUCE' || setupKey === 'extended') {
@@ -109,7 +107,15 @@ export function getStockExecutionReadiness(analysis, context, { profileId = null
       reason: `技术计划为${plan.actionLabel || technicalAction} / ${setupLabel}，暂不新增仓位。`,
     };
   }
-  if (['BUY', 'ADD'].includes(technicalAction) && readySetups.has(setupKey)) {
+  // A blocker is meaningful only after a bullish opportunity exists.  Neutral
+  // or waiting profiles stay NO_SETUP instead of being mislabeled BLOCKED.
+  if (executionContext.riskHigh === true && ['BUY', 'ADD'].includes(technicalAction) && readySetups.has(setupKey)) {
+    return {
+      status: 'defer', label: '高风险，暂缓执行', tone: 'watch',
+      technicalAction, setupKey, setupLabel, reason: '偏多形态已经出现，但个股波动或数据风险偏高，暂不新增仓位。',
+    };
+  }
+  if ((timing.status == null || timing.status === 'ready') && ['BUY', 'ADD'].includes(technicalAction) && readySetups.has(setupKey)) {
     const pricePlan = context?.zones || {};
     if (pricePlan.available !== true || pricePlan.status !== 'entry') {
       return {
@@ -118,8 +124,8 @@ export function getStockExecutionReadiness(analysis, context, { profileId = null
         reason: pricePlan.reason || '当前形态缺少可验证的锚点，不使用通用 ATR 价位兜底。',
       };
     }
-    const confirmation = Number(pricePlan.confirmation);
-    const currentPrice = Number(analysis?.currentPrice);
+    const confirmation = finiteOrNull(pricePlan.confirmation);
+    const currentPrice = finiteOrNull(analysis?.currentPrice);
     if (Number.isFinite(confirmation) && Number.isFinite(currentPrice) && currentPrice < confirmation) {
       return {
         status: 'price_wait', label: '等待价格确认', tone: 'watch',
@@ -127,25 +133,48 @@ export function getStockExecutionReadiness(analysis, context, { profileId = null
         reason: `当前价 ${currentPrice} 尚未站上人格确认价 ${confirmation}。`,
       };
     }
-    const evidenceAdvisory = validationEvidence.level === 'weak'
-      ? '历史验证偏弱，但它只影响证据强度，不否定当前形态。'
-      : validationEvidence.level === 'caution'
-        ? '历史验证表现不稳定，但它只影响证据强度，不否定当前形态。'
-        : validationEvidence.level === 'insufficient'
-          ? '历史样本尚未充分积累，但它不阻止当前形态判断。' : '';
     return {
       status: 'ready',
-      label: validationEvidence.level === 'supportive' ? '形态已确认' : `形态已确认 · ${validationEvidence.label}`,
-      tone: validationEvidence.level === 'supportive' ? 'bull' : 'watch',
-      technicalAction, setupKey, setupLabel, validationEvidence,
-      reason: `技术计划为${plan.actionLabel || technicalAction} / ${setupLabel}，已具备执行形态。${evidenceAdvisory}`,
+      label: '形态已确认',
+      tone: 'bull',
+      technicalAction, setupKey, setupLabel,
+      reason: `技术计划为${plan.actionLabel || technicalAction} / ${setupLabel}，已具备执行形态。`,
     };
+  }
+  if (timing.status === 'confirming') {
+    return { status:'confirming', label:timing.label, tone:'watch', technicalAction, setupKey, setupLabel, reason:timing.reason };
+  }
+  if (timing.status === 'forming') {
+    return { status:'forming', label:timing.label, tone:'watch', technicalAction, setupKey, setupLabel, reason:timing.reason };
   }
   return {
     status: 'waiting', label: '等待形态确认', tone: 'watch',
     technicalAction, setupKey, setupLabel,
     reason: `技术计划为${plan.actionLabel || technicalAction} / ${setupLabel}，尚未形成执行形态。`,
   };
+}
+
+function buildRiskAssessment({ analysis, context, executionRisk, executionReadiness, gates, hasPosition, currentPrice, invalidation }) {
+  if (executionReadiness.status === 'unavailable') {
+    return { status:'unavailable', label:'无法评估', tone:'neutral', reason:executionReadiness.reason };
+  }
+  if (hasPosition && Number.isFinite(currentPrice) && Number.isFinite(invalidation) && currentPrice <= invalidation) {
+    return { status:'exit', label:'退出优先', tone:'bear', reason:'价格已经跌破当前计划失效位。' };
+  }
+  const riskScore = Number(executionRisk?.score);
+  if (Number.isFinite(riskScore) && riskScore >= STOCK_EXECUTION_RISK_CRITICAL) {
+    return { status:hasPosition ? 'exit' : 'blocked', label:hasPosition ? '降低仓位' : '风险阻断', tone:'bear', reason:`执行风险 ${riskScore.toFixed(0)} 达到临界线。` };
+  }
+  if (executionReadiness.status === 'risk_off') {
+    return { status:hasPosition ? 'exit' : 'blocked', label:hasPosition ? '降低仓位' : '风险阻断', tone:'bear', reason:executionReadiness.reason };
+  }
+  if (gates.blocked) return { status:'blocked', label:'风险阻断', tone:'amber', reason:gates.reasons.join('；') };
+  const planRisk = selectedStockStrategy(analysis, context?.profileId)?.risk;
+  if (planRisk?.level === 'high' || executionReadiness.status === 'defer') {
+    return { status:'caution', label:'风险偏高', tone:'amber', reason:planRisk?.detail || executionReadiness.reason };
+  }
+  if (planRisk?.level === 'medium') return { status:'caution', label:'风险一般', tone:'watch', reason:planRisk.detail };
+  return { status:'pass', label:'风险可控', tone:'bull', reason:planRisk?.detail || '未发现阻断当前计划的明确风险。' };
 }
 
 function presentationFor(opportunityStage, executionAction) {
@@ -200,7 +229,6 @@ function entryGates({ analysis, context, extSessionRisk }) {
 export function arbitrateStockDecision({
   analysis,
   context,
-  scoreResult,
   executionRisk = null,
   extSessionRisk = null,
   tranchePolicy = {},
@@ -208,18 +236,30 @@ export function arbitrateStockDecision({
 } = {}) {
   const position = context?.position || {};
   const hasPosition = position.hasPosition === true;
-  const currentPrice = Number(analysis?.currentPrice);
-  const invalidation = Number(context?.zones?.invalidation);
+  const currentPrice = finiteOrNull(analysis?.currentPrice);
+  const invalidation = finiteOrNull(context?.zones?.invalidation);
   const pnlPct = Number.isFinite(Number(position.pnlPct)) ? Number(position.pnlPct) : null;
   const technicalDirection = resolveActiveTechnicalDirection(analysis, { profileId });
   const executionReadiness = getStockExecutionReadiness(analysis, context, { profileId: technicalDirection.profileId });
   const gates = entryGates({ analysis, context, extSessionRisk });
   const tranche = normalizeTranchePolicy(tranchePolicy);
+  const riskAssessment = buildRiskAssessment({ analysis, context, executionRisk, executionReadiness, gates, hasPosition, currentPrice, invalidation });
+  const directionAssessment = {
+    status:technicalDirection.key, label:technicalDirection.label,
+    tone:technicalDirection.direction > 0 ? 'bull' : technicalDirection.direction < 0 ? 'bear' : 'neutral',
+    score:technicalDirection.score, reason:technicalDirection.label,
+  };
+  const timingAssessment = selectedStockStrategy(analysis, technicalDirection.profileId)?.timingAssessment || {
+    status:executionReadiness.status, label:executionReadiness.label, tone:executionReadiness.tone, reason:executionReadiness.reason,
+  };
   const common = {
     arbiterVersion: STOCK_DECISION_ARBITER_VERSION,
     stateSource: 'stock_decision_arbiter',
     technicalDirection,
     executionReadiness,
+    directionAssessment,
+    timingAssessment,
+    riskAssessment,
     chaseGate: gates.chase,
     extSessionGate: gates.ext,
     profileId: technicalDirection.profileId,
@@ -234,8 +274,8 @@ export function arbitrateStockDecision({
     if (executionReadiness.status === 'unavailable') return 'DATA_UNAVAILABLE';
     if (executionReadiness.status === 'risk_off') return 'RISK_OFF';
     if (executionReadiness.status === 'defer') return 'BLOCKED';
-    if (executionReadiness.status === 'price_wait') return 'AWAIT_CONFIRMATION';
-    if (executionReadiness.status === 'price_plan_unavailable') return 'FORMING';
+    if (['price_wait', 'confirming'].includes(executionReadiness.status)) return 'AWAIT_CONFIRMATION';
+    if (['price_plan_unavailable', 'forming'].includes(executionReadiness.status)) return 'FORMING';
     if (executionReadiness.status === 'ready') return 'READY';
     return technicalDirection.direction > 0 ? 'FORMING' : 'NO_SETUP';
   };
@@ -267,13 +307,10 @@ export function arbitrateStockDecision({
   }
 
   const bullishReady = technicalDirection.direction > 0 && executionReadiness.status === 'ready';
-  const evidenceNote = executionReadiness.validationEvidence?.level === 'weak' ? '；历史验证偏弱，仅作谨慎提示'
-    : executionReadiness.validationEvidence?.level === 'caution' ? '；历史验证不稳定，仅作谨慎提示'
-      : executionReadiness.validationEvidence?.level === 'insufficient' ? '；历史样本尚待积累' : '';
   if (hasPosition) {
     if (!bullishReady) return finish(decisionResult(stageFromReadiness(), 'HOLD', `${executionReadiness.reason}已有仓位保持不变。`, { decisionCode:'HOLD_WAITING' }));
     if (gates.blocked) return finish(decisionResult('BLOCKED', 'HOLD', `${gates.reasons.join('；')}，当前不加仓。`, { decisionCode:'ENTRY_BLOCKED' }));
-    return finish(decisionResult('READY', 'ADD', `技术方向偏多且执行形态已确认${evidenceNote}；按加仓设置执行 ${tranche.ADD}%。`, { decisionCode:'ADD_READY', tranchePct: tranche.ADD }));
+    return finish(decisionResult('READY', 'ADD', `技术方向偏多且执行形态已确认；按加仓设置执行 ${tranche.ADD}%。`, { decisionCode:'ADD_READY', tranchePct: tranche.ADD }));
   }
 
   if (!bullishReady) {
@@ -284,7 +321,7 @@ export function arbitrateStockDecision({
   if (gates.blocked) {
     return finish(decisionResult('BLOCKED', 'NONE', `${gates.reasons.join('；')}，暂不建仓。`, { decisionCode:'ENTRY_BLOCKED' }));
   }
-  return finish(decisionResult('READY', 'OPEN', `技术方向偏多且执行形态已确认${evidenceNote}；按试仓设置执行 ${tranche.OPEN}%。`, { decisionCode:'OPEN_READY', tranchePct: tranche.OPEN }));
+  return finish(decisionResult('READY', 'OPEN', `技术方向偏多且执行形态已确认；按试仓设置执行 ${tranche.OPEN}%。`, { decisionCode:'OPEN_READY', tranchePct: tranche.OPEN }));
 }
 
 function uniqueReasonTexts(values = []) {
@@ -309,8 +346,8 @@ export function buildStockDecisionExplanation(decision = {}) {
     decision.stateSource && decision.stateSource !== 'stock_decision_arbiter' ? decision.summary : null,
     decision.riskOverride === true ? '产品风险覆盖已限制当前动作。' : null,
   ]);
-  const confirmation = Number(decision.zones?.confirmation);
-  const invalidation = Number(decision.zones?.invalidation);
+  const confirmation = finiteOrNull(decision.zones?.confirmation);
+  const invalidation = finiteOrNull(decision.zones?.invalidation);
   let nextUpgradeCondition = null;
   if (action === 'NONE' && ['NO_SETUP', 'FORMING', 'AWAIT_CONFIRMATION', 'BLOCKED'].includes(stage)) {
     nextUpgradeCondition = blockingReasons[0] || readiness.reason || '等待技术方向与执行形态同时确认。';

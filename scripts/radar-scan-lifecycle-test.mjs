@@ -15,9 +15,15 @@ import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setRadarDbForTest, clearRadarDbForTest } from '../radar_schema.mjs';
+import { setRadarDbForTest, clearRadarDbForTest, releaseLeaseOwned } from '../radar_schema.mjs';
 import { setNowFnForTest, resetNowFnForTest } from '../radar_market.mjs';
-import { runScan, reconcileStaleScanJobs, resetThrottleForTest } from '../radar_scanner.mjs';
+import { runScan, reconcileStaleScanJobs, reconcileNonTradingDayScanJobs, resetThrottleForTest } from '../radar_scanner.mjs';
+import { isTradingDate } from '../market_calendar.mjs';
+import {
+  findNextDailyMarketForTest,
+  resetSchedulerStateForTest,
+  setMarketStatusOverrideForTest,
+} from '../radar_scheduler.mjs';
 
 let pass = 0, fail = 0;
 function assert(cond, msg) {
@@ -283,7 +289,7 @@ console.log('\n=== 用例 3：retry 上限（达限不重置；无重试余地�
 
 // 3a. retry_count=1 的 failed 可被 reset 重试；retry_count=2（达上限）的不再重试
 const retryJobId = createJobWithItems({
-  trigger: 'scheduled_daily', tradeDate: today, status: 'partial', leaseExpiresAt: null,
+  trigger: 'retry_probe', tradeDate: today, status: 'partial', leaseExpiresAt: null,
   retryAfter: NOW - 1000,  // 退避已到期
   items: [
     { symbol: 'AAPL', status: 'succeeded' },
@@ -292,7 +298,7 @@ const retryJobId = createJobWithItems({
   ],
 });
 resetThrottleForTest();
-const retryResult = await runScan({ market: 'US', trigger: 'scheduled_daily', scanMode: 'official' });
+const retryResult = await runScan({ market: 'US', trigger: 'retry_probe', scanMode: 'official' });
 assert(retryResult.status === 'complete' || retryResult.status === 'partial',
   '重试轮返回有效状态: ' + retryResult.status);
 const retryJob = getJob(retryJobId);
@@ -341,6 +347,63 @@ assert(backoffJob.status === 'partial', '退避未到期 + coverage 25%<30% 保�
 assert(backoffJob.retry_after != null && backoffJob.retry_after > NOW, 'partial 保留 retry_after 供下轮续跑');
 const backoffMsft = db.prepare(`SELECT * FROM radar_v2_scan_items WHERE job_id = ? AND symbol = 'MSFT'`).get(backoffJobId);
 assert(backoffMsft.status === 'failed', '退避期内不 reset 可重试项（留到退避到期）');
+
+// ============================================================
+// 用例 4：非交易日正式扫描隔离 + lease owner 保护
+// ============================================================
+console.log('\n=== 用例 4：非交易日 scheduled_daily 隔离 + owner 安全释放 ===');
+
+assert(isTradingDate('US', '2026-09-04') === true, '2026-09-04 是 US 交易日');
+assert(isTradingDate('US', '2026-09-05') === false, '2026-09-05 周六不是 US 交易日');
+assert(isTradingDate('US', '2026-09-07') === false, '2026-09-07 劳工节不是 US 交易日');
+
+resetSchedulerStateForTest();
+setMarketStatusOverrideForTest({ verified: true, open: false, session: 'weekend', date: '2026-09-05' });
+assert(findNextDailyMarketForTest() == null, '周末调度器不创建新的 scheduled_daily job');
+setMarketStatusOverrideForTest(null);
+
+const weekendRunId = Number(db.prepare(`
+  INSERT INTO radar_v2_runs
+    (market, trigger, status, started_at, completed_at, candidates_count, error, config_json)
+  VALUES ('US', 'scheduled_daily', 'complete', ?, ?, 1, NULL, '{}')
+`).run(NOW, NOW + 1000).lastInsertRowid);
+const weekendJobId = createJobWithItems({
+  trigger: 'scheduled_daily', tradeDate: '2026-09-05', status: 'complete',
+  leaseExpiresAt: null, items: [{ symbol: 'AAPL', status: 'succeeded' }],
+});
+db.prepare('UPDATE radar_v2_scan_jobs SET run_id = ? WHERE id = ?').run(weekendRunId, weekendJobId);
+
+const validRunId = Number(db.prepare(`
+  INSERT INTO radar_v2_runs
+    (market, trigger, status, started_at, completed_at, candidates_count, error, config_json)
+  VALUES ('US', 'scheduled_daily', 'complete', ?, ?, 1, NULL, '{}')
+`).run(NOW - 86400000, NOW - 86400000 + 1000).lastInsertRowid);
+const validJobId = createJobWithItems({
+  trigger: 'scheduled_daily', tradeDate: '2026-09-04', status: 'complete',
+  leaseExpiresAt: null, items: [{ symbol: 'MSFT', status: 'succeeded' }],
+});
+db.prepare('UPDATE radar_v2_scan_jobs SET run_id = ? WHERE id = ?').run(validRunId, validJobId);
+
+const invalidRec = reconcileNonTradingDayScanJobs();
+assert(invalidRec.ok === true && invalidRec.reconciled === 1, '只隔离 1 个周末正式 job');
+assert(getJob(weekendJobId).status === 'failed', '周末 job 标记 failed');
+const weekendRun = db.prepare('SELECT * FROM radar_v2_runs WHERE id = ?').get(weekendRunId);
+assert(weekendRun.status === 'failed', '周末 run 标记 failed');
+assert(weekendRun.error === 'invalid_non_trading_day_scheduled_scan', '周末 run 写入明确审计原因');
+assert(getJob(validJobId).status === 'complete', '真实交易日 job 保持 complete');
+assert(db.prepare('SELECT status FROM radar_v2_runs WHERE id = ?').get(validRunId).status === 'complete', '真实交易日 run 保持 complete');
+assert(reconcileNonTradingDayScanJobs().reconciled === 0, '非交易日隔离重复执行幂等');
+
+const leaseJobId = createJobWithItems({
+  trigger: 'lease_owner_probe', tradeDate: today, status: 'running',
+  leaseExpiresAt: NOW + 60000, items: [{ symbol: 'NVDA', status: 'pending' }],
+});
+db.prepare("UPDATE radar_v2_scan_jobs SET lease_owner='new-worker' WHERE id=?").run(leaseJobId);
+const oldRelease = releaseLeaseOwned.run({ id: leaseJobId, lease_owner: 'old-worker', updated_at: NOW + 1 });
+assert(oldRelease.changes === 0, '旧 worker 不能释放新 worker 的 lease');
+assert(getJob(leaseJobId).lease_owner === 'new-worker', '新 worker lease 保持不变');
+const newRelease = releaseLeaseOwned.run({ id: leaseJobId, lease_owner: 'new-worker', updated_at: NOW + 2 });
+assert(newRelease.changes === 1 && getJob(leaseJobId).lease_owner == null, '当前 owner 可以正常释放 lease');
 
 // ============================================================
 // 清理

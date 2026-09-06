@@ -7,8 +7,6 @@
   const STATE_LABEL = {
     DATA_UNAVAILABLE:'数据不足', NO_SETUP:'等待机会', FORMING:'机会形成中', AWAIT_CONFIRMATION:'等待确认',
     BLOCKED:'看多受阻', READY:'可以执行', RISK_OFF:'风险回避',
-    WATCH:'历史·观察', PROBE:'历史·试仓', ADD:'历史·加仓', HOLD:'历史·持有',
-    TRIM:'历史·减仓', EXIT:'历史·清仓', AVOID:'历史·回避',
   };
   const EXECUTION_LABEL = { OPEN:'可试仓', ADD:'可加仓', HOLD:'持有观察', REDUCE:'减仓', CLOSE:'清仓', NONE:'不交易' };
   const OUTCOME_LABEL = { target_hit:'历史·触及目标', reassessment_hit:'触及复核位', invalidated:'失效', unresolved:'期满未决', confirmation_expired:'确认过期', expired:'已过期', reclaimed:'价格收复', risk_continues:'风险延续', pending:'待结算', insufficient:'数据不足' };

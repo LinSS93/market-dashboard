@@ -29,15 +29,18 @@ check(rsiWilder([10, 11, 12, 13, 14, 15, 16], 6) === 100,
   'RSI6 returns 100 for an all-gain sequence');
 
 const engine = readFileSync(new URL('../stock_engine.mjs', import.meta.url), 'utf8');
+const profiles = readFileSync(new URL('../stock_signal_profiles.mjs', import.meta.url), 'utf8');
+const strategies = readFileSync(new URL('../stock_profile_strategy.mjs', import.meta.url), 'utf8');
 const stockUi = readFileSync(new URL('../app/stock.js', import.meta.url), 'utf8');
 check(!engine.includes('rsi14') && !engine.includes('RSI14'),
   'stock signal engine must not retain an RSI14 input or label');
 check(engine.includes('rsiWilder(closes, RSI_PERIODS.decision)') && engine.includes('rsi12'),
   'formal daily voting must calculate and use RSI12');
-check(engine.includes('rsi: rsi12, macdHist')
+check(profiles.includes('const rsiPeriod = parameters.rsi.period')
+  && strategies.includes('const rsi = finite(metrics.rsi)')
   && engine.includes("selectedProfileId === 'responsive' ? analysis?.rsi6")
   && engine.includes(": analysis?.rsi12"),
-  'each strategy uses its declared RSI period and the balanced formal setup remains RSI12');
+  'each personality strategy consumes its declared RSI period and balanced execution context remains RSI12');
 check(engine.includes('rsiWilder(closes, RSI_PERIODS.fast)') && engine.includes('rsiWilder(closes, RSI_PERIODS.slow)'),
   'daily analysis must expose RSI6 and RSI24 alongside the formal RSI12');
 check(stockUi.includes("rsi12:'RSI12'") && stockUi.includes("rsi24:'RSI24'"),

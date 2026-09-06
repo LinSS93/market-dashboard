@@ -67,7 +67,7 @@ function toEvents(symbol, market, bars, benchmarkRows, startIndex) {
         closes: seedPrefix.map(row => row.close),
         volumes: seedPrefix.map(row => row.volume || 0),
         relativeStrength: seedAnalysis.relativeStrength,
-        formalAnalysis: seedAnalysis,
+        sharedMarketContext: seedAnalysis,
       });
       for (const profileId of PROFILE_IDS) previousStates.set(profileId, profileStateSignature(seedBundle.profiles[profileId]));
     }
@@ -81,7 +81,7 @@ function toEvents(symbol, market, bars, benchmarkRows, startIndex) {
       closes: prefix.map(row => row.close),
       volumes: prefix.map(row => row.volume || 0),
       relativeStrength: analysis.relativeStrength,
-      formalAnalysis: analysis,
+      sharedMarketContext: analysis,
     });
     for (const profileId of PROFILE_IDS) {
       const profile = bundle.profiles[profileId];

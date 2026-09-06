@@ -32,8 +32,12 @@ import { interpretNews, getNewsInterpretations, refreshNewsInterpretations, getL
 import { getAllGroups } from './grouping.mjs';
 import { getCompanyProfile, generateCompanyProfile, pruneCompanyProfileCache } from './llm_company_profile.mjs';
 // 机会雷达只运行 V2；历史财务归档只由显式迁移命令处理。
-import { scheduleRadar, startAutoAssetAuditLoop } from './radar_scheduler.mjs';
-import { runScan as runRadarScan, getScanStatus as getRadarScanStatus } from './radar_scanner.mjs';
+import { scheduleRadar, startAutoAssetAuditLoop, getSchedulerState as getRadarSchedulerState } from './radar_scheduler.mjs';
+import {
+  runScan as runRadarScan,
+  getScanStatus as getRadarScanStatus,
+  reconcileNonTradingDayScanJobs,
+} from './radar_scanner.mjs';
 import { getTopCandidates as getRadarTopCandidates, getCandidateDetail as getRadarCandidateDetail, getRunHistory as getRadarRunHistory, getScanStats as getRadarScanStats, listDossiers as listRadarDossiers, getDossierDetail as getRadarDossierDetail, listOpportunities as listRadarOpportunities, listDossierEvaluations as listRadarEvaluations, listSymbolsAcrossChannels as listRadarSymbols, getDossiersBySymbol as getRadarDossiersBySymbol, listSparklines as listRadarSparklines, getV2Kline as getRadarKline, listResearchQueue as listRadarResearchQueue, dismissSymbol as dismissRadarSymbol, restoreSymbol as restoreRadarSymbol, listDismissedSymbols as listRadarDismissedSymbols, setAssetAudit as setRadarAssetAudit, getRadarDigestData } from './radar_query_api.mjs';
 import { tryGenerateShadow as tryRadarGenerateShadow, rollbackToDefault as rollbackRadarToDefault, getFeedbackStatus as getRadarFeedbackStatus } from './radar_feedback.mjs';
 import { produceEventDossiers, linkObservationsForMarket, linkObservationsForRun, reconcilePendingRuns } from './radar_dossier_producer.mjs';
@@ -67,10 +71,8 @@ import {
 } from './alert_engine.mjs';
 import { handleCompanyProfilePost } from './server_route_handlers.mjs';
 import { registerMcpRoutes } from './mcp_server.mjs';
-// radar v2→radar 改名兼容 + 运行时配置：模块加载即读取 config/market-dashboard.runtime.env
-// 并归一化旧 RADAR_V2_* 键（幂等）。部署机的常驻链路可能是计划任务直连 node server.mjs
-//（不经启动器），必须在此处自读配置，
-// 否则 RADAR_*_ENABLED 调度开关全部失效。
+// 兼容直接导入 server.mjs 的测试/开发入口。正式入口会在业务模块求值前加载运行时配置；
+// 此处调用保持幂等，但不再承担正式启动顺序保证。
 import { applyRadarRuntimeConfig } from './radar_runtime_config.mjs';
 applyRadarRuntimeConfig();
 
@@ -815,7 +817,10 @@ function checkSignalCooldown(pairId, signal) {
   const BUY_FAMILY = ['STRONG_BUY', 'BUY', 'PROBE', 'ADD'];
   const SELL_FAMILY = ['SELL', 'REDUCE', 'TRIM', 'EXIT', 'AVOID'];
   const nowMs = Date.now();
-  const recentAudit = getTrackerSignalAudit(pairId, 5).filter(r => r.ts >= nowMs - 30*60*1000);
+  // 只让真实交易时段内形成的最终动作参与冷却。盘后研究动作、数据不足状态
+  // 或尚未经过 ETF 风险覆盖的中间信号都不能阻断下一次正式入场。
+  const recentAudit = getTrackerSignalAudit(pairId, 60).filter(r =>
+    r.ts >= nowMs - 30*60*1000 && r.market_state === 'open');
   const oppositeFamily = BUY_FAMILY.includes(signal) ? SELL_FAMILY : SELL_FAMILY.includes(signal) ? BUY_FAMILY : null;
   if (!oppositeFamily || recentAudit.length === 0) return null;
   const lastOpposite = recentAudit.find(r => oppositeFamily.includes(r.final_signal));
@@ -878,7 +883,7 @@ function checkRiskOverrides(pair, ctx, state) {
 }
 
 // 主编排函数（替代原 290 行 computePair）
-async function computePair(pair) {
+async function computePair(pair, runtime = {}) {
   const id = pair.id;
   const etfMarketStatus = getMarketStateFor(String(pair.etf_market || 'HK').toUpperCase());
   const productEntry = getProductEntryStatus(pair);
@@ -899,13 +904,14 @@ async function computePair(pair) {
   // 3. 波动率损耗
   const { volDecayPctAnn, underlyingVolDaily } = computeVolDecay(pair, etf, und, fx, dailyContextForPair);
   // 派生数据
-  const underlyingAnalysis = pair.underlying ? getLatestAnalysis()?.[pair.underlying] || null : null;
+  const analysisSnapshot = runtime.analysisSnapshot || getLatestAnalysis();
+  const underlyingAnalysis = pair.underlying ? analysisSnapshot?.[pair.underlying] || null : null;
   // The tracker refresh must remain non-blocking. Only use the precomputed
   // watchlist analysis cache for this display-only indicator column. Computing
   // a non-watchlist ETF's full history here can monopolize the event loop and
   // freeze the stock and radar pages; the UI already handles a null indicator.
-  const etfAnalysis = getLatestAnalysis()?.[pair.etf] || null;
-  const trackerPosition = getTrackerPositions().find(p => Number(p.pair_id) === Number(id)) || null;
+  const etfAnalysis = analysisSnapshot?.[pair.etf] || null;
+  const trackerPosition = runtime.trackerPosition || null;
   const etfReturnPct = etf?.prev > 0 && etfPrice != null ? (etfPrice/etf.prev-1)*100 : null;
   const positionDrawdownPct = trackerPosition?.cost > 0 && etfPrice != null ? (etfPrice/trackerPosition.cost-1)*100 : null;
   const turnover = etfPrice != null && etf?.volume != null ? etfPrice * Number(etf.volume) : null;
@@ -926,9 +932,8 @@ async function computePair(pair) {
     navRepairRate, navAuditSamples, volDecayPctAnn, underlyingVolDaily,
     optionSentiment, shortSentiment, daysToEarnings, postEarningsDays,
     earningsGateVerified: earnings?.event_gate_verified === true, earningsPolicy,
-    productEntryEligible: productEntry.eligible, productEntryReason: productEntry.reason });
-  // 6. 信号冷却
-  const signalCooldown = checkSignalCooldown(id, sig.signal);
+    productEntryEligible: productEntry.eligible, productEntryReason: productEntry.reason,
+    underlyingMarket: pair.underlying_market });
   // 个人校准
   const personalCalibration = getPersonalCalibration(pair.etf);
   const personalMinimumShares = personalCalibration && etfPrice > 0
@@ -940,11 +945,8 @@ async function computePair(pair) {
     opportunity_stage: underlyingSwing?.opportunityStage || null,
     execution_action: underlyingSwing?.executionAction || null,
     label: underlyingSwing?.label || null,
-    summary: underlyingSwing?.summary || underlyingAnalysis?.tradePlan?.summary || null,
+    summary: underlyingSwing?.summary || null,
     trigger: underlyingSwing?.trigger || null,
-    reliability: underlyingSwing?.reliabilityScore ?? sig.underlyingReliability,
-    pending_confirmation: !!underlyingSwing?.stabilizerGate?.affected,
-    confirmation_rule: underlyingSwing?.stabilizerGate?.confirmationRule || null,
     valid_until: underlyingSwing?.validUntil || null,
     actionable: !!underlyingSwing?.actionable,
     source_version: underlyingAnalysis?.engineVersion || SIGNAL_ENGINE_VERSION,
@@ -976,7 +978,8 @@ async function computePair(pair) {
   if (etfPrice == null) criticalDataReasons.push('ETF 报价缺失');
   if (pair.underlying && undPrice == null) criticalDataReasons.push('正股报价缺失');
   if (etf?.stale || und?.stale) criticalDataReasons.push('报价已过期');
-  if (pair.underlying && underlyingSwing?.signalAvailable === false) criticalDataReasons.push('正股关键数据不足');
+  if (pair.underlying && !sig.underlyingContractAvailable) criticalDataReasons.push('正股正式判断不可用');
+  else if (pair.underlying && underlyingSwing?.signalAvailable === false) criticalDataReasons.push('正股关键数据不足');
   const riskExitPending = hasPosition && ['TRIM', 'EXIT'].includes(executionAction);
   let exitPending = false;
   if (criticalDataReasons.length) {
@@ -987,15 +990,6 @@ async function computePair(pair) {
       executionAction = 'WATCH';
       effectiveReason = `关键数据不可用：${criticalDataReasons.join('；')}。已停止正式动作与提醒。`;
     }
-  }
-  // 应用信号冷却：30 分钟内反向信号 → 降级 WATCH
-  // 冷却用于抑制来回入场，不得吞掉已有仓位的 TRIM/EXIT 风险动作。
-  if (signalCooldown && !criticalDataReasons.length && effectiveSignal !== 'HOLD'
-      && !['TRIM', 'EXIT'].includes(executionAction)) {
-    originalSignal = originalSignal || effectiveSignal;
-    effectiveSignal = 'HOLD';
-    executionAction = 'WATCH';
-    effectiveReason = `信号冷却：${signalCooldown.minutesAgo} 分钟前刚出现反向信号 ${signalCooldown.lastSignal}，冷却 ${signalCooldown.cooldownMinutes} 分钟内禁止翻转`;
   }
   // A calculated state can be useful after close, but it is not executable.
   // Keep risk exits visible as pending, while every entry-type action becomes WATCH
@@ -1012,8 +1006,20 @@ async function computePair(pair) {
     marketExecutionStatus = 'risk_pending_market_open';
     effectiveReason = `${effectiveReason}；ETF ${etfMarketStatus.label || '未在正常交易时段'}，风险动作待开盘后执行`;
   }
+  // 只对最终、可执行的新入场动作应用冷却；风险退出永远优先，盘后研究状态
+  // 也不会写成一个可反向阻断未来动作的“历史交易”。
+  const signalCooldown = marketOpen && !criticalDataReasons.length && DashboardActions.isEntry(executionAction)
+    ? checkSignalCooldown(id, executionAction)
+    : null;
+  if (signalCooldown) {
+    originalSignal = originalSignal || effectiveSignal;
+    effectiveSignal = 'HOLD';
+    executionAction = 'WATCH';
+    effectiveReason = `信号冷却：${signalCooldown.minutesAgo} 分钟前刚出现反向动作 ${DashboardActions.label(signalCooldown.lastSignal)}，冷却 ${signalCooldown.cooldownMinutes} 分钟内禁止重新入场`;
+  }
   // 组装返回
   const signalAvailable = criticalDataReasons.length === 0;
+  const underlyingRequestedAction = DashboardActions.normalize(sig.directionalSignal, { hasPosition });
   const executionLabel = !signalAvailable ? (exitPending ? '风险退出待确认' : '数据不足')
     : (!marketOpen && exitPending ? '风险动作待开盘' : DashboardActions.label(executionAction));
   return {
@@ -1033,14 +1039,22 @@ async function computePair(pair) {
     underlying_return: undRet != null ? +(undRet*100).toFixed(4) : null,
     nav: nav != null ? +nav.toFixed(4) : null,
     premium: premium != null ? +premium.toFixed(4) : null,
-    signal: effectiveSignal, original_signal: originalSignal, strength: sig.strength, reason: effectiveReason,
+    signal: executionAction,
+    original_signal: originalSignal ? DashboardActions.normalize(originalSignal, { hasPosition }) : null,
+    strength: sig.strength, reason: effectiveReason,
     research_action: researchAction, execution_action: executionAction, execution_label: executionLabel, market_execution_status: marketExecutionStatus,
     etf_market_state: etfMarketStatus.state, etf_market_session: etfMarketStatus.session, etf_market_label: etfMarketStatus.label,
     signal_available: signalAvailable, exit_pending: exitPending, data_gate: { status: signalAvailable?'pass':(exitPending?'exit_pending':'blocked'), reasons: criticalDataReasons },
-    signal_version: 'tracker-execution-layer-v4', signal_gate: sig.gate, nav_quality: sig.navQuality, nav_method: navMethod,
+    signal_version: 'tracker-stock-aligned-v5', signal_gate: sig.gate, nav_quality: sig.navQuality, nav_method: navMethod,
     nav_sessions: navSessions, nav_anchor_date: navAnchorDate, underlying_stale: underlyingStale,
     etf_quote_date: sig.etfDate, underlying_quote_date: sig.underlyingDate,
-    underlying_action: sig.underlyingAction, underlying_reliability: sig.underlyingReliability,
+    underlying_action: sig.underlyingAction,
+    underlying_requested_action: underlyingRequestedAction,
+    underlying_stage: sig.underlyingStage,
+    underlying_profile_id: sig.underlyingProfileId,
+    underlying_contract_available: sig.underlyingContractAvailable,
+    valuation_signal: sig.valuationSignal,
+    premium_band_status: sig.premiumBandStatus,
     extreme_move: sig.extremeMove, extreme_threshold_pct: sig.extremeThresholdPct, kill_switch: sig.killSwitch,
     etf_return: etfReturnPct != null ? +etfReturnPct.toFixed(4) : null, position_drawdown: positionDrawdownPct != null ? +positionDrawdownPct.toFixed(4) : null,
     etf_volume: etf?.volume ?? null, etf_turnover: turnover != null ? +turnover.toFixed(2) : null, liquidity_status: liquidityStatus,
@@ -1079,6 +1093,8 @@ async function refreshTracker() {
   trackerRefreshing = true;
   const refreshStartedAt = Date.now();
   try {
+    const analysisSnapshot = getLatestAnalysis();
+    const positionsByPair = new Map(getTrackerPositions().map(position => [Number(position.pair_id), position]));
     // 注入韩股 KRW/USD 实时汇率（用于 estimateTradeFee 的 KR 1% 上限计算）
     // 仅当本轮存在 KR 相关追踪对时才抓取，避免无谓网络请求
     const hasKrwExposure = trackerPairs.some(p => p.active !== 0 && (
@@ -1095,7 +1111,10 @@ async function refreshTracker() {
       if (pair.active === 0) { trkCache.delete(pair.id); continue; }
       let rec;const previous=trkCache.get(pair.id)||null;
       const pairStartedAt = Date.now();
-      try { rec = await computePair(pair); }
+      try { rec = await computePair(pair, {
+        analysisSnapshot,
+        trackerPosition: positionsByPair.get(Number(pair.id)) || null,
+      }); }
       catch (e) {
         rec = { id: pair.id, etf: pair.etf, etf_market: pair.etf_market, underlying: pair.underlying,
           underlying_market: pair.underlying_market, leverage: Number(pair.leverage) || 2, label: pair.label, sort_order:Number(pair.sort_order)||0,
@@ -1488,7 +1507,10 @@ const server = http.createServer(async (req, res) => {
   // v2 扫描状态
   if (p === '/radar/status' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify(getRadarScanStatus()));
+    return res.end(JSON.stringify({
+      ...getRadarScanStatus(),
+      scheduler: getRadarSchedulerState(),
+    }));
   }
 
   // v2 手动触发扫描（不占用生产后台队列，v2 有自己的并发池；setImmediate 异步触发避免阻塞 HTTP 响应）
@@ -2126,14 +2148,12 @@ const server = http.createServer(async (req, res) => {
       // 3. 信号方向（从 stock_engine 获取最新分析）
       const allAnalysis=getLatestAnalysis();
       const analysis=allAnalysis[symbol]||null;
-      const plan=analysis&&analysis.tradePlan||null;
-      const action=plan&&plan.action||analysis&&analysis.signal||null;
       const swing=analysis&&analysis.swingDecision||null;
       const executionAction=swing&&swing.executionAction||null;
       const opportunityStage=swing&&swing.opportunityStage||null;
 
-      const isLongSignal=['BUY','ADD','STRONG_BUY'].includes(action)||['OPEN','ADD'].includes(executionAction);
-      const isShortSignal=['SELL','REDUCE','STRONG_SELL'].includes(action)||['REDUCE','CLOSE'].includes(executionAction)||opportunityStage==='RISK_OFF';
+      const isLongSignal=['OPEN','ADD'].includes(executionAction);
+      const isShortSignal=['REDUCE','CLOSE'].includes(executionAction)||opportunityStage==='RISK_OFF';
       const isNeutralSignal=!isLongSignal&&!isShortSignal;
 
       // 4. 合成判断
@@ -2175,7 +2195,7 @@ const server = http.createServer(async (req, res) => {
 
       res.writeHead(200,{'Content-Type':'application/json; charset=utf-8'});
       res.end(JSON.stringify({
-        symbol, market:mkt, signalAction:action, signalState,
+        symbol, market:mkt, signalAction:executionAction, signalState:opportunityStage,
         isLongSignal, isShortSignal,
         option: optionSentiment ? {
           score: optionSentiment.score, bias: optionSentiment.bias, label: optionSentiment.label,
@@ -2304,6 +2324,15 @@ server.listen(FRONT_PORT, FRONT_HOST, () => {
   // 审计修正：资产分类不能挂在扫描调度开关下（生产环境 scanner 默认关闭，
   // 挂 scheduleRadar 会导致审计永不执行）。幂等 + 分批让出，首轮延迟 120s。
   startAutoAssetAuditLoop();
+
+  // 正式数据契约修复：即使 scanner 开关暂时关闭，也要在启动时隔离旧版本
+  // 错误创建的周末/节假日 scheduled_daily run，避免只读 API 与反馈样本继续消费。
+  const invalidDaily = reconcileNonTradingDayScanJobs();
+  if (invalidDaily.reconciled > 0) {
+    console.log(`[radar_v2] 已隔离 ${invalidDaily.reconciled} 个非交易日 scheduled_daily job`);
+  } else if (!invalidDaily.ok) {
+    console.log(`[radar_v2] 非交易日 job 核验失败: ${invalidDaily.error}`);
+  }
 
   // === Scanner 调度（重操作：全市场扫描） ===
   if (v2ScannerEnabled) {

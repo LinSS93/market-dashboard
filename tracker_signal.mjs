@@ -1,4 +1,5 @@
 import { DEFAULT_EARNINGS_POLICY, normalizeEarningsPolicy } from './earnings_policy.mjs';
+import { hasCurrentStockSignalContract, selectedStockProfileId } from './stock_signal_contract.mjs';
 
 export function premiumSignal(premium,bandConfig=null) {
   if (premium == null || !Number.isFinite(Number(premium))) return { signal:null, strength:'normal', reason:'数据获取中' };
@@ -19,20 +20,29 @@ export function providerDate(value) {
   return digits.length>=8?digits.slice(0,8):null;
 }
 
-function underlyingAction(analysis) {
+export function resolveUnderlyingDecision(analysis, expectedMarket = null) {
+  const market = String(analysis?.market || '').toUpperCase();
+  const requiredMarket = String(expectedMarket || '').toUpperCase();
+  if (requiredMarket && market !== requiredMarket) {
+    return { available:false, action:null, stage:null, profileId:null, reason:'market_mismatch' };
+  }
+  if (!hasCurrentStockSignalContract(analysis)) {
+    return { available:false, action:null, stage:null, profileId:null, reason:'current_contract_unavailable' };
+  }
+  const profileId = selectedStockProfileId(analysis);
   const decision = analysis?.swingDecision;
+  if (!decision || decision.signalAvailable === false || String(decision.profileId || '') !== String(profileId || '')) {
+    return { available:false, action:null, stage:null, profileId, reason:'formal_decision_unavailable' };
+  }
   const action = String(decision?.executionAction || '').toUpperCase();
   const stage = String(decision?.opportunityStage || '').toUpperCase();
-  if (action && action !== 'NONE') return action;
-  if (stage === 'RISK_OFF') return 'RISK_OFF';
-  if (action === 'NONE') return 'NONE';
-  return analysis?.tradePlan?.action || analysis?.signal || null;
-}
-
-function reliabilityScore(analysis) {
-  const value=analysis?.swingDecision?.reliabilityScore ?? analysis?.reliability?.reliabilityScore
-    ?? analysis?.tradePlan?.confidence ?? analysis?.confidence;
-  return Number.isFinite(Number(value))?Number(value):null;
+  const resolvedAction = action && action !== 'NONE' ? action
+    : stage === 'RISK_OFF' ? 'RISK_OFF'
+    : action === 'NONE' ? 'NONE'
+    : null;
+  return resolvedAction
+    ? { available:true, action:resolvedAction, stage, profileId, reason:null }
+    : { available:false, action:null, stage, profileId, reason:'formal_action_missing' };
 }
 
 function directionText(action) {
@@ -51,11 +61,6 @@ const BUY_GATES = [
     name: 'product_unverified',
     test: (c) => c.input.productEntryEligible === false,
     reason: (c) => `${c.base.reason}，但${c.input.productEntryReason || '产品定义尚未核验'}，仅保留研究观察，不生成新开仓动作`,
-  },
-  {
-    name: 'premium_history_insufficient',
-    test: (c) => !!c.input.premiumBands && c.input.premiumBands.status !== 'active',
-    reason: (c) => `${c.base.reason}，但收盘封口样本尚不足 60 个交易日，固定阈值仅供研究，不生成新开仓动作`,
   },
   {
     name: 'nav_approximate',
@@ -81,21 +86,6 @@ const BUY_GATES = [
     name: 'pre_earnings_blackout',
     test: (c) => c.earningsGateVerified && c.earningsPolicy.etfPreBlackoutDays > 0 && Number.isFinite(c.input.daysToEarnings) && c.input.daysToEarnings <= c.earningsPolicy.etfPreBlackoutDays,
     reason: (c) => `${c.base.reason}，但正股 ${c.input.daysToEarnings === 0 ? '今日' : `距财报 ${c.input.daysToEarnings} 天`}，NAV 失真风险高，禁止新开仓`,
-  },
-  {
-    name: 'underlying_unconfirmed',
-    test: (c) => c.input.underlyingAnalysis && !c.bullish,
-    reason: (c) => `${c.base.reason}，但正股尚未出现可执行买入确认`,
-  },
-  {
-    name: 'underlying_falling',
-    test: (c) => !c.input.underlyingAnalysis && Number.isFinite(c.ret) && c.ret < 0,
-    reason: (c) => `${c.base.reason}，但正股仍在下跌且技术信号不可用`,
-  },
-  {
-    name: 'underlying_analysis_missing',
-    test: (c) => !c.input.underlyingAnalysis,
-    reason: (c) => `${c.base.reason}，但正股正式分析不可用，禁止仅依据 ETF 折价新开仓`,
   },
   {
     name: 'low_repair_rate',
@@ -151,7 +141,7 @@ function evalKillSwitches(c) {
   };
 }
 
-// tier 2：avoid / low_confidence（独立处理，不在 BUY gate 表中）
+// tier 2：底层正股风险动作（独立处理，不在 BUY gate 表中）
 function evalAvoidTier(c) {
   if (c.avoid) {
     return {
@@ -160,14 +150,6 @@ function evalAvoidTier(c) {
       reason: c.hasPosition
         ? `正股动作 ${c.action}；建议减仓并禁止新增，溢折价正常不代表值得持有`
         : `正股动作 ${c.action}；禁止新开仓`,
-    };
-  }
-  if (c.hasPosition && c.confidence != null && c.confidence < 20
-      && (!c.bullish || (Number.isFinite(c.ret) && c.ret < 0))) {
-    return {
-      signal: 'REDUCE',
-      gate: 'low_confidence_risk',
-      reason: `正股可靠度仅 ${c.confidence.toFixed(0)}%；风险退出优先，不显示普通持有`,
     };
   }
   return null;
@@ -205,7 +187,7 @@ function applyPostSignal(c, signal, gate, reason) {
 }
 
 export function evaluateTrackerSignal(input={}) {
-  const base = premiumSignal(input.premium, input.premiumBands);
+  const valuation = premiumSignal(input.premium, input.premiumBands);
   const lev = Math.max(1, Math.abs(Number(input.leverage) || 2));
   const etfDate = providerDate(input.etfProviderTime);
   const underlyingDate = providerDate(input.underlyingProviderTime);
@@ -214,8 +196,8 @@ export function evaluateTrackerSignal(input={}) {
   // 若 ETF 与正股实时报价日期不一致，仍强制降级为 date_mismatch。
   // 这是一道独立防线，与 computeNav 内部的校验互补，确保 evaluateTrackerSignal 独立调用时也安全。
   const navQuality = !datesAligned ? 'date_mismatch' : (input.navQuality || 'aligned');
-  const action = underlyingAction(input.underlyingAnalysis);
-  const confidence = reliabilityScore(input.underlyingAnalysis);
+  const underlying = resolveUnderlyingDecision(input.underlyingAnalysis, input.underlyingMarket);
+  const action = underlying.action;
   const bullish = ['OPEN','ADD','BUY','STRONG_BUY'].includes(action);
   const avoid = ['RISK_OFF','REDUCE'].includes(action);
   const exit = ['CLOSE','SELL','STRONG_SELL'].includes(action);
@@ -228,6 +210,35 @@ export function evaluateTrackerSignal(input={}) {
   const earningsPolicy = normalizeEarningsPolicy(input.earningsPolicy, DEFAULT_EARNINGS_POLICY);
   const earningsGateVerified = input.earningsGateVerified === true;
   const productEntryEligible = input.productEntryEligible !== false;
+
+  // 正股正式动作是唯一方向源。溢折价只决定 ETF 的执行质量：可以加强折价入场、
+  // 阻止溢价追入或提示已有仓位减杠杆，但绝不能单独制造一笔方向性买入。
+  const directionalSignal = bullish ? 'BUY'
+    : exit ? 'SELL'
+    : avoid ? (hasPosition ? 'REDUCE' : 'HOLD')
+    : 'HOLD';
+  let signal = directionalSignal;
+  let gate = 'pass';
+  let reason = underlying.available
+    ? `${directionText(action)}；${valuation.reason}`
+    : `正股正式判断不可用；${valuation.reason}`;
+  if (bullish) {
+    if (!valuation.signal) {
+      signal = 'HOLD'; gate = 'premium_unavailable';
+      reason = '正股已形成入场动作，但 ETF 溢折价暂不可计算，等待有效 NAV 后再执行';
+    } else if (['REDUCE','SELL'].includes(valuation.signal)) {
+      signal = 'HOLD'; gate = 'premium_overpriced_entry';
+      reason = `正股已形成入场动作，但 ETF ${valuation.reason}，不在高溢价时追入`;
+    } else {
+      signal = valuation.signal === 'STRONG_BUY' ? 'STRONG_BUY' : 'BUY';
+      reason = `${directionText(action)}；${valuation.reason}`;
+    }
+  } else if (!avoid && !exit && hasPosition && valuation.signal === 'SELL') {
+    signal = 'REDUCE'; gate = 'premium_risk';
+    reason = `${directionText(action)}；ETF ${valuation.reason}，只降低杠杆敞口，不把估值偏离解释为正股方向反转`;
+  } else if (!underlying.available) {
+    gate = 'underlying_analysis_missing';
+  }
 
   // 动态阈值调整：σ_daily 基准 2%，[0.7, 2.0] clamp；σ > 5% 触发 sigmaExtreme
   const sigmaDaily = Number(input.underlyingVolDaily);
@@ -251,7 +262,7 @@ export function evaluateTrackerSignal(input={}) {
 
   // 评估上下文（传给 gate 表 / 各 tier 函数）
   const ctx = {
-    input, base, lev, navQuality, action, confidence, bullish, avoid, exit,
+    input, base:valuation, valuation, underlying, lev, navQuality, action, bullish, avoid, exit,
     ret, etfRet, positionDrawdown, hasPosition, leveraged, volDecayAnn,
     sigmaDaily, volAdj, sigmaExtreme, extremeThreshold, underlyingKillThreshold,
     drawdownKillThreshold, etfKillThreshold, extreme, underlyingKill, etfKill,
@@ -260,12 +271,11 @@ export function evaluateTrackerSignal(input={}) {
   };
 
   // tier 1：kill switch（最高优先级）
-  let signal = base.signal, gate = 'pass', reason = base.reason;
   const ksResult = evalKillSwitches(ctx);
   if (ksResult) {
     ({ signal, gate, reason } = ksResult);
   } else {
-    // tier 2：avoid / low_confidence
+    // tier 2：底层正股风险动作
     const avoidResult = evalAvoidTier(ctx);
     if (avoidResult) {
       ({ signal, gate, reason } = avoidResult);
@@ -280,7 +290,7 @@ export function evaluateTrackerSignal(input={}) {
         gate = matched.name;
         reason = matched.reason(ctx);
       } else {
-        reason = `${base.reason}，正股方向、NAV 与流动性检查均通过`;
+        reason = `${reason}；NAV、流动性与产品风险检查均通过`;
       }
     }
   }
@@ -291,12 +301,13 @@ export function evaluateTrackerSignal(input={}) {
 
   // 执行层 / 风险层结论
   const executionConclusion = !productEntryEligible ? (input.productEntryReason || '产品定义待核验，仅用于研究观察')
-    : (input.premiumBands && input.premiumBands.status !== 'active') ? '收盘样本积累中，溢价阈值仅供研究观察'
+    : (input.premiumBands && input.premiumBands.status !== 'active') ? '动态溢价带仍在积累，当前使用保守固定阈值'
     : navQuality === 'cross_market_approx' ? '跨市场 NAV 为近似值，仅供限价参考'
     : !navEntrySafe ? 'NAV 尚未可靠对齐，等待后再交易'
     : lowLiquidity ? '流动性偏低，使用限价并警惕陈旧成交价'
-    : (base.signal === 'STRONG_BUY' || base.signal === 'BUY') ? 'ETF 折价，仅在正股买点确认后执行'
-    : (base.signal === 'REDUCE' || base.signal === 'SELL') ? 'ETF 偏贵，避免追价并优先改善卖出价格'
+    : bullish && (valuation.signal === 'STRONG_BUY' || valuation.signal === 'BUY') ? '正股方向已确认；ETF 折价或估值正常，可按计划执行'
+    : bullish && (valuation.signal === 'REDUCE' || valuation.signal === 'SELL') ? '正股方向已确认，但 ETF 溢价偏高，等待更合理价格'
+    : (valuation.signal === 'REDUCE' || valuation.signal === 'SELL') ? 'ETF 偏贵，只用于优化已有仓位的减杠杆时机'
     : '估值正常，可按方向信号正常执行';
   const volDecayNote = (Number.isFinite(volDecayAnn) && volDecayAnn > 0)
     ? (volDecayAnn >= 10 ? `年化波动率损耗 ${volDecayAnn.toFixed(1)}%，高波动环境慎持`
@@ -313,11 +324,18 @@ export function evaluateTrackerSignal(input={}) {
 
   return {
     signal,
-    originalSignal: signal === base.signal ? null : base.signal,
-    strength: signal === base.signal ? base.strength : 'normal',
+    directionalSignal,
+    originalSignal: signal === directionalSignal ? null : directionalSignal,
+    strength: signal === 'STRONG_BUY' ? 'strong' : 'normal',
     reason, gate,
     navQuality, etfDate, underlyingDate,
-    underlyingAction: action, underlyingReliability: confidence,
+    underlyingAction: action,
+    underlyingStage: underlying.stage,
+    underlyingProfileId: underlying.profileId,
+    underlyingContractAvailable: underlying.available,
+    underlyingContractReason: underlying.reason,
+    valuationSignal: valuation.signal,
+    premiumBandStatus: input.premiumBands?.status || 'fixed',
     extremeMove: extreme, extremeThresholdPct: +extremeThreshold.toFixed(2),
     underlyingKillThresholdPct: +underlyingKillThreshold.toFixed(2),
     etfKillThresholdPct: +etfKillThreshold.toFixed(2),
