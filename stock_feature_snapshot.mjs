@@ -149,14 +149,14 @@ export function evaluateTechnicalResearchPolicy(snapshot) {
   return { policyId: TECHNICAL_RESEARCH_POLICY.id, policyVersion: TECHNICAL_RESEARCH_POLICY.version, status: 'watch', direction: 0, reason: '特征未形成明确的研究设置。' };
 }
 
-export function buildObservedFormalEvaluation(analysis) {
+export function buildObservedDecisionEvaluation(analysis) {
   const decision = analysis?.swingDecision || null;
   const opportunityStage = String(decision?.opportunityStage || 'DATA_UNAVAILABLE').toUpperCase();
   const executionAction = String(decision?.executionAction || 'NONE').toUpperCase();
   const direction = ['OPEN', 'ADD'].includes(executionAction) ? 1
     : opportunityStage === 'RISK_OFF' || ['REDUCE', 'CLOSE'].includes(executionAction) ? -1 : 0;
   return {
-    policyId: 'formal_observed',
+    policyId: 'current_decision_observed',
     policyVersion: String(analysis?.engineVersion || 'unknown-engine'),
     status: `${opportunityStage}:${executionAction}`,
     opportunityStage,

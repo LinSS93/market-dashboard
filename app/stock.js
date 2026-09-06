@@ -58,34 +58,32 @@ function esc(s){ return String(s??'').replace(/[&<>"']/g, c => ({"&":"&amp;","<"
 function sigClass(s){
   return s ? DashboardActions.badgeClass(s) : "b-null";
 }
+function swingDisplay(sw){
+  if(!sw)return {key:null,label:'—',colorToken:null};
+  return {
+    key:String(sw.displayState||'').toLowerCase()||null,
+    label:sw.displayLabel||'—',
+    colorToken:sw.displayColorToken||null,
+  };
+}
 function swingBadgeClass(sw){
-  if (!sw) return "b-null";
-  if(planToneKey(sw.tone)==='amber') return 'b-tone-amber';
-  const stage=String(sw.opportunityStage||'').toUpperCase();
-  if(stage==='BLOCKED')return 'b-tone-amber';
-  const action=String(sw.executionAction||'NONE').toUpperCase();
-  if(action==='OPEN')return 'b-PROBE';
-  if(action==='ADD')return 'b-ADD';
-  if(action==='REDUCE')return 'b-TRIM';
-  if(action==='CLOSE')return 'b-EXIT';
-  if(stage==='RISK_OFF')return 'b-AVOID';
-  return 'b-WATCH';
+  const display=swingDisplay(sw);
+  return display.key?'b-state-'+display.key:'b-null';
 }
 function compactSignalLabel(eff){
   return eff&&eff.action ? (eff.label || DashboardActions.label(eff.action)) : '—';
 }
 function swingPlan(ai){ return ai && ai.swingDecision ? ai.swingDecision : null; }
+function activeSignalProfile(ai){
+  const id=String(ai?.signalProfiles?.effectiveProfileId||'').toLowerCase();
+  const profile=ai?.signalProfiles?.profiles?.[id];
+  return profile&&profile.profileId===id?profile:null;
+}
+function activeProfileStrategy(ai){ return activeSignalProfile(ai)?.strategy||null; }
 function swingTier(ai){
   const sw = swingPlan(ai);
   if (!sw) return null;
-  const blocked=sw?.dataGate?.status==='blocked';
-  return { action:sw.executionAction, label:blocked?'信号暂停':sw.label||sw.executionAction, changed:false, notifyEligible:!!sw.actionable, swing:sw, reliability:ai.reliability || null };
-}
-function effectivePlan(ai, symbol){
-  // 正式阶段/动作尚未生成时不从技术计划反推交易动作。
-  const plan = ai && ai.tradePlan ? ai.tradePlan : null;
-  const ev = ai && ai.reliability ? ai.reliability : null;
-  return { plan, action:null, label:null, changed:false, verdict:ev ? ev.verdict : null, reliability:ev };
+  return { action:sw.executionAction, label:swingDisplay(sw).label, changed:false, notifyEligible:!!sw.actionable, swing:sw };
 }
 function planToneKey(tone){
   if (tone === "bull" || tone === "bear" || tone === "hot" || tone === "watch" || tone === "amber") return tone;
@@ -184,12 +182,10 @@ function renderMarketStatus(){
   if(problemMarkets.length){
     h+='<button type="button" class="mkt-health-retry" onclick="recheckDataHealth()" title="绕过失败冷却，重新检测当前开盘市场的数据源">重新检测</button>';
   }else{
-    h+='<span class="mktpill '+(anyOpen?'on':'off')+'">'+(anyOpen?'🔄 实时刷新 5s':'💤 休市低频 60s')+'</span>';
+    h+='<span class="mktpill '+(anyOpen?'on':'off')+'">'+(anyOpen?'🔄 实时刷新 5s':'💤 休市暂停行情与信号重算')+'</span>';
   }
   if(cont.innerHTML!==h)cont.innerHTML = h;
 }
-setInterval(renderMarketStatus, 60 * 1000);
-
 async function recheckDataHealth(){
   const button=document.querySelector('.mkt-health-retry');
   const markets=Object.entries(marketDataHealth).filter(([,health])=>health&&health.open&&['error','degraded'].includes(health.status)).map(([market])=>market);
@@ -293,7 +289,7 @@ function stockActionLabel(s){ return STOCK_ACTION_LABELS[String(s||'').toUpperCa
 //   entry   ← OPEN / ADD（可试仓、可加仓）
 //   risk    ← REDUCE / CLOSE（减仓、清仓）或 RISK_OFF 阶段（风险回避，含动作 NONE）
 //   hold    ← HOLD（持有观察）
-//   observe ← 其余 NONE 场景（等待机会 / 机会形成中 / 等待确认 / 看多受阻 / 数据不足 / 信号暂停）
+//   observe ← 其余 NONE 场景；具体阶段颜色由后端 displayState 唯一决定
 function stockActionGroup(action, sw=null){
   const key=String(action||'NONE').toUpperCase();
   if(['OPEN','ADD'].includes(key))return 'entry';
@@ -309,7 +305,8 @@ function detectAlerts(ana, watchlist){
   const tiers = alertCfg.stockTiers || [];
   for (const w of watchlist){
     const a = ana[w.symbol];
-    const eff = swingTier(a) || effectivePlan(a,w.symbol);
+    const eff = swingTier(a);
+    if (!eff) continue;
     const sig = normSig(eff.action);
     if (!sig) continue;
     const prev = clientAlertState[w.symbol];
@@ -459,17 +456,24 @@ function decisionExplanationHtml(sw){
   if(!sw)return '';
   const explanation=sw.explanation||{};
   const summary=decisionSummaryForDisplay(sw);
-  const blockers=Array.isArray(explanation.blockingReasons)?explanation.blockingReasons.filter(reason=>reason&&!isInfrastructureReason(reason)):[];
-  const downgrade=Array.isArray(explanation.downgradeReasons)?explanation.downgradeReasons.filter(reason=>reason&&!isInfrastructureReason(reason)):[];
   let h='<section class="dc-decision-why"><div class="dc-decision-why-title">当前判断</div>';
   if(summary)h+='<p class="dc-decision-why-summary">'+esc(summary)+'</p>';
-  if(blockers.length||downgrade.length){
-    h+='<div class="dc-decision-why-row"><span>未升级原因</span><p>'+esc([...blockers,...downgrade].slice(0,2).join('；'))+'</p></div>';
-  }
-  if(explanation.nextUpgradeCondition){
+  if(explanation.nextUpgradeCondition&&explanation.nextUpgradeCondition!==summary){
     h+='<div class="dc-decision-why-row next"><span>下一步条件</span><p>'+esc(explanation.nextUpgradeCondition)+'</p></div>';
   }
   return h+'</section>';
+}
+function decisionAssessmentsHtml(sw){
+  if(!sw)return '';
+  const items=[
+    ['方向',sw.directionAssessment],
+    ['时机',sw.timingAssessment],
+    ['风险',sw.riskAssessment],
+  ].filter(item=>item[1]&&item[1].label);
+  if(!items.length)return '';
+  return '<div class="dc-assessment-strip">'+items.map(([name,item])=>
+    '<span class="dc-assessment tone-'+esc(item.tone||'neutral')+'"><small>'+esc(name)+'</small><b>'+esc(item.label)+'</b></span>'
+  ).join('')+'</div>';
 }
 function keyPlanHtml(ai,sw,mkt){
   const stagePlan=sw&&sw.stagePlan;
@@ -521,21 +525,21 @@ function priceStructureHtml(ai,mkt){
 function renderDecisionCard(ai, plan, eff, sw, mkt, sessionRisk){
   const el = $('d_decision'); if(!el) return;
   if(!ai){ el.innerHTML = '<div class="dc-conclusion"><span class="dc-tier">—</span></div>'; return; }
+  const display=swingDisplay(sw);
   const toneKey = planToneKey(sw ? sw.tone : (plan && plan.actionTone));
-  el.className = 'decision-card tone-' + toneKey;
+  el.className = 'decision-card ' + (display.key?'state-'+display.key:'tone-'+toneKey);
 
   // 结论行只展示当前人格的正式执行状态。研究排序诊断只在实验室呈现，
   // 避免与三人格并列后被误读为第四个交易结论。
-  const dataBlocked=sw?.dataGate?.status==='blocked';
-  const stateLabel = dataBlocked ? '信号暂停' : sw ? (sw.label || stockActionLabel(sw.executionAction)) : '—';
-  const stateTone = dataBlocked ? 'neutral' : sw ? (sw.tone || toneKey) : toneKey;
+  const stateLabel = display.label;
 
   let h = '<div class="dc-conclusion">';
-  h += '<span class="dc-state"><span class="dc-state-k">执行状态</span><span class="dc-state-tag tone-' + stateTone + '">' + esc(stateLabel) + '</span></span>';
+  h += '<span class="dc-state"><span class="dc-state-k">执行状态</span><span class="dc-state-tag ' + (display.key?'state-'+display.key:'tone-'+toneKey) + '">' + esc(stateLabel) + '</span></span>';
   h += '</div>';
 
-  h += personaVerdictsHtml(ai.personaVerdicts);
+  h += decisionAssessmentsHtml(sw);
   h += decisionExplanationHtml(sw);
+  h += personaVerdictsHtml(ai.personaVerdicts);
   h += keyPlanHtml(ai,sw,mkt);
 
   h += '<details class="dc-more-research"><summary>更多研究信息</summary><div class="dc-more-research-body">';
@@ -558,26 +562,14 @@ function renderDecisionCard(ai, plan, eff, sw, mkt, sessionRisk){
   const transition=stockSignalTransitionCache.get(ai.symbol || selectedSym);
   h += '<div class="dc-change" id="d_signal_change">' + renderSignalTransitionHtml(transition) + '</div>';
 
-  // 信号可信度与数据状态条：引擎版本 + 漂移状态 + 报价来源时间 + 分析日期
+  // 当前运行数据：引擎版本 + 报价来源时间 + 分析日期。
+  // 后验效果与漂移只在实验室展示，不进入当前决策卡。
   h += '<div class="dc-meta-row">';
   // 引擎版本（简写：取 v2.0.0 部分）
   if(ai && ai.engineVersion){
     const vMatch = String(ai.engineVersion).match(/v(\d+\.\d+\.\d+)/);
     const vShort = vMatch ? 'v' + vMatch[1] : String(ai.engineVersion).slice(-12);
     h += '<span class="dc-meta-item"><span class="dc-meta-k">引擎</span><span class="dc-meta-v" title="' + esc(ai.engineVersion) + '">' + esc(vShort) + '</span></span>';
-  }
-  // 漂移状态（从全局缓存读取，由 ensureSignalDrift 异步填充）
-  if(window._signalDrift){
-    const d = window._signalDrift;
-    const driftLabel = d.status === 'stable' ? '稳定'
-      : d.status === 'warning' ? '漂移告警'
-      : d.status === 'warming_up' ? '预热观察'
-      : d.status === 'provisional_drift' ? '初步对照'
-      : d.status === 'insufficient' ? '样本不足'
-      : d.status;
-    const driftCls = d.status === 'stable' ? '' : d.status === 'warning' ? ' warn' : ' muted';
-    const sampleCount = d.current && d.current.byHorizon && d.current.byHorizon[5] ? d.current.byHorizon[5].count : 0;
-    h += '<span class="dc-meta-item"><span class="dc-meta-k">漂移</span><span class="dc-meta-v' + driftCls + '" title="' + esc(d.reason||'') + '">' + esc(driftLabel) + (sampleCount > 0 ? ' · n=' + sampleCount : '') + '</span></span>';
   }
   // 报价来源与时间
   if(ai && ai.liveQuote){
@@ -695,8 +687,9 @@ function renderDecisionBasis(ai, plan, sw){
 
   // ─── 步骤 2：技术面投票（含过程） ───
   // 展示：原始信号 + rawScore + 各指标投票明细（text + vote 方向）
-  const techAction = plan?.action || ai?.signal;
-  const techScore = plan?.score;
+  const profile = activeSignalProfile(ai);
+  const techAction = plan?.action || profile?.signal;
+  const techScore = profile?.score;
   if(techAction || (ai && ai.indicators)){
     stepNum++;
     h += '<div class="basis-step">';
@@ -815,8 +808,8 @@ function renderDecisionBasis(ai, plan, sw){
     stepNum++;
     h += '<div class="basis-step">';
     h += '<div class="basis-step-head"><span class="basis-step-num">' + stepNum + '</span><span class="basis-step-title">最终执行状态</span>';
-    const basisDataBlocked=sw?.dataGate?.status==='blocked';
-    h += '<span class="basis-step-value tone-' + (basisDataBlocked?'neutral':sw.tone||'neutral') + '">' + esc(basisDataBlocked?'信号暂停':sw.label||stockActionLabel(sw.executionAction)) + '</span>';
+    const basisDisplay=swingDisplay(sw);
+    h += '<span class="basis-step-value ' + (basisDisplay.key?'state-'+basisDisplay.key:'tone-neutral') + '">' + esc(basisDisplay.label) + '</span>';
     h += '</div>';
     const basisSummary=decisionSummaryForDisplay(sw);
     if(basisSummary) h += '<div class="basis-step-note">' + esc(basisSummary) + '</div>';
@@ -872,7 +865,7 @@ function renderSignalHistory(rows, symbol){
   for(const r of sorted){
     const action = r.executionAction || 'NONE';
     const label = r.actionLabel || stockActionLabel(action);
-    const cls = swingBadgeClass({executionAction:action,opportunityStage:r.opportunityStage,tone:['REDUCE','CLOSE'].includes(action)?'bear':'neutral'});
+    const cls = swingBadgeClass(r);
     const followup = r.closeFollowup || {};
     const baseline = formatSignalClose(followup.baseline, r.market);
     const oc1 = formatCloseFollowup(followup.horizons?.['1']);
@@ -1100,28 +1093,12 @@ async function saveSettingsProfilePreference(){
     const payload = await res.json();
     if (!res.ok || !payload.ok) throw new Error(payload?.error || ('HTTP ' + res.status));
     settingsProfileDirty = false;
-    // 后端保存后已触发立即刷新；轮询轻量 GET 的 analysisEffective
-    // 直到分析缓存实际应用新人格。空闲时约 3-5s；若恰逢 60s 周期运行中，
-    // 需等周期结束+补跑（实测最长 ~20s），超时 45s 兜底。
-    const applied = await waitSettingsProfileApplied(settingsProfileLoaded, 45000);
-    // 等待期间后台轮询可能已把旧人格数据写入 lastAna（15s 客户端缓存），
-    // 使其失效，让保存流程末尾的 loadAll 强制真实拉取新人格信号并立即渲染。
+    // 后端已用现成的三套人格结果同步重绑正式决策，无须轮询或重新抓数据。
     invalidateAnalysisSnapshot();
-    return { ok: true, applied };
+    return { ok: true, applied: payload.effectiveProfileId === settingsProfileLoaded, cacheUpdate: payload.cacheUpdate };
   } catch (e) {
     return { ok: false, error: e.message || String(e) };
   }
-}
-async function waitSettingsProfileApplied(profileId, timeoutMs = 45000){
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const payload = await fetch('/stock/signal-profile', { cache: 'no-store' }).then(r => r.json());
-      if (payload?.ok && payload.analysisEffective === profileId) return true;
-    } catch {}
-    await new Promise(r => setTimeout(r, 1000));
-  }
-  return false;
 }
 
 async function populateSettingsModal(){
@@ -1523,9 +1500,6 @@ function updateNotifyBtn(){
 async function loadWL(){ const r = await fetch("/stock-watchlist"); wl = await r.json(); }
 async function loadPos(){ const r = await fetch("/stock-positions"); const arr = await r.json(); pos = {}; arr.forEach(p => pos[p.symbol] = p); }
 
-// 信号漂移报告缓存：6 小时刷新一次，非关键，失败静默
-let _signalDriftAt = 0;
-let _signalDriftInFlight = false;
 let _analysisAt = 0;
 let _analysisEtag = '';
 const ANALYSIS_REFRESH_MS = 15 * 1000;
@@ -1542,19 +1516,9 @@ async function loadAnalysisSnapshot(force = false){
   _analysisAt = Date.now();
   return value;
 }
-function ensureSignalDrift(){
-  if(_signalDriftInFlight || (window._signalDrift && Date.now() - _signalDriftAt < 6*60*60*1000)) return;
-  _signalDriftInFlight = true;
-  fetch('/stock/signal-drift-report', { cache:'no-store' }).then(r => r.json()).then(d => {
-    window._signalDrift = d && d.status ? d : null;
-    _signalDriftAt = Date.now();
-  }).catch(() => { _signalDriftAt = Date.now(); }).finally(() => { _signalDriftInFlight = false; });
-}
-
 async function loadAll(){
   try {
     await loadWL(); await loadPos();
-    ensureSignalDrift();
     // 汇率异步刷新；到达后只重绘组合摘要，不阻塞行情与信号加载。
     void ensureFxRates().then(fx => { if(fx) renderPortfolioBar(lastRaw, lastAna); });
     const needOptionScan=!optionScanAt||Date.now()-optionScanAt>=60000;
@@ -1793,7 +1757,7 @@ function renderGrid(raw, ana, ext){
   }
   const {query,filter}=stockListControls.view();
   rows=rows.filter(w=>{
-    const st=raw[w.symbol]||{}, ai=ana[w.symbol], eff=swingTier(ai)||effectivePlan(ai,w.symbol), action=eff.action;
+    const st=raw[w.symbol]||{}, ai=ana[w.symbol], eff=swingTier(ai), action=eff?.action;
     const text=(w.symbol+' '+(w.label||'')+' '+(st.name||'')).toUpperCase();
     return (!query||text.includes(query))&&(filter==='all'||stockActionGroup(action,eff.swing)===filter)&&activeMarkets.has(w.market||'US');
   });
@@ -1809,17 +1773,12 @@ function renderGrid(raw, ana, ext){
     const price = (st && st.price != null) ? fmtPrice(st.price, mkt) : "--";
     const chg = (st && st.changePct != null) ? (st.changePct>=0?"+":"") + st.changePct.toFixed(2) + "%" : "--";
     const chgCls = (st && st.changePct != null) ? (st.changePct>=0 ? "disc" : "prem") : "";
-    const plan = ai && ai.tradePlan ? ai.tradePlan : null;
-    const modelEff = effectivePlan(ai,s);
-    const eff = swingTier(ai) || modelEff;
+    const plan = activeProfileStrategy(ai);
+    const eff = swingTier(ai) || {};
     const sig = eff.action;
     const sigLabel = compactSignalLabel(eff);
-    const relScore = eff.reliability && eff.reliability.reliabilityScore != null ? eff.reliability.reliabilityScore : null;
-    const th = eff.reliability && eff.reliability.thresholdAudit ? eff.reliability.thresholdAudit : null;
-    const sigConf = relScore != null ? relScore : (plan && plan.confidence != null ? plan.confidence : ((ai&&ai.confidence!=null)?ai.confidence:null));
-    const sigSub = relScore != null
-      ? ('可靠 '+relScore+'%'+(th&&th.level&&th.level!=='neutral'?' · '+(th.passCurrent===false?'未通过':'已验证'):''))
-      : ((plan&&plan.risk?('风险'+plan.risk.label+' · '):'')+(sigConf!=null?('置信 '+sigConf+'%'):'待评估'));
+    const sigSub = [eff.swing?.directionAssessment?.label,eff.swing?.timingAssessment?.label].filter(Boolean).join(' · ')
+      || plan?.setup?.label || plan?.regime?.label || '';
     const ind = indText(ai, (st && st.changePct != null) ? st.changePct : null);
     const pl = posHtml(s, st);
     const ex = (mkt === "US") ? (ext && ext[s]) : null;
@@ -1849,7 +1808,7 @@ function renderGrid(raw, ana, ext){
       '<td>'+price+extInline+'</td>'+
       '<td class="'+chgCls+'">'+chg+'</td>'+
       extCell +
-      '<td>'+(sig ? '<span class="badge '+(eff.swing ? swingBadgeClass(eff.swing) : sigClass(sig))+'" title="'+esc((eff.swing ? decisionSummaryForDisplay(eff.swing) : '')+(sigSub?'；'+sigSub:''))+'">'+esc(sigLabel)+'</span>' : '<span class="muted">—</span>')+'</td>'+
+      '<td>'+(sig ? '<span class="stock-signal-cell"><span class="badge '+(eff.swing ? swingBadgeClass(eff.swing) : sigClass(sig))+'" title="'+esc((eff.swing ? decisionSummaryForDisplay(eff.swing) : '')+(sigSub?'；'+sigSub:''))+'">'+esc(sigLabel)+'</span>'+(sigSub?'<small>'+esc(sigSub)+'</small>':'')+'</span>' : '<span class="muted">—</span>')+'</td>'+
       '<td class="ind">'+ind+'</td>'+
       shortCell+
       holdingCell+
@@ -2207,8 +2166,8 @@ async function loadDetail(s,opts={}){
     const w = wl.find(x => x.symbol === s) || {};
     const mkt = w.market || "US";
     const st = raw[s], ai = ana[s];
-    const plan = ai && ai.tradePlan ? ai.tradePlan : null;
-    const eff = swingTier(ai) || effectivePlan(ai, s);
+    const plan = activeProfileStrategy(ai);
+    const eff = swingTier(ai) || {};
     const sw = swingPlan(ai);
     const ex = (mkt === "US") ? extData[s] : null;
     const sessionRisk = ex && ex.riskOverlay ? ex.riskOverlay : null;
@@ -2244,15 +2203,8 @@ async function loadDetail(s,opts={}){
       headAction.textContent = label || "";
       headAction.className = "badge " + (cls || "b-null");
     }
-    if(sw?.dataGate?.status==='blocked'){
-      updateHeadBadge("信号暂停", "b-null");
-    } else if(sw && sw.signalAvailable===false){
-      updateHeadBadge(sw.label||"暂不可执行", "b-null");
-    } else if (plan){
-      updateHeadBadge(sw && (sw.label || stockActionLabel(sw.executionAction)) || '—', sw ? swingBadgeClass(sw) : "b-null");
-    } else if (ai && ai.signal){
-      const fallbackAction=DashboardActions.normalize(ai.signal);
-      updateHeadBadge(DashboardActions.label(fallbackAction), sigClass(fallbackAction));
+    if (sw){
+      updateHeadBadge(swingDisplay(sw).label, swingBadgeClass(sw));
     } else { updateHeadBadge("", "b-null"); }
     // 现价 + 涨跌%
     $("d_h_price").textContent = (st && st.price != null) ? fmtPrice(st.price, mkt) : "--";
@@ -2828,22 +2780,50 @@ if (_settingsSaveBtn) _settingsSaveBtn.addEventListener('click', saveSettingsMod
 const _riskResetBtn = $('settingsRiskResetBtn');
 if (_riskResetBtn) _riskResetBtn.addEventListener('click', resetSettingsRiskConfig);
 // Webhook 按钮事件已迁至控制中心（/control.html）
-loadMarketStatus();setInterval(loadMarketStatus,60*1000);
-loadDataHealth();setInterval(loadDataHealth,30*1000);
 setConnState('wait');
 loadAll();
 // 顶部全局大盘指数条：跟随股票看板刷新频率
 DashboardIndexBar.start();
-// 分时动态刷新：任一市场开盘 → 高频 5s；全休市 → 暂停行情轮询（仅保留市场状态检测以感知开盘）
+// 分时动态刷新：任一市场开盘 → 高频 5s；全休市 → 暂停行情轮询。
+// 市场状态和数据健康也按最近开盘点/最长 30 分钟低成本唤醒，不再固定 30/60 秒请求。
 let _loadTimer = null;
+let _marketStatusTimer = null;
+let _dataHealthTimer = null;
+let _marketWasOpen = null;
+function closedMarketWakeDelay(){
+  const now=Date.now();
+  const statuses=Object.values(DashboardMarketStatus.cache()||{});
+  const nextOpen=statuses.map(item=>Number(item?.next_open_at)).filter(value=>Number.isFinite(value)&&value>now).sort((a,b)=>a-b)[0];
+  return Number.isFinite(nextOpen)?Math.max(5000,Math.min(30*60*1000,nextOpen-now+2000)):30*60*1000;
+}
+function anyDashboardMarketOpen(){
+  return marketState("US").open || marketState("HK").open || marketState("KR").open || marketState("CN").open;
+}
+async function scheduleMarketStatusLoad(){
+  try{await loadMarketStatus();}catch(e){/* load 内部保留上次状态 */}
+  const anyOpen=anyDashboardMarketOpen();
+  if(_marketWasOpen===false&&anyOpen){
+    if(_loadTimer)clearTimeout(_loadTimer);
+    try{await loadAll();}catch(e){console.warn('[stock]',e?.message||e);}
+    scheduleLoad();
+  }
+  _marketWasOpen=anyOpen;
+  _marketStatusTimer=setTimeout(scheduleMarketStatusLoad,anyOpen?60*1000:closedMarketWakeDelay());
+}
+async function scheduleDataHealthLoad(){
+  try{await loadDataHealth();}catch(e){/* UI 已展示读取失败 */}
+  _dataHealthTimer=setTimeout(scheduleDataHealthLoad,anyDashboardMarketOpen()?30*1000:closedMarketWakeDelay());
+}
 function scheduleLoad() {
-  const anyOpen = marketState("US").open || marketState("HK").open || marketState("KR").open || marketState("CN").open;
+  const anyOpen = anyDashboardMarketOpen();
   if (anyOpen) {
     _loadTimer = setTimeout(async () => { try { await loadAll(); } catch (e) { console.warn('[stock]', e?.message||e); } scheduleLoad(); }, 5000);
   } else {
-    _loadTimer = setTimeout(scheduleLoad, 60000);
+    _loadTimer = setTimeout(scheduleLoad, closedMarketWakeDelay());
   }
 }
+scheduleMarketStatusLoad();
+scheduleDataHealthLoad();
 scheduleLoad();
 // 空头数据较慢，独立 5 分钟刷新；休市时跳过
 setInterval(() => {

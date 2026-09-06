@@ -1,12 +1,25 @@
 #!/usr/bin/env node
-import { evaluateTrackerSignal, premiumSignal, providerDate } from '../tracker_signal.mjs';
+import { evaluateTrackerSignal, premiumSignal, providerDate, resolveUnderlyingDecision } from '../tracker_signal.mjs';
 import { resolveRegisteredTrackerProduct, registeredTrackerProductCount } from '../tracker_product_registry.mjs';
 
 const failures=[];
 function check(cond,msg){if(cond)console.log('[PASS] '+msg);else{failures.push(msg);console.error('[FAIL] '+msg)}}
-const bullish={swingDecision:{opportunityStage:'READY',executionAction:'OPEN'}};
-const bearish={swingDecision:{opportunityStage:'RISK_OFF',executionAction:'CLOSE'}};
-const avoid={swingDecision:{opportunityStage:'RISK_OFF',executionAction:'NONE',reliabilityScore:5}};
+function currentAnalysis(action='WATCH', stage='WATCH', market='US', profileId='balanced') {
+  return {
+    market,
+    signalProfiles:{
+      effectiveProfileId:profileId,
+      profiles:{
+        [profileId]:{ profileId, available:true, strategy:{ profileId, available:true } },
+      },
+    },
+    swingDecision:{ profileId, opportunityStage:stage, executionAction:action, signalAvailable:true },
+  };
+}
+const bullish=currentAnalysis('OPEN','READY');
+const holding=currentAnalysis('HOLD','HOLD');
+const bearish=currentAnalysis('CLOSE','RISK_OFF');
+const avoid=currentAnalysis('NONE','RISK_OFF');
 
 check(providerDate('20260713 10:30:00')==='20260713','provider timestamp date is normalized');
 check(registeredTrackerProductCount()===4,'system registry contains the four supported tracker products');
@@ -19,12 +32,20 @@ check(!mismatchProduct.entry&&mismatchProduct.reason.includes('不符'),'underly
 const unknownProduct=resolveRegisteredTrackerProduct({etf:'UNKNOWN',etf_market:'US',underlying:'MU',underlying_market:'US'});
 check(!unknownProduct.entry&&unknownProduct.reason.includes('暂未收录'),'unknown product remains research-only');
 check(evaluateTrackerSignal({premium:-7,leverage:2,underlyingReturnPct:2,etfProviderTime:'20260713',underlyingProviderTime:'20260713',underlyingAnalysis:bullish}).signal==='STRONG_BUY','aligned discount with confirmed underlying keeps entry');
+const alignedEntry=evaluateTrackerSignal({premium:0,leverage:2,underlyingReturnPct:2,etfProviderTime:'20260713',underlyingProviderTime:'20260713',underlyingAnalysis:bullish});
+check(alignedEntry.signal==='BUY'&&alignedEntry.directionalSignal==='BUY','a formal stock entry remains the normalized ETF direction at a normal premium');
+const neutralDiscount=evaluateTrackerSignal({premium:-7,leverage:2,underlyingReturnPct:0,etfProviderTime:'20260713',underlyingProviderTime:'20260713',underlyingAnalysis:holding,positionShares:0});
+check(neutralDiscount.signal==='HOLD','a deep ETF discount cannot manufacture an entry without a stock entry action');
 const missingUnderlying=evaluateTrackerSignal({premium:-7,leverage:2,underlyingReturnPct:1,etfProviderTime:'20260713',underlyingProviderTime:'20260713',underlyingAnalysis:null});
 check(missingUnderlying.signal==='HOLD'&&missingUnderlying.gate==='underlying_analysis_missing','missing underlying analysis blocks a discount-only ETF entry');
+const legacyUnderlying=evaluateTrackerSignal({premium:-7,leverage:2,underlyingReturnPct:1,underlyingAnalysis:{swingDecision:{opportunityStage:'READY',executionAction:'OPEN'}}});
+check(legacyUnderlying.signal==='HOLD'&&!legacyUnderlying.underlyingContractAvailable,'legacy top-level stock fields cannot bypass the current stock signal contract');
+const wrongMarket=evaluateTrackerSignal({premium:-7,leverage:2,underlyingReturnPct:1,underlyingMarket:'HK',underlyingAnalysis:bullish});
+check(wrongMarket.signal==='HOLD'&&wrongMarket.underlyingContractReason==='market_mismatch','an analysis from the wrong market cannot drive the ETF direction');
 const mismatch=evaluateTrackerSignal({premium:-7,leverage:2,underlyingReturnPct:2,etfProviderTime:'20260712',underlyingProviderTime:'20260713',underlyingAnalysis:bullish});
 check(mismatch.signal==='HOLD'&&mismatch.gate==='date_mismatch','cross-market date mismatch blocks entry');
 const risk=evaluateTrackerSignal({premium:-7,leverage:2,underlyingReturnPct:-2,underlyingAnalysis:bearish,positionShares:200});
-check(risk.signal==='SELL'&&risk.originalSignal==='STRONG_BUY','underlying exit overrides discount and exits an existing position');
+check(risk.signal==='SELL'&&risk.gate==='underlying_exit','underlying exit overrides discount and exits an existing position');
 const avoidRisk=evaluateTrackerSignal({premium:-1,leverage:2,underlyingReturnPct:-3,underlyingAnalysis:avoid,positionShares:200});
 check(avoidRisk.signal==='REDUCE'&&avoidRisk.gate==='underlying_avoid','underlying AVOID maps an existing leveraged ETF position to REDUCE');
 const noPositionAvoid=evaluateTrackerSignal({premium:-1,leverage:2,underlyingReturnPct:-3,underlyingAnalysis:avoid,positionShares:0});
@@ -43,7 +64,10 @@ check(premiumSignal(-4,{status:'reference',thresholds:{strong_buy:-10,buy:-5,red
 check(premiumSignal(-4,{status:'active',thresholds:{strong_buy:-10,buy:-5,reduce:5,sell:10}}).signal==='HOLD','60-day active product bands can conservatively change formal thresholds');
 const illiquid=evaluateTrackerSignal({premium:-7,leverage:2,underlyingReturnPct:2,underlyingAnalysis:bullish,navQuality:'aligned',liquidityStatus:'low'});
 check(illiquid.signal==='HOLD'&&illiquid.gate==='low_liquidity','low liquidity blocks discount entry from a stale last trade');
-check(evaluateTrackerSignal({premium:9,leverage:2,underlyingReturnPct:2,underlyingAnalysis:bullish}).signal==='SELL','premium risk action is not weakened by bullish underlying');
+const overpricedEntry=evaluateTrackerSignal({premium:9,leverage:2,underlyingReturnPct:2,underlyingAnalysis:bullish});
+check(overpricedEntry.signal==='HOLD'&&overpricedEntry.directionalSignal==='BUY'&&overpricedEntry.gate==='premium_overpriced_entry','high ETF premium blocks execution while preserving the stock entry request for audit');
+const premiumTrim=evaluateTrackerSignal({premium:9,leverage:2,underlyingReturnPct:0,underlyingAnalysis:holding,positionShares:100});
+check(premiumTrim.signal==='REDUCE'&&premiumTrim.gate==='premium_risk','extreme premium may trim an existing neutral ETF position without declaring a stock reversal');
 
 // ===== P2：为 tracker_signal.mjs 5 个新 gate 补充单测 =====
 // makeBaseInput: 返回一个能产生正常 STRONG_BUY 信号的基础输入；
@@ -56,7 +80,7 @@ function makeBaseInput(overrides={}) {
     etfReturnPct: 0,                      // ETF 0%，不触发 etfKill
     etfProviderTime: '20260713',
     underlyingProviderTime: '20260713',   // 日期对齐 → navQuality='aligned'
-    underlyingAnalysis: { swingDecision: { opportunityStage:'READY', executionAction:'OPEN' } },  // bullish
+    underlyingAnalysis: bullish,
     positionShares: 0,                    // 默认无持仓
     navQuality: 'aligned',
     ...overrides,
@@ -141,7 +165,7 @@ check((() => {
     etfProviderTime: '20260720',          // HK 周一
     underlyingProviderTime: '20260717',   // KR 上周五（休市）
     navQuality: 'cross_market_exact',     // 调用方误传，应被覆盖
-    underlyingAnalysis: { swingDecision: { opportunityStage:'READY', executionAction:'OPEN' } },
+    underlyingAnalysis: bullish,
   });
   const result = evaluateTrackerSignal(input);
   return result.signal === 'HOLD' && result.gate === 'date_mismatch' && result.navQuality === 'date_mismatch';
@@ -154,7 +178,7 @@ check((() => {
     etfProviderTime: '20260720',
     underlyingProviderTime: '20260717',
     navQuality: 'cross_market_approx',
-    underlyingAnalysis: { swingDecision: { opportunityStage:'READY', executionAction:'OPEN' } },
+    underlyingAnalysis: bullish,
   });
   const result = evaluateTrackerSignal(input);
   return result.signal === 'HOLD' && result.gate === 'date_mismatch';
@@ -167,7 +191,7 @@ check((() => {
     etfProviderTime: '20260720',
     underlyingProviderTime: '20260720',
     navQuality: 'cross_market_exact',
-    underlyingAnalysis: { swingDecision: { opportunityStage:'READY', executionAction:'OPEN' } },
+    underlyingAnalysis: bullish,
   });
   const result = evaluateTrackerSignal(input);
   return result.signal === 'STRONG_BUY' && result.gate === 'pass';
@@ -188,18 +212,26 @@ check((() => {
     productEntryEligible:true,
     premiumBands:{status:'insufficient',sample_count:29,thresholds:{strong_buy:-6,buy:-3,reduce:4,sell:8}},
   }));
-  return result.signal==='HOLD' && result.gate==='premium_history_insufficient' && result.layers.execution.includes('收盘样本');
-})(), 'intraday or insufficient daily samples cannot activate an ETF entry threshold');
+  return result.signal==='STRONG_BUY' && result.gate==='pass' && result.layers.execution.includes('保守固定阈值');
+})(), 'insufficient daily samples use conservative fixed bands without blocking a current stock entry');
 
 check((() => {
   const result=evaluateTrackerSignal(makeBaseInput({
     productEntryEligible:false,
     premium:9,
     positionShares:100,
+    underlyingAnalysis:holding,
     premiumBands:{status:'insufficient',sample_count:0,thresholds:{strong_buy:-6,buy:-3,reduce:4,sell:8}},
   }));
-  return result.signal==='SELL';
+  return result.signal==='REDUCE' && result.gate==='premium_risk';
 })(), 'product verification never suppresses an existing-position premium risk action');
+
+check((() => {
+  const resolved=resolveUnderlyingDecision(bullish,'US');
+  const mismatched={...bullish,swingDecision:{...bullish.swingDecision,profileId:'responsive'}};
+  return resolved.available===true && resolved.action==='OPEN'
+    && resolveUnderlyingDecision(mismatched,'US').available===false;
+})(), 'tracker accepts only the decision produced by the currently selected stock personality');
 
 if(failures.length)process.exit(1);
 console.log('[OK] Tracker signal behavior checks passed.');

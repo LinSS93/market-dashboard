@@ -138,7 +138,7 @@ function recordTrackerSignalAudit(rec, marketState='closed') {
     underlying_action=excluded.underlying_action,etf_quote_date=excluded.etf_quote_date,underlying_quote_date=excluded.underlying_quote_date,market_state=excluded.market_state,
     earnings_event_type=excluded.earnings_event_type,earnings_source_confidence=excluded.earnings_source_confidence,earnings_policy_json=excluded.earnings_policy_json`)
     .run(rec.id,minuteKey,ts,rec.etf,rec.underlying||null,rec.etf_price??null,rec.nav??null,rec.premium??null,
-      rec.original_signal||null,rec.signal||null,rec.signal_gate||null,rec.nav_quality||null,rec.underlying_action||null,
+      rec.original_signal||rec.underlying_requested_action||rec.research_action||null,rec.execution_action||rec.signal||null,rec.signal_gate||null,rec.nav_quality||null,rec.underlying_requested_action||rec.underlying_action||null,
       rec.etf_quote_date||null,rec.underlying_quote_date||null,String(marketState||'closed'),
       rec.earnings?.event_type||null,rec.earnings?.source_confidence||null,
       rec.earnings_policy ? JSON.stringify(rec.earnings_policy) : null);

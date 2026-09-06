@@ -1,5 +1,6 @@
 // 股票监控的主输出不是又一个分数，而是“自上次有效日线以来发生了什么”。
 // 本模块只描述已存在的正式技术状态，不改变评分、仓位或执行裁决。
+import { selectedStockStrategy } from './stock_signal_contract.mjs';
 
 export const MONITORED_SETUP_KEYS = Object.freeze([
   'trend_pullback',
@@ -46,7 +47,7 @@ function isRiskState(snapshot) {
 }
 
 export function snapshotFromAnalysis(analysis = {}) {
-  const plan = analysis?.tradePlan || {};
+  const plan = selectedStockStrategy(analysis) || {};
   const swing = analysis?.swingDecision || {};
   const readiness = swing?.executionReadiness || {};
   const setup = plan?.setup || {};
@@ -65,20 +66,16 @@ export function snapshotFromAnalysis(analysis = {}) {
 export function snapshotFromStoredPayload(row = {}) {
   let payload = {};
   try { payload = typeof row.payload === 'string' ? JSON.parse(row.payload) : (row.payload || {}); } catch {}
-  const plan = payload?.tradePlan || {};
+  const plan = payload?.profileStrategy || {};
   const swing = payload?.swingDecision || {};
   const readiness = swing?.executionReadiness || {};
   const setup = plan?.setup || {};
-  const legacyAction = String(row?.action || swing?.state || '').toUpperCase();
-  const legacyStage = ['PROBE','ADD'].includes(legacyAction) ? 'READY'
-    : ['TRIM','EXIT','AVOID'].includes(legacyAction) ? 'RISK_OFF' : 'NO_SETUP';
-  const mappedAction = legacyAction === 'PROBE' ? 'OPEN' : legacyAction === 'TRIM' ? 'REDUCE'
-    : legacyAction === 'EXIT' ? 'CLOSE' : ['ADD','HOLD'].includes(legacyAction) ? legacyAction : 'NONE';
+  const currentContract = !!swing?.profileId && !!payload?.profileStrategy;
   return {
     asOfDate: row?.date || null,
-    daily: true,
-    opportunityStage: normalizedStage(row?.opportunity_stage || swing?.opportunityStage || legacyStage),
-    executionAction: normalizedAction(row?.execution_action || swing?.executionAction || mappedAction),
+    daily: currentContract,
+    opportunityStage: normalizedStage(swing?.opportunityStage),
+    executionAction: normalizedAction(swing?.executionAction),
     setupKey: normalizedSetupKey(readiness?.setupKey || setup?.key),
     setupLabel: readiness?.setupLabel || setup?.label || SETUP_META[normalizedSetupKey(readiness?.setupKey || setup?.key)].label,
     readiness: normalizedReadiness(readiness?.status),

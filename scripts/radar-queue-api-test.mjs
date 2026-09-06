@@ -29,6 +29,7 @@ import {
   autoAuditProvisionalAssets,
 } from '../radar_query_api.mjs';
 import { SCORING_PROFILE_VERSION } from '../radar_scoring.mjs';
+import { lastCompletedTradingDate } from '../market_calendar.mjs';
 
 let pass = 0, fail = 0;
 function assert(cond, msg) {
@@ -682,9 +683,10 @@ for (const b of ['risk_review', 'cross_confirm', 'new_signal', 'audit_pending', 
 }
 
 // --- 审计修正：评分时效（score_stale）与 queue_as_of 真实口径 ---
-// 插入一个"开始时间在未来"的完整日扫 job：所有 fixture 评分（created_at=NOW）
+// 插入应到交易日、但开始时间在未来的完整日扫 job：所有 fixture 评分（created_at=NOW）
 // 均早于该扫描开始时间 → 全部标记 score_stale，退出 cross_confirm。
 console.log('\n--- 审计修正：评分时效（score_stale）+ queue_as_of 来自最后完整日扫 ---');
+const staleTradeDate = lastCompletedTradingDate('US');
 const staleRunInfo = db.prepare(`
   INSERT INTO radar_v2_runs (market, trigger, status, started_at, completed_at)
   VALUES ('US', 'scheduled_daily', 'complete', ?, ?)
@@ -693,8 +695,8 @@ db.prepare(`
   INSERT INTO radar_v2_scan_jobs (
     market, trigger, scan_mode, trade_date, status, total_symbols,
     succeeded_count, run_id, created_at, updated_at
-  ) VALUES ('US', 'scheduled_daily', 'official', '2999-01-01', 'complete', 10, 10, ?, ?, ?)
-`).run(staleRunInfo.lastInsertRowid, NOW, NOW);
+  ) VALUES ('US', 'scheduled_daily', 'official', ?, 'complete', 10, 10, ?, ?, ?)
+`).run(staleTradeDate, staleRunInfo.lastInsertRowid, NOW, NOW);
 
 const staleResult = listResearchQueue({ market: 'US', limit: 30 });
 const staleCross = staleResult.data.items.find((i) => i.symbol === 'CROSS');
@@ -708,10 +710,10 @@ if (staleCross) {
 assert(staleResult.data.buckets.cross_confirm.total === 0,
   'cross_confirm.total=0（全部评分未随最近完整日扫刷新）');
 const staleAsOf = staleResult.data.queue_as_of.US;
-assert(staleAsOf.last_complete_date === '2999-01-01',
-  'queue_as_of.US.last_complete_date 来自最后完整日扫 job（2999-01-01）');
-assert(staleAsOf.scan_status === 'none',
-  'queue_as_of.US.scan_status=none（应到交易日无 job）');
+assert(staleAsOf.last_complete_date === staleTradeDate,
+  `queue_as_of.US.last_complete_date 来自应到交易日完整日扫 job（${staleTradeDate}）`);
+assert(staleAsOf.scan_status === 'complete',
+  'queue_as_of.US.scan_status=complete（应到交易日正式 job 已完成）');
 assert(staleResult.data.items[0].bucket === 'risk_review',
   '评分过期不影响 risk_review 置顶');
 
@@ -809,8 +811,8 @@ assert(fcRisky != null && fcRisky.fundamental_coverage === 'negative',
 
 // 7. 自动资产审计（审计修正 P1：证据路径 + 市场规则路径双通道自动分类）
 console.log('\n--- 审计修正：自动资产审计（证据 + 市场规则双通道） ---');
-// 清除 score_stale fixture（2999 未来 job），恢复评分新鲜度
-db.prepare("DELETE FROM radar_v2_scan_jobs WHERE trade_date = '2999-01-01'").run();
+// 清除 score_stale fixture，恢复评分新鲜度
+db.prepare('DELETE FROM radar_v2_scan_jobs WHERE trade_date = ?').run(staleTradeDate);
 
 // event_fact 插入辅助（V2 schema 已建表，含 link_status）
 function insertEventFact(market, symbol, source, opts = {}) {

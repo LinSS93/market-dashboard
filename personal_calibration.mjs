@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { parse } from 'csv-parse/sync';
+import { selectedStockStrategy } from './stock_signal_contract.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DB_PATH = join(__dirname, 'data', 'market_data.db');
@@ -356,8 +357,9 @@ function rebuildAlignment(analyzeAt) {
       if (!signalBar || idx + 1 >= bars.length) { insert.run(t.id, t.symbol, effective.date, signalBar?.date || null, null, null, null, null, null, null, null, 'unavailable', '前置信号或后续收益数据不足'); continue; }
       let a = null;
       try { a = analyzeAt ? analyzeAt(t.symbol, t.market, signalBar.date) : null; } catch {}
-      const action = a?.tradePlan?.action || null;
-      const label = a?.tradePlan?.actionLabel || action;
+      const strategy = selectedStockStrategy(a);
+      const action = strategy?.action || null;
+      const label = strategy?.actionLabel || action;
       const buyActions = ['BUY', 'ADD', 'WATCH'];
       const sellActions = ['SELL', 'REDUCE'];
       const match = action ? (t.side === '买入' ? buyActions.includes(action) : sellActions.includes(action)) : null;

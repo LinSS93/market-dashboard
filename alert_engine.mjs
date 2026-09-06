@@ -147,7 +147,11 @@ function loadAlertLog() {
 function loadAlertState() {
   try {
     const o = JSON.parse(readFileSync(ALERT_STATE_FILE, 'utf8'));
-    for (const [k, v] of Object.entries(o || {})) if (v && v.signal) alertState.set(k, { signal: normSignal(v.signal), ts: Number(v.ts) || 0 });
+    for (const [k, v] of Object.entries(o || {})) {
+      if (!v?.signal) continue;
+      const signal = normalizePersistedAlertSignal(k, v.signal);
+      if (signal) alertState.set(k, { signal, ts: Number(v.ts) || 0 });
+    }
   } catch {}
 }
 function saveAlertState() { try { writeFileSync(ALERT_STATE_FILE, JSON.stringify(Object.fromEntries(alertState))); } catch {} }
@@ -161,11 +165,18 @@ function normSignal(s) {
 // 曾经词表兜底会把 OPEN/REDUCE/CLOSE 全部归一成 WATCH/TRIM，导致档位永不匹配、推送静默失效。
 const STOCK_ALERT_TIERS = new Set(DEFAULT_ALERT_SETTINGS.stockTiers);
 const STOCK_ALERT_LEGACY = { PROBE:'OPEN', TRIM:'REDUCE', EXIT:'CLOSE' };
+const STOCK_ALERT_LABELS = Object.freeze({ OPEN:'可试仓', ADD:'可加仓', REDUCE:'减仓', CLOSE:'清仓' });
 function normStockSignal(s) {
   const v = String(s || '').trim().toUpperCase();
   if (!v) return null;
   const mapped = STOCK_ALERT_LEGACY[v] || v;
   return STOCK_ALERT_TIERS.has(mapped) ? mapped : null;
+}
+function normalizePersistedAlertSignal(key, signal) {
+  return String(key || '').startsWith('stock:') ? normStockSignal(signal) : normSignal(signal);
+}
+function alertSignalLabel(type, signal) {
+  return type === 'stock' ? (STOCK_ALERT_LABELS[signal] || signal) : DashboardActions.label(signal);
 }
 
 // 经 curl 子进程推送 Webhook（-d @file 避免 shell 引号问题）。异步，不冻结事件循环。
@@ -283,7 +294,7 @@ function maybeAlert(type, key, symbol, rawSignal, detail, allowNotify = true, me
     title,
     name: meta.name || '',
     symbol,
-    action: DashboardActions.label(signal),
+    action: alertSignalLabel(type, signal),
     detail: detail || '',
     time: new Date().toLocaleString('zh-CN', { hour12: false }),
   });
@@ -327,7 +338,7 @@ function checkStockAlerts() {
     for (const w of getWatchlist()) {
       // 休市市场：行情为上一交易日收盘，信号不可靠，不推送 Webhook（页面仍照常显示供参考）
       const a = ana[w.symbol];
-      if (!a || !a.signal) continue;
+      if (!a?.swingDecision) continue;
       const position=getStockPositions().find(p=>p.symbol===w.symbol)||null;
       const eff = stockAlertAction(a,position);
       if (!eff.action) continue;
@@ -335,10 +346,10 @@ function checkStockAlerts() {
       const marketState = marketOpen ? 'open' : 'closed';
       const riskAction = eff.action === 'REDUCE' || eff.action === 'CLOSE';
       const allowNotify = !!eff.notifyEligible && (marketOpen || riskAction);
-      const conf = [eff.label ? `动作：${eff.label}` : '', eff.detail || '', (!marketOpen && riskAction) ? '市场休市：作为下一交易时段风险计划' : '', (a.confidence != null) ? `置信度：${a.confidence}%` : ''].filter(Boolean).join('；');
+      const conf = [eff.label ? `动作：${eff.label}` : '', eff.detail || '', (!marketOpen && riskAction) ? '市场休市：作为下一交易时段风险计划' : ''].filter(Boolean).join('；');
       recordStockSignalAudit({symbol:w.symbol,market:w.market||'US',price:a.currentPrice,
-        raw_action:a.tradePlan?.action||a.signal,final_action:eff.action,action_label:eff.label,
-        confidence:a.swingDecision?.reliabilityScore??a.reliability?.reliabilityScore??a.confidence,
+        raw_action:a.swingDecision?.executionReadiness?.technicalAction||null,final_action:eff.action,action_label:eff.label,
+        confidence:a.swingDecision?.reliabilityScore??a.reliability?.reliabilityScore??null,
         actionable:!!eff.notifyEligible,reason:eff.detail,signal_date:a.asOfDate,ts:Date.now()},marketState);
       maybeAlert('stock', 'stock:' + w.symbol,
         w.symbol + ((w.market && w.market !== 'US') ? ' (' + w.market + ')' : ''),
@@ -619,4 +630,6 @@ export {
   feishuIntegrationStatus,
   pushFeishu,
   etfAlertPrimed,
+  alertSignalLabel,
+  normalizePersistedAlertSignal,
 };

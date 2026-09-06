@@ -623,6 +623,8 @@ function execSchema(db) {
       matured INTEGER NOT NULL DEFAULT 0,   -- 0/1/2/3 可比较成熟制（基准严格匹配才推进）
       absolute_matured INTEGER NOT NULL DEFAULT 0,  -- 0/1/2/3 个股收益成熟制（不依赖基准）
       data_quality TEXT NOT NULL DEFAULT 'unknown',  -- ok / stale_bars / missing_benchmark / insufficient_bars
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      next_retry_at INTEGER,
       updated_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_v2_dossier_outcomes_matured
@@ -764,6 +766,10 @@ function execSchema(db) {
 
   // dossier_outcomes migration: 补充 absolute_matured 列（P1-2: 拆分可比较成熟与绝对成熟）
   try { db.exec(`ALTER TABLE radar_v2_dossier_outcomes ADD COLUMN absolute_matured INTEGER NOT NULL DEFAULT 0`); } catch (e) { reportMigrationError(e); }
+  try { db.exec(`ALTER TABLE radar_v2_dossier_outcomes ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0`); } catch (e) { reportMigrationError(e); }
+  try { db.exec(`ALTER TABLE radar_v2_dossier_outcomes ADD COLUMN next_retry_at INTEGER`); } catch (e) { reportMigrationError(e); }
+  try { db.exec(`CREATE INDEX IF NOT EXISTS idx_v2_dossier_outcomes_retry
+    ON radar_v2_dossier_outcomes(entry_date, next_retry_at, retry_count, updated_at)`); } catch (e) { reportMigrationError(e); }
   // P1-2 回填：旧 outcome 的 matured 是个股收益口径（旧逻辑），等价于 absolute_matured。
   // 把 matured > 0 AND absolute_matured = 0 的行回填，避免 matured=3 的旧行永远不进更新队列导致 absolute_matured=0。
   try { db.exec(`UPDATE radar_v2_dossier_outcomes SET absolute_matured = matured WHERE absolute_matured = 0 AND matured > 0`); } catch (e) { reportMigrationError(e); }
@@ -1500,6 +1506,13 @@ export const releaseLease = lazyStmt(`
   WHERE id = @id
 `);
 
+// 正常 worker 释放租约必须校验 owner；releaseLease 仅供启动修复等管理路径使用。
+export const releaseLeaseOwned = lazyStmt(`
+  UPDATE radar_v2_scan_jobs
+  SET lease_owner = NULL, lease_expires_at = NULL, updated_at = @updated_at
+  WHERE id = @id AND lease_owner = @lease_owner
+`);
+
 // 原子推进 cursor + 累加统计（批次完成后调用）
 export const advanceJobProgress = lazyStmt(`
   UPDATE radar_v2_scan_jobs
@@ -1511,6 +1524,18 @@ export const advanceJobProgress = lazyStmt(`
       candidates_count = candidates_count + @candidates_delta,
       updated_at = @updated_at
   WHERE id = @id
+`);
+
+export const advanceJobProgressOwned = lazyStmt(`
+  UPDATE radar_v2_scan_jobs
+  SET cursor_offset = MIN(total_symbols, cursor_offset + @processed_delta),
+      attempted_count = attempted_count + @attempted_delta,
+      succeeded_count = succeeded_count + @succeeded_delta,
+      skipped_count = skipped_count + @skipped_delta,
+      failed_count = failed_count + @failed_delta,
+      candidates_count = candidates_count + @candidates_delta,
+      updated_at = @updated_at
+  WHERE id = @id AND lease_owner = @lease_owner
 `);
 
 // 设置 job 最终状态（complete/partial/failed）+ 退避时间 + run_id
@@ -1529,6 +1554,23 @@ export const finalizeScanJob = lazyStmt(`
       lease_expires_at = NULL,
       updated_at = @updated_at
   WHERE id = @id
+`);
+
+export const finalizeScanJobOwned = lazyStmt(`
+  UPDATE radar_v2_scan_jobs
+  SET status = @status,
+      run_id = @run_id,
+      cursor_offset = @cursor_offset,
+      attempted_count = @attempted_count,
+      succeeded_count = @succeeded_count,
+      skipped_count = @skipped_count,
+      failed_count = @failed_count,
+      candidates_count = @candidates_count,
+      retry_after = @retry_after,
+      lease_owner = NULL,
+      lease_expires_at = NULL,
+      updated_at = @updated_at
+  WHERE id = @id AND lease_owner = @lease_owner
 `);
 
 // 续租（长时间运行的 job 需要定期续租，防止租约过期被抢占）
@@ -1947,6 +1989,7 @@ export const updateDossierOutcomeEntry = lazyStmt(`
       entry_price = @entry_price,
       benchmark_entry = @benchmark_entry,
       data_quality = @data_quality,
+      next_retry_at = NULL,
       updated_at = @updated_at
   WHERE dossier_id = @dossier_id
 `);
@@ -1966,9 +2009,10 @@ export const updateDossierOutcomeReturns = lazyStmt(`
     mfe_20d = @mfe_20d,
     mae_20d = @mae_20d,
     matured = @matured,
-    absolute_matured = @absolute_matured,
-    data_quality = @data_quality,
-    updated_at = @updated_at
+      absolute_matured = @absolute_matured,
+      data_quality = @data_quality,
+      next_retry_at = NULL,
+      updated_at = @updated_at
   WHERE dossier_id = @dossier_id
 `);
 
@@ -1982,8 +2026,9 @@ export const getDossierOutcome = lazyStmt(`
 export const getDossierOutcomesNeedingInit = lazyStmt(`
   SELECT * FROM radar_v2_dossier_outcomes
   WHERE entry_date IS NULL
-  ORDER BY available_at ASC
-  LIMIT ?
+    AND (next_retry_at IS NULL OR next_retry_at <= @now)
+  ORDER BY retry_count ASC, updated_at ASC, available_at ASC
+  LIMIT @limit
 `);
 
 // 查询未成熟的 outcome（matured < 3 且 entry_date IS NOT NULL，按 updated_at 升序）
@@ -1992,8 +2037,17 @@ export const getDossierOutcomesNeedingUpdate = lazyStmt(`
   SELECT * FROM radar_v2_dossier_outcomes
   WHERE matured < 3
     AND entry_date IS NOT NULL
-  ORDER BY updated_at ASC
-  LIMIT ?
+    AND (next_retry_at IS NULL OR next_retry_at <= @now)
+  ORDER BY retry_count ASC, updated_at ASC
+  LIMIT @limit
+`);
+
+export const deferDossierOutcomeRetry = lazyStmt(`
+  UPDATE radar_v2_dossier_outcomes
+  SET retry_count = retry_count + 1,
+      next_retry_at = @next_retry_at,
+      updated_at = @updated_at
+  WHERE dossier_id = @dossier_id
 `);
 
 // 查询 channel='trend' 且 available_at 已知但缺 outcome 记录的 dossier（P1-1: 历史 backfill）

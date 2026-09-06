@@ -14,7 +14,7 @@ Set-Location $AppDir
 
 while ($true) {
   try {
-    & $NodeExe (Join-Path $AppDir 'server.mjs') 1>> $outLog 2>> $errLog
+    & $NodeExe (Join-Path $AppDir 'scripts\start-radar-server.mjs') 1>> $outLog 2>> $errLog
     $exitCode = $LASTEXITCODE
     Add-Content -LiteralPath $errLog -Value "[$(Get-Date -Format s)] server exited with code $exitCode; restarting in 10 seconds"
   } catch {

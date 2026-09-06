@@ -19,17 +19,13 @@ const bars = Array.from({ length: 320 }, (_, index) => {
 });
 const closes = bars.map(bar => bar.close);
 const volumes = bars.map(bar => bar.volume);
-const formalAnalysis = {
-  currentPrice: closes.at(-1), score: 0.2, signal: 'BUY', rsi12: 55,
+const sharedMarketContext = {
+  currentPrice: closes.at(-1), rsi12: 55,
   sma20: 130, sma50: 126, sma200: 108,
   bollMiddle: 130, bollUpper: 140, bollLower: 120, bollPctB: 0.5,
   dataQuality: { level: 'ok', issues: [] }, daily: true,
-  tradePlan: {
-    action: 'WATCH', setup: { key: 'none', label: '等待确认' },
-    regime: { key: 'range' }, risk: { level: 'low' }, dataQuality: { level: 'ok' },
-  },
 };
-const bundle = computeSignalProfileBundle({ closes, volumes, relativeStrength: null, formalAnalysis });
+const bundle = computeSignalProfileBundle({ closes, volumes, relativeStrength: null, sharedMarketContext });
 
 for (const profileId of ['responsive', 'confirmed']) {
   const chart = buildSignalProfileChartStudies({ bars, profileId });
@@ -59,6 +55,10 @@ check(forming.status === 'forming' && forming.levels.every(item => item.active =
 const blocked = buildStockStagePricePlan({ decision: { profileId: 'balanced', opportunityStage: 'BLOCKED', executionAction: 'NONE', zones: { confirmation: 105, invalidation: 95, reassessment: 115 }, executionReadiness: { setupKey: 'trend_pullback' } }, strategy: { ...strategy, setup: { key: 'trend_pullback' } } });
 check(blocked.status === 'blocked' && blocked.levels.length === 3, 'blocked stage preserves confirmation, invalidation and review levels');
 check(blocked.levels.every(item => item.active === false), 'blocked levels are explicitly inactive');
+
+const extended = buildStockStagePricePlan({ decision:{ profileId:'balanced', opportunityStage:'BLOCKED', executionAction:'NONE', profileStrategy:{ referenceMa:100 }, executionReadiness:{ setupKey:'extended' }, zones:{} }, strategy:{ ...strategy, setup:{ key:'extended' } } });
+check(extended.levels[0]?.label === '回踩复核参考' && extended.levels[0]?.active === false,
+  'extended bullish timing exposes only an inactive pullback review reference');
 
 const ready = buildStockStagePricePlan({ decision: { profileId: 'balanced', opportunityStage: 'READY', executionAction: 'OPEN', zones: { buyLow: 101, buyHigh: 103, confirmation: 102, invalidation: 96, reassessment: 114 }, executionReadiness: { setupKey: 'breakout_follow' } } });
 check(ready.status === 'execution' && ready.isExecutionPlan === true, 'ready stage is the only bullish execution plan');

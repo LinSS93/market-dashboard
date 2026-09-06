@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { advanceAlertState } from '../alert_logic.mjs';
+import { alertSignalLabel, normalizePersistedAlertSignal } from '../alert_engine.mjs';
 
 const failures=[];
 function check(cond,msg){if(cond)console.log('[PASS] '+msg);else{failures.push(msg);console.error('[FAIL] '+msg)}}
@@ -21,6 +22,13 @@ const closedEntry=advanceAlertState(left.next,'PROBE',{primed:true,selected:true
 check(!closedEntry.notify&&closedEntry.next.signal==='PROBE','closed-market entry is recorded but never notified');
 const closedSame=advanceAlertState(closedEntry.next,'PROBE',{primed:true,selected:true,allowNotify:true,now:8});
 check(!closedSame.notify&&closedSame.reason==='same_state','same signal does not repeat when market later opens');
+check(alertSignalLabel('stock','OPEN')==='可试仓'&&alertSignalLabel('stock','CLOSE')==='清仓',
+  'stock notification labels do not fall through the ETF/shared action taxonomy');
+check(normalizePersistedAlertSignal('stock:NVDA','OPEN')==='OPEN'
+  && normalizePersistedAlertSignal('stock:NVDA','CLOSE')==='CLOSE',
+  'persisted stock actions retain their stock execution vocabulary after restart');
+check(normalizePersistedAlertSignal('etf:1','PROBE')==='PROBE',
+  'persisted ETF actions still use the shared ETF taxonomy');
 
 if(failures.length)process.exit(1);
 console.log('[OK] Alert behavior checks passed.');

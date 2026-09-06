@@ -93,6 +93,10 @@ check(report.performance?.entry?.label?.includes('长仓入场')
   && report.performance?.defensive?.label?.includes('风险保护'),
   'the report keeps long-entry efficacy and defensive validation in separate labelled cohorts');
 check(isCurrentSignalDriftReport(report), 'new reports carry the current report-version contract');
+check(report.profileIdentity?.profileId && report.profileIdentity?.profileVersion && report.profileIdentity?.strategyVersion,
+  'formal drift reports are bound to one complete personality and strategy identity');
+check(!isCurrentSignalDriftReport({ ...report, profileIdentity:{ ...report.profileIdentity, strategyVersion:'other-policy' } }),
+  'a cached report from another personality strategy cannot be reused as the current baseline');
 check(!isCurrentSignalDriftReport({ engineVersion:report.engineVersion, segments:{ byMarketState:{} } }),
   'pre-cold-start cached reports are rejected so the lab does not show stale semantics');
 const now = 1_800_000_000_000;

@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   FORMAL_SIGNAL_PROFILE_ID,
   PROFILE_SIGNAL_THRESHOLDS,
@@ -11,6 +13,7 @@ import {
   resolveSignalProfileSelection,
   signalForProfileScore,
 } from '../stock_signal_profiles.mjs';
+import { buildStockProfileStrategy } from '../stock_profile_strategy.mjs';
 
 let assertions = 0;
 function check(value, message) {
@@ -32,7 +35,8 @@ equal(catalog.find(profile => profile.id === 'balanced').parameters.rsi.period, 
 equal(catalog.find(profile => profile.id === 'confirmed').parameters.rsi.period, 24, 'confirmed uses RSI24');
 equal(catalog.find(profile => profile.id === 'confirmed').parameters.confirmationDays, 3, 'confirmed requires three-day trend persistence');
 equal(catalog.find(profile => profile.id === 'confirmed').parameters.minimumBars, 200, 'confirmed waits for enough history to initialize MA200');
-equal(catalog.find(profile => profile.id === 'balanced').parameters.trend.referenceMa, 50, 'balanced metadata mirrors the formal MA50 vote');
+equal(catalog.find(profile => profile.id === 'balanced').parameters.trend.fastMa, 20, 'balanced direction uses MA20 as its responsive structure line');
+equal(catalog.find(profile => profile.id === 'balanced').parameters.trend.slowMa, 50, 'balanced direction uses MA50 as its slow structure line');
 equal(catalog.find(profile => profile.id === 'balanced').parameters.volume.mode, 'signed_return_volume_correlation', 'balanced metadata mirrors the formal volume-price vote');
 equal(PROFILE_SIGNAL_THRESHOLDS.directional, 0.15, 'all profiles share the formal directional threshold');
 equal(signalForProfileScore(0.1499), 'NEUTRAL', 'score below the common threshold stays neutral');
@@ -64,7 +68,7 @@ const bundle = computeSignalProfileBundle({
   closes,
   volumes,
   relativeStrength,
-  formalAnalysis: {
+  sharedMarketContext: {
     score: 0.3142,
     signal: 'BUY',
     rsi12: 48.5,
@@ -75,10 +79,10 @@ const bundle = computeSignalProfileBundle({
 });
 equal(bundle.schemaVersion, STOCK_SIGNAL_PROFILE_SCHEMA_VERSION, 'bundle is versioned');
 equal(bundle.effectiveProfileId, 'balanced', 'new bundles remain formally locked to balanced');
-equal(bundle.profiles.balanced.score, 0.3142, 'balanced profile mirrors formal score exactly');
-equal(bundle.profiles.balanced.signal, 'BUY', 'balanced profile mirrors formal signal exactly');
+check(bundle.profiles.balanced.score >= PROFILE_SIGNAL_THRESHOLDS.directional, 'balanced direction score is derived from directional evidence only');
+equal(bundle.profiles.balanced.signal, 'STRONG_BULLISH', 'balanced profile uses the common personality signal vocabulary');
 equal(bundle.profiles.balanced.formalActionEligible, true, 'balanced retains formal eligibility');
-equal(bundle.profiles.balanced.metrics.rsi, 48.5, 'balanced output preserves the formal RSI12 metric');
+equal(bundle.profiles.balanced.metrics.rsi, 100, 'balanced RSI12 is recomputed from the same aligned close series');
 equal(bundle.profiles.balanced.metrics.marketRegime, 'range', 'balanced output preserves market regime provenance');
 equal(bundle.profiles.responsive.thresholds.directional, 0.15, 'responsive uses the common direction threshold');
 equal(bundle.profiles.confirmed.thresholds.directional, 0.15, 'confirmed uses the common direction threshold');
@@ -92,13 +96,16 @@ equal(bundle.profiles.responsive.formalActionEligible, false, 'responsive is res
 equal(bundle.profiles.confirmed.formalActionEligible, false, 'confirmed is research-only');
 equal(bundle.profiles.confirmed.confirmation.requiredDays, 3, 'confirmed output carries its persistence requirement');
 equal(bundle.profiles.responsive.strategy.profileId, 'responsive', 'responsive owns an execution strategy instead of borrowing balanced');
-equal(bundle.profiles.balanced.strategy.action, 'WAIT', 'balanced strategy preserves the supplied formal plan action');
+equal(bundle.profiles.balanced.strategy.action, 'WAIT', 'balanced strategy is compiled by the shared personality strategy path');
 equal(bundle.profiles.confirmed.strategy.policy.validSessions, 5, 'confirmed strategy has a longer validity window');
 equal(bundle.profiles.responsive.strategy.policy.validSessions, 1, 'responsive strategy has a shorter validity window');
 equal(bundle.profiles.responsive.confirmation, null, 'responsive has no hidden confirmation state');
 equal(bundle.profiles.responsive.confirmed, false, 'responsive never exposes an invisible confirmed bit');
 check(Array.isArray(bundle.profiles.responsive.votes) && bundle.profiles.responsive.votes.length === 6, 'responsive keeps diversified six-factor evidence');
 check(Array.isArray(bundle.profiles.confirmed.votes) && bundle.profiles.confirmed.votes.length === 6, 'confirmed keeps diversified six-factor evidence');
+equal(bundle.profiles.balanced.votes.find(vote => vote.key === 'rsi').role, 'timing', 'RSI describes timing instead of reversing trend direction');
+equal(bundle.profiles.balanced.votes.find(vote => vote.key === 'volatility').role, 'timing', 'Bollinger position describes timing instead of reversing trend direction');
+equal(bundle.profiles.balanced.directionVotes.length, 4, 'only trend, MACD, volume confirmation and relative strength enter direction score');
 check(bundle.profiles.responsive.metrics.rsiBands.sampleCount >= 20, 'rolling RSI thresholds have adequate local history');
 equal(bundle.profiles.responsive.votes.find(vote => vote.key === 'rsi').vote, 0, 'degenerate RSI distributions are neutral rather than inverted as oversold');
 for (const profileId of ['responsive', 'confirmed']) {
@@ -115,7 +122,7 @@ const shortBundle = computeSignalProfileBundle({
   closes: closes.slice(0, 199),
   volumes: volumes.slice(0, 199),
   relativeStrength,
-  formalAnalysis: { score: 0, signal: 'NEUTRAL', rsi12: 50, votes: [] },
+  sharedMarketContext: { marketRegime: { key:'range' } },
 });
 equal(shortBundle.profiles.responsive.available, true, 'responsive can initialize from its shorter history');
 equal(shortBundle.profiles.confirmed.available, false, 'confirmed does not fake MA200 confirmation with short history');
@@ -125,11 +132,14 @@ const missingFormalBundle = computeSignalProfileBundle({
   closes,
   volumes,
   relativeStrength,
-  formalAnalysis: { score: null, signal: 'NEUTRAL', rsi12: null, volPriceCorr: null, votes: [] },
+  sharedMarketContext: { marketRegime: { key:'range' } },
 });
-equal(missingFormalBundle.profiles.balanced.available, false, 'missing formal score cannot masquerade as an available neutral profile');
-equal(missingFormalBundle.profiles.balanced.metrics.rsi, null, 'missing formal RSI remains null rather than a false zero');
-equal(missingFormalBundle.profiles.balanced.metrics.volumePriceCorrelation, null, 'missing volume-price correlation remains null rather than a false zero');
+equal(missingFormalBundle.profiles.balanced.available, true, 'balanced availability depends on raw bars rather than a second formal score object');
+equal(missingFormalBundle.profiles.balanced.metrics.rsi, 100, 'balanced recomputes RSI from raw bars when legacy formal fields are absent');
+check(
+  Number.isFinite(missingFormalBundle.profiles.balanced.metrics.volumePriceCorrelation),
+  'balanced derives volume-price correlation from raw bars',
+);
 
 const malformedCloses = closes.slice(0, 80);
 const malformedVolumes = volumes.slice(0, 80).map(() => 1_000_000);
@@ -139,8 +149,46 @@ const malformedBundle = computeSignalProfileBundle({
   closes: malformedCloses,
   volumes: malformedVolumes,
   relativeStrength,
-  formalAnalysis: { score: 0, signal: 'NEUTRAL', rsi12: 50, votes: [] },
+  sharedMarketContext: { marketRegime: { key:'range' } },
 });
 check(malformedBundle.profiles.responsive.metrics.volumeRatio < 2, 'discarded malformed close also discards its paired volume');
+
+const sharpRecoveryStrategy = buildStockProfileStrategy({
+  profileId: 'balanced',
+  profileVersion: 'test-balanced',
+  role: 'formal',
+  available: true,
+  direction: 1,
+  signal: 'BULLISH',
+  metrics: {
+    currentPrice: 17.36,
+    strategyFast: 13.93,
+    strategySlow: 21.98,
+    rsi: 60,
+    macdHistogram: 0.8,
+    bollPctB: 0.89,
+    volumeRatio: 1.4,
+    roc: 5,
+    oneDayReturnPct: 23.38,
+  },
+}, {
+  currentPrice: 17.36,
+  atr: 2.84,
+  daily: true,
+  dataQuality: { level: 'ok', label: '正常', issues: [] },
+});
+equal(sharpRecoveryStrategy.timingAssessment.status, 'extended', 'a bullish SNXX-like one-day surge is classified as extended timing');
+equal(sharpRecoveryStrategy.setup.key, 'extended', 'the personality strategy itself owns the extended setup classification');
+equal(sharpRecoveryStrategy.action, 'WATCH', 'an extended bullish move is watched rather than promoted to an entry');
+
+const profileSource = readFileSync(resolve('stock_signal_profiles.mjs'), 'utf8');
+const strategySource = readFileSync(resolve('stock_profile_strategy.mjs'), 'utf8');
+const engineSource = readFileSync(resolve('stock_engine.mjs'), 'utf8');
+const uiSource = readFileSync(resolve('app/stock.js'), 'utf8');
+equal(profileSource.includes('formalBalancedProfile'), false, 'balanced no longer bypasses the shared profile calculator');
+equal(strategySource.includes('balancedStrategy'), false, 'balanced no longer bypasses the shared strategy compiler');
+check(engineSource.includes('const cacheUpdate = rebindCachedProfileSelection();'), 'profile switching rebinds the existing three-profile cache');
+equal(/profile-switch[^\n]*analyzeAll/.test(engineSource), false, 'profile switching does not trigger a new data analysis run');
+equal(uiSource.includes('waitSettingsProfileApplied'), false, 'the browser no longer polls for a redundant full recalculation');
 
 console.log(`stock signal profile checks: ${assertions}/${assertions} passed`);

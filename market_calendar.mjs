@@ -47,7 +47,55 @@ export function getMarketStatus(market,now=Date.now()){
 }
 
 export function getAllMarketStatus(now=Date.now()){
-  return Object.fromEntries(['US','HK','KR','CN'].map(m=>[m,getMarketStatus(m,now)]));
+  return Object.fromEntries(['US','HK','KR','CN'].map(m=>{
+    const status=getMarketStatus(m,now);
+    return [m,{...status,next_open_at:status.open?now:cachedNextMarketOpenAt(m,now)}];
+  }));
+}
+
+/**
+ * 判断给定日期是否是已核验市场日历中的交易日。
+ *
+ * 与 getMarketStatus 不同，本函数只判断日期本身，不依赖具体时刻是否已开盘/收盘。
+ * 超出已核验年份时返回 false，避免把未知日历误当成正式交易日。
+ */
+export function isTradingDate(market,dateStr){
+  const code=String(market||'').toUpperCase(),c=CALENDARS[code];
+  const value=String(dateStr||'');
+  if(!c||!/^\d{4}-\d{2}-\d{2}$/.test(value))return false;
+  if(Number(value.slice(0,4))!==c.verifiedYear||c.holidays.has(value))return false;
+  const dayNum=new Date(value+'T12:00:00Z').getUTCDay();
+  return dayNum!==0&&dayNum!==6;
+}
+
+const nextOpenCache=new Map();
+function cachedNextMarketOpenAt(market,now){
+  const key=String(market||'').toUpperCase(),cached=nextOpenCache.get(key);
+  if(cached&&Math.abs(now-cached.computedAt)<15*60_000&&cached.value>now)return cached.value;
+  const value=nextMarketOpenAt(key,now);
+  nextOpenCache.set(key,{computedAt:now,value});
+  return value;
+}
+
+// Returns the first regular-session minute after `now`. A coarse 15-minute
+// search keeps closed-market wake-up cheap; the final minute scan restores the
+// exact 09:30/13:00 boundary. Unknown/unverified future calendar years return
+// null instead of guessing a session.
+export function nextMarketOpenAt(market,now=Date.now(),{lookaheadDays=14}={}){
+  const current=getMarketStatus(market,now);
+  if(current.open)return now;
+  const minute=60_000,step=15*minute,end=now+Math.max(1,lookaheadDays)*24*60*minute;
+  const firstMinute=Math.floor(now/minute)*minute+minute;
+  for(let t=firstMinute;t<=end;t+=step){
+    const status=getMarketStatus(market,t);
+    if(status.verified===false)continue;
+    if(!status.open)continue;
+    const start=Math.max(firstMinute,t-step);
+    for(let exact=start;exact<=t;exact+=minute){
+      if(getMarketStatus(market,exact).open)return exact;
+    }
+  }
+  return null;
 }
 
 /**
@@ -70,13 +118,6 @@ export function lastCompletedTradingDate(market, now = Date.now()) {
   const p = parts(now, c.timeZone);
   if (p.year !== c.verifiedYear) return null;
 
-  // 判断某日期字符串是否是交易日（非周末、非节假日）
-  const isTradingDay = (dateStr) => {
-    if (c.holidays.has(dateStr)) return false;
-    const dayNum = new Date(dateStr + 'T12:00:00Z').getUTCDay();
-    return dayNum !== 0 && dayNum !== 6;
-  };
-
   // 当天是否已收盘：用 now 的市场时区分钟数判断
   const isClosedToday = () => {
     const closeMin = c.earlyClose.get(p.date) || c.close;
@@ -93,7 +134,7 @@ export function lastCompletedTradingDate(market, now = Date.now()) {
     const day = String(d.getUTCDate()).padStart(2, '0');
     const dateStr = `${y}-${m}-${day}`;
     if (y !== c.verifiedYear) return null;
-    if (!isTradingDay(dateStr)) continue;
+    if (!isTradingDate(code,dateStr)) continue;
     // 当天：只在已收盘后才算"已完成"
     if (i === 0 && !isClosedToday()) continue;
     return dateStr;

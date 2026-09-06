@@ -11,8 +11,9 @@ import {
   summarizeScenarioEvents,
 } from './scenario_outcome_contract.mjs';
 import { OUTCOME_CONTRACT_VERSION } from './outcome_contract.mjs';
+import { selectedStockProfile, selectedStockStrategy } from './stock_signal_contract.mjs';
 
-export const SCENARIO_SHADOW_LEDGER_VERSION = 'scenario-shadow-ledger-v2-stage-action';
+export const SCENARIO_SHADOW_LEDGER_VERSION = 'scenario-shadow-ledger-v3-personality-only';
 export const SCENARIO_SHADOW_ORIGIN = 'live_shadow_v1b';
 export const SCENARIO_RESEARCH_COLLECTION_VERSION = 'scenario-collection-v1c';
 
@@ -122,7 +123,8 @@ export function migrateScenarioShadowLedger(db) {
 
 function snapshotFromAnalysis(analysis, { engineVersion, capturedAt }) {
   const decision = asObject(analysis?.swingDecision);
-  const tradePlan = asObject(analysis?.tradePlan);
+  const profile = asObject(selectedStockProfile(analysis));
+  const strategy = asObject(selectedStockStrategy(analysis));
   const classification = classifyScenarioDecision(decision);
   const market = cleanText(analysis?.market, 'US').toUpperCase();
   const symbol = cleanText(analysis?.symbol, null);
@@ -145,14 +147,19 @@ function snapshotFromAnalysis(analysis, { engineVersion, capturedAt }) {
       asOfDate,
       symbol,
       market,
-      tradePlan: {
-        action: tradePlan.action || null,
-        setup: tradePlan.setup || null,
-        regime: tradePlan.regime || null,
-        marketRegime: tradePlan.marketRegime || null,
-        risk: tradePlan.risk || null,
-        confidence: tradePlan.confidence ?? null,
-        dataQuality: tradePlan.dataQuality || null,
+      technicalProfile: {
+        profileId:profile.profileId || null,
+        profileVersion:profile.profileVersion || null,
+        score:profile.score ?? null,
+        signal:profile.signal || null,
+        direction:profile.direction ?? null,
+      },
+      profileStrategy: {
+        action:strategy.action || null,
+        setup:strategy.setup || null,
+        regime:strategy.regime || null,
+        risk:strategy.risk || null,
+        dataQuality:strategy.dataQuality || null,
       },
       swingDecision: decision,
       classification,
@@ -160,7 +167,7 @@ function snapshotFromAnalysis(analysis, { engineVersion, capturedAt }) {
         currentPrice: round(analysis?.currentPrice),
         atr: round(analysis?.atr),
         sma20: round(analysis?.sma20),
-        score: round(analysis?.score),
+        score: round(profile.score),
         daily: analysis?.daily !== false,
         marketRegime: analysis?.marketRegime || null,
         longTermTrend: analysis?.longTermTrend || null,
@@ -290,8 +297,8 @@ export function accrueScenarioShadowOutcomes({ db, getBars, limit = 200, updated
   const boundedLimit = Math.max(1, Math.min(1000, Number(limit) || 200));
   const observations = db.prepare(`SELECT o.* FROM scenario_research_observations o
     LEFT JOIN scenario_research_outcomes r ON r.observation_id=o.id
-    WHERE r.observation_id IS NULL OR r.mature=0
-    ORDER BY o.as_of_date,o.id LIMIT ?`).all(boundedLimit);
+    WHERE o.ledger_version=? AND (r.observation_id IS NULL OR r.mature=0)
+    ORDER BY o.as_of_date,o.id LIMIT ?`).all(SCENARIO_SHADOW_LEDGER_VERSION, boundedLimit);
   const upsert = db.prepare(`INSERT INTO scenario_research_outcomes(
     observation_id,kind,initial_status,final_status,mature,activation_date,activation_price,activation_price_source,settlement_date,outcome_json,updated_at
   ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
@@ -329,7 +336,7 @@ export function getScenarioShadowStatus(db) {
     SUM(CASE WHEN r.observation_id IS NULL OR r.mature=0 THEN 1 ELSE 0 END) pending,
     MAX(o.as_of_date) latest_as_of_date,MAX(o.captured_at) latest_captured_at
     FROM scenario_research_observations o LEFT JOIN scenario_research_outcomes r ON r.observation_id=o.id
-    GROUP BY o.market ORDER BY o.market`).all();
+    WHERE o.ledger_version=? GROUP BY o.market ORDER BY o.market`).all(SCENARIO_SHADOW_LEDGER_VERSION);
   const total = markets.reduce((sum, row) => sum + Number(row.observations || 0), 0);
   const mature = markets.reduce((sum, row) => sum + Number(row.mature || 0), 0);
   const collection = getScenarioResearchCollectionCoverage(db, { limit: 40 });
@@ -487,8 +494,8 @@ export function getScenarioResearchSymbolSummary(db, { symbol, market = null, li
 
 export function getScenarioShadowObservations(db, { symbol = null, market = null, limit = 80 } = {}) {
   if (!db) throw new TypeError('db is required');
-  const clauses = [];
-  const params = [];
+  const clauses = ['o.ledger_version=?'];
+  const params = [SCENARIO_SHADOW_LEDGER_VERSION];
   if (symbol) { clauses.push('o.symbol=?'); params.push(String(symbol).toUpperCase()); }
   if (market) { clauses.push('o.market=?'); params.push(String(market).toUpperCase()); }
   const safeLimit = Math.max(1, Math.min(500, Number(limit) || 80));
@@ -528,8 +535,8 @@ function cohortSummary(rows) {
  * decision engine. */
 export function getScenarioResearchDashboard(db, { market = null, kind = null, state = null, limit = 1000 } = {}) {
   if (!db) throw new TypeError('db is required');
-  const clauses = [];
-  const params = [];
+  const clauses = ['o.ledger_version=?'];
+  const params = [SCENARIO_SHADOW_LEDGER_VERSION];
   if (market) { clauses.push('o.market=?'); params.push(String(market).toUpperCase()); }
   if (kind) { clauses.push('o.scenario_kind=?'); params.push(String(kind)); }
   if (state) { clauses.push('o.state=?'); params.push(String(state).toUpperCase()); }

@@ -15,7 +15,7 @@
 // 只 import Radar V2 运行时，保持边界干净。
 
 import { getAllAdapters, isAfterClose } from './radar_market.mjs';
-import { runScan, reconcileStaleScanJobs } from './radar_scanner.mjs';
+import { runScan, reconcileStaleScanJobs, reconcileNonTradingDayScanJobs } from './radar_scanner.mjs';
 import { getMarketStatus } from './market_calendar.mjs';
 import { getRadarDb, getCompletedScanJob, getLatestScanJob } from './radar_schema.mjs';
 import { getRateLimiterState } from './radar_rate_limiter.mjs';
@@ -231,6 +231,14 @@ function check(onRunComplete) {
   // 0. 审计修正：回收跨日僵尸 running job（幂等）。
   //    旧调度只恢复当前交易日的 job，历史 running 永远无人处理。
   try {
+    const invalid = reconcileNonTradingDayScanJobs();
+    if (invalid.ok && invalid.reconciled > 0) {
+      console.log(`[radar_v2] 隔离非交易日 scheduled_daily job ${invalid.reconciled} 个:`, JSON.stringify(invalid.byMarket));
+    }
+  } catch (e) {
+    console.error('[radar_v2] reconcileNonTradingDayScanJobs 失败:', e?.message || e);
+  }
+  try {
     const rec = reconcileStaleScanJobs();
     if (rec.ok && rec.reconciled > 0) {
       console.log(`[radar_v2] 回收跨日 running job ${rec.reconciled} 个:`, JSON.stringify(rec.byMarket));
@@ -314,22 +322,21 @@ function _findNextDailyMarket() {
     const status = _marketStatusOverrideForTest || getMarketStatus(adapter.market, now);
     const tradeDate = status.date || dateInTz(adapter.timeZone, now);
 
-    // P0 修复: resumable job 优先于 weekend/holiday 检查。
-    // 周末/假日不创建新 job，但已开始的 partial/running(租约过期) job 必须跑完，
-    // 否则周末触发的扫描会卡在 200 个标的后永远不续跑。
+    // 周末/节假日没有新的市场收盘快照。官方公告由独立 event producer 处理，
+    // 不能为了公告而伪造 scheduled_daily 市场扫描，否则同一根周五 K 线会在
+    // 周六、周日被重复记为新的正式横截面样本。
+    if (!status.verified || ['weekend', 'holiday'].includes(status.session)) continue;
+
+    // 当前交易日的 resumable job 优先续跑。
     if (hasResumableJob(adapter.market, tradeDate, now)) {
       return { adapter, tradeDate };
     }
 
-    if (!status.verified) continue;
     if (alreadyCompletedToday(adapter.market, tradeDate)) continue;
     if (inBackoff(adapter.market, tradeDate, now)) continue;
 
-    // 周末/假日市场不交易，但新闻/公告仍在发布，需要扫描处理事件信号。
-    // 将周末/假日视为"盘后"，允许创建 daily job。
-    const isWeekendOrHoliday = ['weekend', 'holiday'].includes(status.session);
     const afterClose = _isAfterCloseOverrideForTest != null ? _isAfterCloseOverrideForTest
-      : (isWeekendOrHoliday || isAfterClose(adapter));
+      : isAfterClose(adapter);
     if (!status.open && afterClose) {
       // P1: getLatestScanJob 按 trigger 隔离，避免 manual/scheduled_daily 互相影响
       const latestJob = getLatestScanJob?.get(adapter.market, tradeDate, 'scheduled_daily');
@@ -346,15 +353,14 @@ function _findNextDailyMarket() {
  * P0: 从 DB 读取 job 状态，而非内存 Map。
  */
 export function getSchedulerState() {
-  const now = Date.now();
   const db = getRadarDb();
   const jobs = db.prepare(`
-    SELECT market, trade_date, status, cursor_offset, total_symbols,
+    SELECT market, trigger, scan_mode, trade_date, status, cursor_offset, total_symbols,
            attempted_count, succeeded_count, retry_after, lease_expires_at
     FROM radar_v2_scan_jobs
-    WHERE updated_at > ?
     ORDER BY updated_at DESC
-  `).all(now - 24 * 60 * 60 * 1000);  // 最近 24 小时
+    LIMIT 20
+  `).all();
   return {
     activeMarketCount: _activeMarketCount,
     maxConcurrentMarkets: MAX_CONCURRENT_MARKETS,
@@ -395,6 +401,11 @@ export function advanceRoundRobinForTest() {
   return [...adapters.slice(start), ...adapters.slice(0, start)];
 }
 
+/** 测试专用：只执行市场选择，不派发扫描。 */
+export function findNextDailyMarketForTest() {
+  return _findNextDailyMarket();
+}
+
 /**
  * P0-3: 为测试导出队列运行状态。
  */
@@ -420,6 +431,14 @@ export async function processDailyQueueForTest(onRunComplete) {
 export function scheduleRadar({ onRunComplete = null } = {}) {
   const boundCheck = () => check(onRunComplete);
   // 审计修正：启动即刻回收跨日僵尸 running job（不等首次 check）
+  try {
+    const invalid = reconcileNonTradingDayScanJobs();
+    if (invalid.ok && invalid.reconciled > 0) {
+      console.log(`[radar_v2] 启动隔离非交易日 scheduled_daily job ${invalid.reconciled} 个:`, JSON.stringify(invalid.byMarket));
+    }
+  } catch (e) {
+    console.error('[radar_v2] 启动 reconcileNonTradingDayScanJobs 失败:', e?.message || e);
+  }
   try {
     const rec = reconcileStaleScanJobs();
     if (rec.ok && rec.reconciled > 0) {

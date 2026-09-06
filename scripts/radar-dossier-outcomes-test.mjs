@@ -963,9 +963,52 @@ console.log('=== 测试 16：review 重跑幂等 + limit 截断 + 排序 ===');
 }
 
 // ============================================================
-// 测试 17：第二期——旧库迁移（缺六列的旧库能启动 + 字段和索引创建 + event dossier 不被误调度）
+// 测试 17：outcome 重试退避 + 公平排序
 // ============================================================
-console.log('=== 测试 17：旧库迁移（dossier 第二期字段） ===');
+console.log('=== 测试 17：outcome 重试退避 + 公平排序 ===');
+{
+  const now = Date.now();
+  // 先把前序用例遗留的未初始化记录移出本轮队列，隔离 fixture。
+  db.prepare(`UPDATE radar_v2_dossier_outcomes
+    SET next_retry_at = ? WHERE entry_date IS NULL`).run(now + 86400000);
+
+  const oldIds = [];
+  for (let i = 0; i < 50; i++) {
+    const id = createTestDossier('US', `FAIR${String(i).padStart(2, '0')}`, now - 100000, `-fair${i}`);
+    insertDossierOutcome.run({
+      dossier_id: id, market: 'US', symbol: `FAIR${String(i).padStart(2, '0')}`,
+      available_at: now - 100000, updated_at: now - 100000,
+    });
+    db.prepare(`UPDATE radar_v2_dossier_outcomes
+      SET retry_count = 5, next_retry_at = ?, updated_at = ? WHERE dossier_id = ?`)
+      .run(now - 1, now - 100000, id);
+    oldIds.push(id);
+  }
+
+  const freshId = createTestDossier('US', 'FAIR_NEW', now - 1000, '-fair-new');
+  insertDossierOutcome.run({
+    dossier_id: freshId, market: 'US', symbol: 'FAIR_NEW',
+    available_at: now - 1000, updated_at: now,
+  });
+  const futureId = createTestDossier('US', 'FAIR_FUTURE', now - 1000, '-fair-future');
+  insertDossierOutcome.run({
+    dossier_id: futureId, market: 'US', symbol: 'FAIR_FUTURE',
+    available_at: now - 1000, updated_at: now,
+  });
+  db.prepare(`UPDATE radar_v2_dossier_outcomes
+    SET next_retry_at = ? WHERE dossier_id = ?`).run(now + 3600000, futureId);
+
+  const selected = getDossierOutcomesNeedingInit.all({ now, limit: 50 });
+  assert(selected.length === 50, 'limit=50 严格截断到 50 条');
+  assert(selected[0]?.dossier_id === freshId, '未尝试的新 outcome 优先于 50 条旧失败记录');
+  assert(selected.some((row) => row.dossier_id === freshId), '新 outcome 未被旧失败记录饿死');
+  assert(!selected.some((row) => row.dossier_id === futureId), '退避未到期的 outcome 不进入队列');
+}
+
+// ============================================================
+// 测试 18：第二期——旧库迁移（缺六列的旧库能启动 + 字段和索引创建 + event dossier 不被误调度）
+// ============================================================
+console.log('=== 测试 18：旧库迁移（dossier 第二期字段） ===');
 {
   const oldDbPath = join(tmpDir, 'old_dossier.db');
   const oldDb = new Database(oldDbPath);
@@ -1048,9 +1091,16 @@ console.log('=== 测试 17：旧库迁移（dossier 第二期字段） ===');
   assert(cols.includes('priority_components_json'), '迁移后存在 priority_components_json 列');
   assert(cols.includes('next_review_at'), '迁移后存在 next_review_at 列');
 
+  const outcomeCols = migrateDb.prepare('PRAGMA table_info(radar_v2_dossier_outcomes)').all().map(c => c.name);
+  assert(outcomeCols.includes('retry_count'), '旧 outcome 表迁移后存在 retry_count');
+  assert(outcomeCols.includes('next_retry_at'), '旧 outcome 表迁移后存在 next_retry_at');
+
   // 验证部分索引已创建
   const indexes = migrateDb.prepare(`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='radar_v2_dossiers'`).all().map(r => r.name);
   assert(indexes.includes('idx_v2_dossiers_review_due'), '迁移后存在 idx_v2_dossiers_review_due 索引');
+  const outcomeIndexes = migrateDb.prepare(`SELECT name FROM sqlite_master
+    WHERE type='index' AND tbl_name='radar_v2_dossier_outcomes'`).all().map(r => r.name);
+  assert(outcomeIndexes.includes('idx_v2_dossier_outcomes_retry'), '迁移后存在 outcome 退避队列索引');
 
   // 验证旧 event dossier 迁移后的默认值
   const evtDossier = migrateDb.prepare(`SELECT * FROM radar_v2_dossiers WHERE symbol='EVT1'`).get();

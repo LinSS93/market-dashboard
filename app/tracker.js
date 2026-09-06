@@ -60,7 +60,6 @@ const GATE_LABELS = {
   drawdown_kill_switch_trim:'回撤降级减仓',
   underlying_exit:'正股退出',
   underlying_avoid:'正股回避',
-  low_confidence_risk:'低置信度',
   nav_approximate:'NAV 近似',
   date_mismatch:'NAV 日期错位',
   low_liquidity:'流动性偏低',
@@ -72,9 +71,13 @@ const GATE_LABELS = {
   post_earnings_window:'财报后观察',
   vol_decay_risk:'波动率损耗',
   option_bearish_divergence:'期权背离',
+  premium_unavailable:'溢折价不可用',
+  premium_overpriced_entry:'高溢价阻止追入',
+  premium_risk:'高溢价减杠杆',
   stale_quote:'报价陈旧',
   product_unverified:'产品资料未收录',
-  premium_history_insufficient:'收盘样本积累中'
+  premium_history_insufficient:'收盘样本积累中',
+  underlying_analysis_missing:'正股分析暂不可用'
 };
 function gateLabel(gate){ return GATE_LABELS[gate] || gate || '—'; }
 
@@ -144,13 +147,14 @@ function renderDecisionSummary(x, decision){
   const gate=x.signal_gate;
   const riskGate=gate && !['pass','premium_history_insufficient'].includes(gate);
   const riskLabel=riskGate ? gateLabel(gate) : (x.stale_price_suspect ? '价格异常待确认' : '无突出风险');
-  const underlyingLabel=x.underlying_action ? decisionLabel(x.underlying_action) : '尚未形成正式判断';
+  const underlyingDisplayAction=x.underlying_requested_action||x.underlying_action;
+  const underlyingLabel=underlyingDisplayAction ? decisionLabel(underlyingDisplayAction) : '尚未形成正式判断';
   const underlyingLink=x.underlying
     ? '<a class="tracker-stock-link" href="/stock?symbol='+encodeURIComponent(x.underlying)+'">查看 →</a>'
     : '';
   const underlyingItem=x.underlying
-    ? '<span class="ds-item"><span class="ds-k">正股方向</span><b>'+esc(underlyingLabel)+'</b><small>'+esc(x.underlying)+(x.underlying_reliability!=null?' · 可靠度 '+Number(x.underlying_reliability).toFixed(0)+'%':'')+'</small>'+underlyingLink+'</span>'
-    : '<span class="ds-item"><span class="ds-k">正股方向</span><b>未配置正股</b></span>';
+    ? '<span class="ds-item"><span class="ds-k">正股正式动作</span><b>'+esc(underlyingLabel)+'</b><small>'+esc(x.underlying)+(x.underlying_profile_id?' · '+esc(x.underlying_profile_id):'')+'</small>'+underlyingLink+'</span>'
+    : '<span class="ds-item"><span class="ds-k">正股正式动作</span><b>未配置正股</b></span>';
   box.innerHTML='<span class="badge '+sigClass(decision.action)+'">'+esc(x.execution_label||decision.label)+'</span>'
     +underlyingItem
     +'<span class="ds-item ds-risk'+(riskGate?' hot':'')+'"><span class="ds-k">风险</span><b>'+esc(riskLabel)+'</b></span>'
@@ -169,13 +173,13 @@ function renderTrackerProductProfile(x){
 }
 // 正股动作英文标签转中文
 function decisionLabel(action){
-  const map = {BUY:'买入',ADD:'加仓',PROBE:'试仓',STRONG_BUY:'强力买入',HOLD:'持有',WAIT:'等待',WAIT_PRICE:'等待价位',WATCH:'观察',TRIM:'减持',REDUCE:'减仓',EXIT:'清仓',SELL:'卖出',AVOID:'回避',STRONG_SELL:'强力卖出'};
+  const map = {OPEN:'试仓',CLOSE:'清仓',NONE:'观察',RISK_OFF:'回避',BUY:'买入',ADD:'加仓',PROBE:'试仓',STRONG_BUY:'强力买入',HOLD:'持有',WAIT:'等待',WAIT_PRICE:'等待价位',WATCH:'观察',TRIM:'减持',REDUCE:'减仓',EXIT:'清仓',SELL:'卖出',AVOID:'回避',STRONG_SELL:'强力卖出'};
   return map[action] || action || '';
 }
 
 function displayTrackerMarketState(value){return ({open:'交易中',closed:'已收盘',pre:'盘前',post:'盘后',extended:'盘前/盘后',official_close:'正式收盘'})[value]||value||'—';}
 function displayTrackerChannel(value){return ({webhook:'Webhook',feishu:'Webhook',browser:'浏览器',server:'服务端记录'})[value]||value||'服务端记录';}
-function displayTrackerGate(value){return ({pass:'门控通过',date_mismatch:'日期错位',nav_approximate:'NAV 仅供参考',low_liquidity:'流动性偏低',extreme_move:'极端波动',underlying_unconfirmed:'正股未确认',underlying_falling:'正股下跌',underlying_avoid:'正股回避',underlying_exit:'正股退出',underlying_kill_switch:'正股极端风险',etf_kill_switch:'ETF 极端风险',drawdown_kill_switch:'回撤止损',low_confidence_risk:'低可靠度风险',product_unverified:'系统暂未收录',premium_history_insufficient:'收盘样本积累中'})[value]||value||'—';}
+function displayTrackerGate(value){return ({pass:'门控通过',date_mismatch:'日期错位',nav_approximate:'NAV 仅供参考',low_liquidity:'流动性偏低',extreme_move:'极端波动',underlying_unconfirmed:'正股未确认',underlying_falling:'正股下跌',underlying_avoid:'正股回避',underlying_exit:'正股退出',underlying_kill_switch:'正股极端风险',etf_kill_switch:'ETF 极端风险',drawdown_kill_switch:'回撤止损',product_unverified:'系统暂未收录',premium_history_insufficient:'历史样本积累中',premium_unavailable:'溢折价不可用',premium_overpriced_entry:'高溢价阻止追入',premium_risk:'高溢价减杠杆'})[value]||value||'—';}
 function displayNavQuality(value){return ({aligned:'单交易日精确',cross_market_exact:'跨市场复利精确',cross_market_approx:'跨市场近似',date_mismatch:'日期错位'})[value]||value||'—';}
 async function loadTrackerAlerts(pairId){
   const box=$('d_alert_audit');if(!box)return;
@@ -192,7 +196,7 @@ async function loadTrackerSignalAudit(pairId){
     const rows=await fetch('/tracker/signal-audit?pair_id='+encodeURIComponent(pairId)+'&limit=40').then(r=>r.json());
     if(!rows.length){preserveTrackerScroll(()=>{box.innerHTML='<div class="detail-note soft compact">暂无已记录的信号。信号会在每次刷新时落库，回看需要至少 1 个刷新周期。</div>';});return;}
     const rowsHtml=rows.map(r=>'<tr><td class="lc-mute">'+esc(new Date(r.ts).toLocaleString('zh-CN',{hour12:false}))+'</td><td class="lc-mute">'+esc(trackerSignalLabel(r.original_signal||r.final_signal))+'</td><td><span class="badge '+sigClass(r.final_signal)+'">'+esc(trackerSignalLabel(r.final_signal))+'</span></td><td>'+esc(r.underlying_action?DashboardActions.label(r.underlying_action):'—')+'</td><td>'+esc(displayTrackerGate(r.signal_gate))+'</td><td class="lc-mute">'+esc(displayNavQuality(r.nav_quality))+'</td><td class="lc-mute">'+esc(displayTrackerMarketState(r.market_state))+'</td></tr>').join('');
-    preserveTrackerScroll(()=>{box.innerHTML='<div class="lc-table-wrap"><table class="lc-table"><thead><tr><th>时间</th><th>原始</th><th>正式</th><th>正股</th><th>门控</th><th>NAV</th><th>市场</th></tr></thead><tbody>'+rowsHtml+'</tbody></table></div><div class="swing-foot">显示最近 '+rows.length+' 条信号记录。原始信号 = 溢价率/正股方向等基础因子推算；正式信号 = 经 14 级门控（极端波动 / 流动性 / 回撤止损等）过滤后的最终动作。</div>';});
+    preserveTrackerScroll(()=>{box.innerHTML='<div class="lc-table-wrap"><table class="lc-table"><thead><tr><th>时间</th><th>正股请求</th><th>ETF 最终</th><th>正股</th><th>执行约束</th><th>NAV</th><th>市场</th></tr></thead><tbody>'+rowsHtml+'</tbody></table></div><div class="swing-foot">显示最近 '+rows.length+' 条动作记录。方向只来自正股当前生效人格；ETF 的溢折价、NAV、流动性与杠杆风险只能调整执行或降低动作，不能单独制造买点。</div>';});
   }catch(e){preserveTrackerScroll(()=>{box.innerHTML='<div class="detail-note soft compact">信号记录读取失败</div>';});}
 }
 // 只读已收盘的独立日样本，描述历史位置；不把分位数翻译成买卖建议。
@@ -612,6 +616,8 @@ function closeDetail(){
   const navK=$("d_nav_k"); if(navK)navK.textContent='估算 NAV';
   const marketAsof=$('d_market_asof'); if(marketAsof)marketAsof.textContent='—';
   if (chPrem){ chPrem.clear(); }
+  const chartWrap=document.querySelector('.prem-hero-chart');
+  if(chartWrap) chartWrap.classList.remove('is-sparse');
   document.querySelectorAll("#gridBody tr").forEach(tr => tr.classList.remove("sel"));
 }
 
@@ -667,7 +673,7 @@ async function loadDetail(id,opts={}){
   $("d_asof").textContent = asOf;
   const marketAsOf=$('d_market_asof'); if(marketAsOf) marketAsOf.textContent='数据截至 '+asOf;
   renderPremiumHero(x);
-  const panelKey=JSON.stringify([id,x.underlying,x.underlying_name,x.underlying_signal_summary,x.nav_quality,x.nav_sessions,x.premium_bands,x.underlying_action,x.underlying_reliability,x.signal_gate,x.product_status,x.issuer,x.tracking_index,x.verification_source,x.market_execution_status]);
+  const panelKey=JSON.stringify([id,x.underlying,x.underlying_name,x.underlying_signal_summary,x.nav_quality,x.nav_sessions,x.premium_bands,x.underlying_action,x.signal_gate,x.product_status,x.issuer,x.tracking_index,x.verification_source,x.market_execution_status]);
   if(newPair||panelKey!==trackerPanelKey){
     trackerPanelKey=panelKey;
     preserveTrackerScroll(()=>{renderTrackerProductProfile(x);});
@@ -695,21 +701,31 @@ async function loadDetail(id,opts={}){
 }
 
 function drawCharts(hist,replace=false){
-  const last=hist&&hist.length?hist[hist.length-1]:null;
-  const chartKey=JSON.stringify([selectedId,hist&&hist.length,last&&last.ts,last&&last.premium,last&&last.etf_price]);
+  const rows=Array.isArray(hist)?hist:[];
+  const usableRows=rows.filter(r => r && (r.etf_price!=null || r.premium!=null));
+  const chartWrap=document.querySelector('.prem-hero-chart');
+  const sparse=usableRows.length<3;
+  if(chartWrap) chartWrap.classList.toggle('is-sparse',sparse);
+  if(sparse){
+    trackerChartKey=JSON.stringify([selectedId,'sparse',usableRows.length]);
+    if(chPrem) chPrem.clear();
+    return;
+  }
+  const last=rows[rows.length-1];
+  const chartKey=JSON.stringify([selectedId,rows.length,last&&last.ts,last&&last.premium,last&&last.etf_price]);
   if(!replace&&chartKey===trackerChartKey)return;
   trackerChartKey=chartKey;
   if (!chPrem) chPrem = echarts.init($("chPrem"));
   const updateOpts={notMerge:!!replace,lazyUpdate:true,silent:true};
-  const t = hist.map(r => new Date(r.ts).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}));
+  const t = rows.map(r => new Date(r.ts).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}));
   // ETF 现价 / 估算 NAV（同左轴）+ 溢价率（右轴）三线复合
-  const etfVals = hist.map(r => r.etf_price==null?null:+r.etf_price.toFixed(3));
-  const navVals = hist.map(r => {
+  const etfVals = rows.map(r => r.etf_price==null?null:+r.etf_price.toFixed(3));
+  const navVals = rows.map(r => {
     if (r.etf_price==null || r.premium==null || !Number.isFinite(r.premium)) return null;
     const nav = r.etf_price / (1 + r.premium / 100);
     return Number.isFinite(nav) && nav > 0 ? +nav.toFixed(3) : null;
   });
-  const premVals = hist.map(r => r.premium==null?null:+r.premium.toFixed(2));
+  const premVals = rows.map(r => r.premium==null?null:+r.premium.toFixed(2));
   chPrem.setOption({
     animation:false,
     title: {

@@ -66,6 +66,13 @@ migrateProfileShadowOutcomes(db);
 
 const signalSql = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='stock_signal_log'").get().sql.replace(/\s+/g, '');
 assert.match(signalSql, /UNIQUE\(date,symbol,sample_origin,engine_version\)/i);
+const signalColumns = new Set(db.prepare('PRAGMA table_info(stock_signal_log)').all().map(row => row.name));
+assert.equal(signalColumns.has('profile_id'), true);
+assert.equal(signalColumns.has('profile_version'), true);
+assert.equal(signalColumns.has('strategy_version'), true);
+assert.deepEqual(db.prepare("SELECT profile_id,profile_version,strategy_version FROM stock_signal_log WHERE symbol='SCHEMA_TEST'").get(), {
+  profile_id:'legacy_unknown', profile_version:'legacy_unknown', strategy_version:'legacy_unknown',
+});
 db.prepare(`INSERT INTO stock_signal_log(
   date,ts,symbol,market,action,opportunity_stage,execution_action,payload,sample_origin,engine_version
 ) VALUES('2026-08-31',2,'SCHEMA_TEST','US','OPEN','READY','OPEN','{}','historical_replay','current-engine')`).run();
@@ -90,4 +97,4 @@ assert.equal(outcomeColumns.has('decision_state'), false);
 const outcome = db.prepare('SELECT opportunity_stage,execution_action FROM stock_signal_profile_shadow_outcomes WHERE profile_shadow_id=1').get();
 assert.deepEqual(outcome, { opportunity_stage:'READY', execution_action:'OPEN' });
 
-console.log('stock stage/action schema migration checks: 10/10 passed');
+console.log('stock stage/action schema migration checks passed');

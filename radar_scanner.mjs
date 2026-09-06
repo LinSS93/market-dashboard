@@ -16,12 +16,14 @@ import { scoreCandidate, fetchEventFacts, evaluateDataQualityGate } from './rada
 import {
   insertRun, updateRunStatus, insertCandidate, updateCandidateScoringProvenance,
   upsertScanJob, getScanJob, getCompletedScanJob, acquireLease, releaseLease,
-  advanceJobProgress, finalizeScanJob, renewLease, getRadarDb,
+  releaseLeaseOwned, advanceJobProgress, advanceJobProgressOwned,
+  finalizeScanJob, finalizeScanJobOwned, renewLease, getRadarDb,
   setJobRunId, insertScanItems, getPendingScanItems, updateScanItemStatus,
   getScanItemStats, resetFailedItems, countPendingItems,
   countRetryableItems,
 } from './radar_schema.mjs';
 import { backfillPendingOutcomes, updateMaturedOutcomes } from './radar_outcomes.mjs';
+import { getMarketStatus, isTradingDate } from './market_calendar.mjs';
 
 // === 常量 ===
 
@@ -524,14 +526,15 @@ export async function runScanForMarket(adapter, trigger, scanMode, limit) {
             retryAfter = hasRetryBudget ? nowTs() + 30 * 60 * 1000 : null;
           }
         }
-        finalizeScanJob.run({
+        const finalized = finalizeScanJobOwned.run({
           id: activeJob.id, status: finalStatus, run_id: runId,
           cursor_offset: totalSymbols,
           attempted_count: attempted, succeeded_count: succeeded,
           skipped_count: skipped, failed_count: failed,
           candidates_count: activeJob.candidates_count,
-          retry_after: retryAfter, updated_at: nowTs(),
+          retry_after: retryAfter, updated_at: nowTs(), lease_owner: PROCESS_ID,
         });
+        if (finalized.changes !== 1) throw new Error('scan_lease_lost');
         updateRunStatus.run({
           id: runId, status: finalStatus, completed_at: nowTs(),
           candidates_count: activeJob.candidates_count,
@@ -605,12 +608,13 @@ export async function runScanForMarket(adapter, trigger, scanMode, limit) {
       }
 
       // i. 累加 job 统计（cursor_offset 不再用于续跑，仅记录进度）
-      advanceJobProgress.run({
+      const advanced = advanceJobProgressOwned.run({
         id: activeJob.id, processed_delta: batchCounts.attempted,
         attempted_delta: batchCounts.attempted, succeeded_delta: batchCounts.succeeded,
         skipped_delta: batchCounts.skipped, failed_delta: batchCounts.failed,
-        candidates_delta: batchCandidates.length, updated_at: nowTs(),
+        candidates_delta: batchCandidates.length, updated_at: nowTs(), lease_owner: PROCESS_ID,
       });
+      if (advanced.changes !== 1) throw new Error('scan_lease_lost');
 
       // j. 检查是否还有 pending 标的（failed/skipped 不算，它们在退避到期后才会被重试）
       //    P0: pending=0 表示本轮全量扫描完成，可以判定最终状态
@@ -636,14 +640,15 @@ export async function runScanForMarket(adapter, trigger, scanMode, limit) {
         } else { finalStatus = 'complete'; }
 
         const finalJob = getScanJob.get(market, tradeDate, trigger);
-        finalizeScanJob.run({
+        const finalized = finalizeScanJobOwned.run({
           id: activeJob.id, status: finalStatus, run_id: runId,
           cursor_offset: totalSymbols,
           attempted_count: attempted, succeeded_count: succeeded,
           skipped_count: skipped, failed_count: failed,
           candidates_count: finalJob.candidates_count,
-          retry_after: retryAfter, updated_at: nowTs(),
+          retry_after: retryAfter, updated_at: nowTs(), lease_owner: PROCESS_ID,
         });
+        if (finalized.changes !== 1) throw new Error('scan_lease_lost');
         updateRunStatus.run({
           id: runId, status: finalStatus, completed_at: nowTs(),
           candidates_count: finalJob.candidates_count,
@@ -659,7 +664,8 @@ export async function runScanForMarket(adapter, trigger, scanMode, limit) {
         }
       } else {
         // 未扫完：释放租约但保持 job 为 running（下次调用续跑）
-        releaseLease.run({ id: activeJob.id, updated_at: nowTs() });
+        const released = releaseLeaseOwned.run({ id: activeJob.id, lease_owner: PROCESS_ID, updated_at: nowTs() });
+        if (released.changes !== 1) throw new Error('scan_lease_lost');
       }
 
       // 读取最终 job 状态用于返回
@@ -681,7 +687,11 @@ export async function runScanForMarket(adapter, trigger, scanMode, limit) {
       };
     } catch (error) {
       // 异常：释放租约，标记 job 为 failed
-      try { releaseLease.run({ id: activeJob.id, updated_at: nowTs() }); } catch {}
+      try { releaseLeaseOwned.run({ id: activeJob.id, lease_owner: PROCESS_ID, updated_at: nowTs() }); } catch {}
+      if (error?.message === 'scan_lease_lost') {
+        _lastRun.set(market, { runId, completedAt: nowTs(), status: 'partial', error: 'scan_lease_lost' });
+        return { ok: false, runId, market, status: 'partial', candidatesCount: 0, error: 'scan_lease_lost' };
+      }
       if (runId != null) {
         try {
           updateRunStatus.run({
@@ -824,6 +834,57 @@ export function reconcileStaleScanJobs() {
       }
       byMarket[adapter.market] = staleJobs.length;
     }
+    return { ok: true, reconciled, byMarket };
+  } catch (error) {
+    return { ok: false, reconciled, byMarket, error: error?.message || String(error) };
+  }
+}
+
+/**
+ * 隔离旧版本错误创建的非交易日 scheduled_daily job。
+ *
+ * 不删除 candidate/observation，保留审计链；只把 job/run 改为 failed，令候选池、
+ * feedback 和后续正式消费者不再把周末/节假日快照当成独立交易日样本。
+ */
+export function reconcileNonTradingDayScanJobs() {
+  const now = nowTs();
+  let reconciled = 0;
+  const byMarket = {};
+  try {
+    const db = getRadarDb();
+    const rows = db.prepare(`
+      SELECT id, market, trade_date, run_id
+      FROM radar_v2_scan_jobs
+      WHERE trigger = 'scheduled_daily' AND status != 'failed'
+      ORDER BY id
+    `).all();
+    const failJob = db.prepare(`
+      UPDATE radar_v2_scan_jobs
+      SET status = 'failed', retry_after = NULL, lease_owner = NULL,
+          lease_expires_at = NULL, updated_at = ?
+      WHERE id = ? AND status != 'failed'
+    `);
+    const failRun = db.prepare(`
+      UPDATE radar_v2_runs
+      SET status = 'failed', completed_at = COALESCE(completed_at, ?),
+          error = 'invalid_non_trading_day_scheduled_scan'
+      WHERE id = ? AND trigger = 'scheduled_daily'
+    `);
+    const tx = db.transaction((invalidRows) => {
+      for (const row of invalidRows) {
+        const info = failJob.run(now, row.id);
+        if (info.changes !== 1) continue;
+        if (row.run_id != null) failRun.run(now, row.run_id);
+        reconciled++;
+        byMarket[row.market] = (byMarket[row.market] || 0) + 1;
+      }
+    });
+    tx(rows.filter((row) => {
+      // 未核验年份保持原样：我们不知道它是否是假日，不能把“未知”误判成非法。
+      const probe = Date.parse(`${row.trade_date}T12:00:00Z`);
+      const status = Number.isFinite(probe) ? getMarketStatus(row.market, probe) : null;
+      return status?.verified === true && !isTradingDate(row.market, row.trade_date);
+    }));
     return { ok: true, reconciled, byMarket };
   } catch (error) {
     return { ok: false, reconciled, byMarket, error: error?.message || String(error) };

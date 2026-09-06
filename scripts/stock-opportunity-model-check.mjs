@@ -33,16 +33,13 @@ const common = {
 const pullback = evaluateOpportunityFacts(common);
 equal(pullback.schemaVersion, STOCK_OPPORTUNITY_SCHEMA_VERSION, 'schema version is explicit');
 equal(pullback.opportunity.type, 'trend_pullback', 'intact trend plus recent RSI6 oversold is a trend pullback');
-equal(pullback.profiles.responsive.state, 'detected', 'responsive profile captures setup immediately');
-equal(pullback.profiles.balanced.state, 'ready', 'balanced profile accepts reversal evidence');
-equal(pullback.profiles.confirmed.state, 'confirmed', 'confirmed profile accepts recovered RSI6, MA5 and relative strength');
 equal(pullback.researchOnly, true, 'opportunity layer is research only');
+equal(pullback.profiles, undefined, 'opportunity facts do not create a duplicate personality verdict system');
+equal(pullback.stage, undefined, 'opportunity facts do not expose a competing execution stage');
 
 const waiting = evaluateOpportunityFacts({ ...common, close:97, previousClose:98, ma5:99, macdHistogram:-1, previousMacdHistogram:-0.8, rsi6:18 });
 equal(waiting.opportunity.type, 'trend_pullback', 'same opportunity identity survives before confirmation');
-equal(waiting.profiles.responsive.state, 'detected', 'responsive still observes unconfirmed pullback');
-equal(waiting.profiles.balanced.state, 'waiting', 'balanced waits for reversal evidence');
-check(waiting.profiles.balanced.missingConditions.includes('收盘转强或 MACD 绿柱收窄'), 'missing confirmation is explicit');
+check(waiting.facts.macdHistogram < waiting.facts.previousMacdHistogram, 'raw opportunity facts retain the missing reversal evidence');
 
 const breakout = evaluateOpportunityFacts({
   ...common, close:112, previousClose:109, previousClose2:108,
@@ -51,9 +48,7 @@ const breakout = evaluateOpportunityFacts({
   macdHistogram:1, previousMacdHistogram:0.8, volumeRatio:1.8,
 });
 equal(breakout.opportunity.type, 'breakout', 'price breakout is a separate opportunity type');
-equal(breakout.profiles.balanced.state, 'ready', 'volume and relative strength confirm balanced breakout');
-equal(breakout.profiles.confirmed.state, 'confirmed', 'hold day and MA alignment confirm breakout');
-equal(evaluateOpportunityFacts({ ...breakout.facts, relativeStrength20:null }).profiles.balanced.state, 'waiting', 'missing benchmark strength cannot count as confirmation');
+equal(evaluateOpportunityFacts({ ...breakout.facts, relativeStrength20:null }).opportunity.type, 'breakout', 'opportunity identity is independent from persona confirmation');
 
 const oversold = evaluateOpportunityFacts({
   ...common, close:82, previousClose:80, previousClose2:79,
@@ -68,8 +63,7 @@ const damage = evaluateOpportunityFacts({
   rsi6:35, rsi6Min3:30, macdHistogram:-2, previousMacdHistogram:-1,
 });
 equal(damage.opportunity.type, 'trend_damage', 'broken MA structure and negative MACD is trend damage');
-equal(damage.profiles.responsive.state, 'risk', 'all personalities respect shared trend risk');
-equal(damage.profiles.confirmed.state, 'risk', 'confirmation speed never overrides risk boundary');
+equal(damage.direction, -1, 'trend damage is retained as a shared negative fact');
 
 const rows = Array.from({ length:80 }, (_, index) => ({
   date: new Date(Date.UTC(2026, 0, 1 + index)).toISOString().slice(0, 10),
@@ -102,4 +96,4 @@ const serverSource = readFileSync(resolve('server.mjs'), 'utf8');
 check(stockEngineSource.includes('opportunityModel: a.opportunityModel'), 'daily analysis DTO exposes the opportunity model to the stock UI');
 check(/import \{[^}]*refreshSignalDriftReport[^}]*\} from '\.\/stock_engine\.mjs';/s.test(serverSource), 'server imports the scheduled signal-drift refresh function');
 
-console.log(`stock opportunity model checks: ${passed}/25 passed`);
+console.log(`stock opportunity model checks: ${passed}/${passed} passed`);

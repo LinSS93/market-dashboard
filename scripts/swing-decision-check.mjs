@@ -16,36 +16,39 @@ function check(condition, label) {
 }
 
 function analysis(overrides = {}) {
+  const strategyOverrides = overrides.strategy || {};
+  const score = overrides.profileScore ?? 0.7;
+  const signal = overrides.profileSignal || (score >= 0.15 ? 'BULLISH' : score <= -0.15 ? 'BEARISH' : 'NEUTRAL');
+  const baseStrategy = {
+    strategyVersion:'strategy-test', profileId:'balanced', profileVersion:'balanced-test', available:true,
+    action:'BUY', actionLabel:'买入形态',
+    setup:{ key:'trend_pullback', label:'趋势回踩' },
+    timingAssessment:{ status:'ready', label:'时机就绪', tone:'bull', reason:'回踩形态已确认。' },
+    pricePlanReferenceMa:98,
+    dataQuality:{ level:'ok' }, risk:{ level:'low' }, regime:{ key:'range', label:'震荡' },
+    policy:{ validSessions:3, overheatRsi:72 },
+  };
+  const strategy = { ...baseStrategy, ...strategyOverrides };
   const base = {
     market: 'US', currentPrice: 100, atr: 5, sma20: 98, rsi12: 52,
     bollLower: 92, bollUpper: 110, sma20Dist: 0, bollPctB: 0.5,
-    score: 0.7, signal: 'BUY', daily: true, asOfDate: '2026-07-10',
+    daily: true, asOfDate: '2026-07-10',
     marketRegime: { key: 'range' },
-    tradePlan: {
-      action: 'BUY', actionLabel: '买入形态', stopLoss: 90, takeProfit: 112,
-      setup: { key: 'trend_pullback', label: '趋势回踩' },
-      pricePlanReferenceMa: 98,
-      marketRegime: { key: 'range', label: '基准震荡' },
-      dataQuality: { level: 'ok' }, risk: { level: 'low' },
-    },
+    signalProfiles:{ effectiveProfileId:'balanced', profiles:{ balanced:{
+      profileId:'balanced', profileVersion:'balanced-test', role:'formal', available:true, confirmed:true,
+      score, signal, direction:score >= 0.15 ? 1 : score <= -0.15 ? -1 : 0,
+      metrics:{ currentPrice:overrides.currentPrice ?? 100, bollLower:92, bollUpper:110, bollPctB:0.5 },
+      strategy,
+    } } },
   };
-  return { ...base, ...overrides, tradePlan: { ...base.tradePlan, ...(overrides.tradePlan || {}) } };
+  const { strategy:_strategy, profileScore:_profileScore, profileSignal:_profileSignal, ...clean } = overrides;
+  return { ...base, ...clean };
 }
 
-function reliability(overrides = {}) {
-  return {
-    effectiveAction: 'BUY', reliabilityScore: 65,
-    calibration: { probabilityPct: 60, expectancyPct: 2, riskUnitPct: 1 },
-    rollingAudit: { level: 'pass' },
-    poolThresholdAudit: { rollingAudit: { level: 'pass' } },
-    ...overrides,
-  };
-}
-
-function decide(ai, rel = reliability(), position = null, executionRisk = { score: 0, level: 'low' }) {
-  const context = buildSwingDecisionContext(ai, rel, position);
-  const scoreResult = computeCompositeScore({ analysis: ai, reliability: rel, executionRisk });
-  const arbitration = arbitrateStockDecision({ analysis: ai, context, scoreResult, executionRisk });
+function decide(ai, position = null, executionRisk = { score: 0, level: 'low' }) {
+  const context = buildSwingDecisionContext(ai, position);
+  const scoreResult = computeCompositeScore({ analysis: ai, reliability: null, executionRisk });
+  const arbitration = arbitrateStockDecision({ analysis: ai, context, executionRisk });
   return {
     ...context, ...arbitration,
     summary: arbitration.reason,
@@ -58,64 +61,85 @@ function decide(ai, rel = reliability(), position = null, executionRisk = { scor
 const probe = decide(analysis());
 check(probe.opportunityStage === 'READY' && probe.executionAction === 'OPEN' && probe.tranchePct > 0, 'ready bullish empty position becomes READY + OPEN');
 
-const add = decide(analysis(), reliability(), { shares: 25, cost: 96, target_shares: 100 });
+const add = decide(analysis(), { shares: 25, cost: 96, target_shares: 100 });
 check(add.opportunityStage === 'READY' && add.executionAction === 'ADD' && add.tranchePct > 0, 'ready bullish held position becomes READY + ADD');
 
-const trim = decide(analysis({ currentPrice: 116, rsi12: 76 }), reliability(), { shares: 100, cost: 100 });
+const trim = decide(analysis({ currentPrice: 116, rsi12: 76 }), { shares: 100, cost: 100 });
 check(trim.opportunityStage === 'BLOCKED' && trim.executionAction === 'REDUCE' && trim.tranchePct === 30, 'profitable RSI12 overheat becomes BLOCKED + REDUCE');
 
-const exit = decide(analysis({ currentPrice: 80 }), reliability(), { shares: 100, cost: 100 });
+const exit = decide(analysis({ currentPrice: 80 }), { shares: 100, cost: 100 });
 check(exit.opportunityStage === 'RISK_OFF' && exit.executionAction === 'CLOSE' && exit.tranchePct === 100 && exit.safetyNet, 'invalidation breach becomes RISK_OFF + CLOSE');
 
-const failed = decide(analysis(), reliability({ rollingAudit: { level: 'fail' } }));
-check(failed.opportunityStage === 'READY' && failed.executionAction === 'OPEN'
-  && failed.executionReadiness.status === 'ready'
-  && failed.executionReadiness.validationEvidence?.level === 'weak',
-  'explicit failed historical validation remains advisory and does not veto a ready setup');
+check(probe.executionReadiness.validationEvidence === undefined
+  && probe.reliabilityScore === undefined
+  && probe.probabilityPct === undefined,
+  'historical validation is absent from the current execution contract');
 
-const pooledFailure = decide(analysis(), reliability({
-  calibration: { level: 'fail', probabilityPct: 42, expectancyPct: -1 },
-  poolThresholdAudit: { rollingAudit: { level: 'fail' } },
-}));
-const pooledFailureExplanation = buildStockDecisionExplanation({
-  ...pooledFailure,
-  executionBlockers: [],
-});
-check(pooledFailure.opportunityStage === 'READY' && pooledFailure.executionAction === 'OPEN'
-  && pooledFailure.executionReadiness.validationEvidence?.level === 'weak'
-  && pooledFailure.executionReadiness.validationEvidence?.reasons.length === 1
-  && pooledFailure.summary.includes('历史验证偏弱'),
-  'pooled failure is counted once as weak research evidence while the ready action remains');
-check(pooledFailureExplanation.blockingReasons.length === 0
-  && pooledFailureExplanation.nextUpgradeCondition?.includes('再评估加仓'),
-  'weak historical evidence is not presented as an execution blocker');
-
-const unstable = decide(analysis(), reliability({ rollingAudit: { level: 'unstable' } }));
-check(unstable.opportunityStage === 'READY' && unstable.executionAction === 'OPEN'
-  && unstable.executionReadiness.validationEvidence?.level === 'caution',
-  'unstable validation remains advisory rather than a hard block');
-
-const coldStart = decide(analysis(), null);
-check(coldStart.opportunityStage === 'READY' && coldStart.executionAction === 'OPEN'
-  && coldStart.executionReadiness.validationEvidence?.level === 'insufficient',
-  'missing historical evaluation cannot leave a new installation idle when the current setup is ready');
-
-const highRisk = decide(analysis({ tradePlan: { risk: { level: 'high', label: '高' } } }));
+const highRisk = decide(analysis({ strategy: { risk: { level: 'high', label: '高' } } }));
 check(highRisk.opportunityStage === 'BLOCKED' && highRisk.executionAction === 'NONE' && highRisk.executionReadiness.status === 'defer',
   'idiosyncratic high risk defers a ready technical signal');
 
+const neutralHighRisk = decide(analysis({
+  profileScore:0, profileSignal:'NEUTRAL',
+  strategy:{ action:'WAIT', setup:{ key:'none', label:'等待确认' }, risk:{ level:'high', label:'高' } },
+}));
+check(neutralHighRisk.opportunityStage === 'NO_SETUP' && neutralHighRisk.executionAction === 'NONE',
+  'high risk cannot turn a neutral technical state into a misleading blocked opportunity');
+
+const extendedBull = decide(analysis({
+  profileScore:0.45, profileSignal:'BULLISH',
+  strategy:{ action:'WATCH', actionLabel:'不追', setup:{ key:'extended', label:'短线过热' },
+    timingAssessment:{ status:'extended', label:'短线过热', tone:'amber', reason:'单日涨幅过快，等待回踩。' },
+    risk:{ level:'high', label:'高', detail:'波动偏高。' } },
+}));
+check(extendedBull.technicalDirection?.key === 'bullish'
+  && extendedBull.timingAssessment?.status === 'extended'
+  && extendedBull.riskAssessment?.status === 'caution'
+  && extendedBull.opportunityStage === 'BLOCKED' && extendedBull.executionAction === 'NONE',
+  'bullish direction plus extended timing becomes blocked instead of neutral or an entry');
+
+const nullLevelExplanation = buildStockDecisionExplanation({
+  opportunityStage:'FORMING', executionAction:'NONE', zones:{ confirmation:null, invalidation:null },
+});
+check(nullLevelExplanation.confirmationReason === null && nullLevelExplanation.invalidationReason === null,
+  'missing price levels never render as zero');
+
+const missingPriceDecision = arbitrateStockDecision({
+  analysis: analysis({ currentPrice:null }),
+  context: {
+    valid:true,
+    profileId:'balanced',
+    position:{ hasPosition:true, shares:10, cost:100 },
+    zones:{ available:true, status:'entry', confirmation:95, invalidation:90 },
+    executionContext:{ riskHigh:false },
+    profileStrategy:{ regimeKey:'range', referenceMa:98 },
+  },
+  executionRisk:{ score:0, level:'low' },
+});
+check(missingPriceDecision.decisionCode !== 'INVALIDATION_BREACH',
+  'a missing quote is never coerced to zero and mistaken for an invalidation breach');
+
+const retiredOnly = {
+  market:'US', currentPrice:100, atr:2, daily:true, asOfDate:'2026-07-10',
+  score:0.9, signal:'BUY', tradePlan:{ action:'BUY', setup:{ key:'trend_pullback' }, risk:{ level:'low' } },
+};
+const retiredContext = buildSwingDecisionContext(retiredOnly, null);
+const retiredDecision = arbitrateStockDecision({ analysis:retiredOnly, context:retiredContext });
+check(retiredDecision.opportunityStage === 'DATA_UNAVAILABLE' && retiredDecision.executionAction === 'NONE',
+  'retired top-level score/signal/tradePlan fields cannot re-enter the current decision path');
+
 const signedBear = decide(analysis({
-  score: -0.41, signal: 'SELL',
-  tradePlan: { action: 'REDUCE', actionLabel: '减仓', setup: { key: 'none', label: '趋势偏弱' } },
+  profileScore: -0.41, profileSignal: 'BEARISH',
+  strategy: { action: 'REDUCE', actionLabel: '减仓', setup: { key: 'none', label: '趋势偏弱' } },
 }));
 check(signedBear.compositeScore === 0 && signedBear.opportunityStage === 'RISK_OFF' && signedBear.executionAction === 'NONE'
   && signedBear.technicalDirection?.key === 'bearish',
   'negative direction survives positive-score clamping');
 
 const weakHeld = decide(analysis({
-  score: 0, signal: 'NEUTRAL',
-  tradePlan: { action: 'WAIT', actionLabel: '等待', setup: { key: 'none', label: '等待确认' } },
-}), reliability(), { shares: 100, cost: 90 });
+  profileScore: 0, profileSignal: 'NEUTRAL',
+  strategy: { action: 'WAIT', actionLabel: '等待', setup: { key: 'none', label: '等待确认' } },
+}), { shares: 100, cost: 90 });
 check(weakHeld.compositeScore === 0 && weakHeld.executionAction === 'HOLD',
   'a zero research score alone does not manufacture a trim');
 
@@ -127,7 +151,7 @@ check(longTermBear.opportunityStage === 'BLOCKED' && longTermBear.executionActio
 
 const longTermBearHeld = decide(analysis({
   longTermTrend: { key: 'bear', label: '长期下行', sma120: 95, sma200: 105, roc90: -10, slope120: -2 },
-}), reliability(), { shares: 100, cost: 90 });
+}), { shares: 100, cost: 90 });
 check(longTermBearHeld.opportunityStage === 'RISK_OFF' && longTermBearHeld.executionAction === 'REDUCE' && longTermBearHeld.tranchePct === 30,
   'a held long-term bear rallying to SMA120 produces the intended trim');
 
