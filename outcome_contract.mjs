@@ -118,3 +118,19 @@ export function calculateForwardOutcomes({
     maePct: adverseRaw != null ? +adverseRaw.toFixed(4) : null,
   };
 }
+// Daily OHLC cannot order intraday touches, but the open is known to occur
+// first. A gap through a level fills at the open, never outside the bar.
+export function resolveBarExit(bar, { stop = null, target = null, direction = 1 } = {}) {
+  const positive = value => Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : null;
+  const open = positive(bar?.open), high = positive(bar?.high) ?? positive(bar?.close), low = positive(bar?.low) ?? positive(bar?.close);
+  const stopPrice = positive(stop), targetPrice = positive(target);
+  const long = direction > 0;
+  if (!direction) return null;
+  if (open != null) {
+    if (stopPrice != null && (long ? open <= stopPrice : open >= stopPrice)) return { reason:'stop', price:open };
+    if (targetPrice != null && (long ? open >= targetPrice : open <= targetPrice)) return { reason:'target', price:open };
+  }
+  if (stopPrice != null && (long ? low != null && low <= stopPrice : high != null && high >= stopPrice)) return { reason:'stop', price:stopPrice };
+  if (targetPrice != null && (long ? high != null && high >= targetPrice : low != null && low <= targetPrice)) return { reason:'target', price:targetPrice };
+  return null;
+}

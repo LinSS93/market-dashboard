@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { getAllMarketStatus, getMarketStatus, nextMarketOpenAt } from '../market_calendar.mjs';
+import { getAllMarketStatus, getMarketStatus, nextMarketOpenAt, isTradingDate, lastCompletedTradingDate } from '../market_calendar.mjs';
 import {
   nextStockMarketWakeDelay,
   shouldRunStockAnalysis,
@@ -9,6 +9,17 @@ import {
 
 let passed=0;
 function check(condition,message){assert.ok(condition,message);passed+=1;}
+
+check(getMarketStatus('CN',Date.parse('2026-01-05T10:00:00+08:00')).open,'SSE resumes trading on Jan 5, 2026');
+check(isTradingDate('CN','2026-01-05'),'Jan 5 is also eligible for daily scans');
+check(!isTradingDate('CN','2026-02-30'),'impossible civil dates are rejected');
+for (const market of ['US','HK','KR','CN']) {
+  const future=Date.parse('2027-01-04T15:00:00Z');
+  const status=getMarketStatus(market,future);
+  check(!status.open && !status.verified && status.session==='calendar_unverified','unknown year has no executable session: '+market);
+  check(!isTradingDate(market,'2027-01-04') && lastCompletedTradingDate(market,future)===null,'unknown year cannot create daily samples: '+market);
+  check(nextMarketOpenAt(market,future,{lookaheadDays:1})===null,'unknown year cannot schedule an unverified open: '+market);
+}
 
 const hkMorning=Date.parse('2026-08-03T00:00:00Z');
 const hkOpen=nextMarketOpenAt('HK',hkMorning);

@@ -220,3 +220,20 @@ export function buildStockPricePlan(input = {}) {
 export function stockPricePlanPolicy(profileId) {
   return { ...policyFor(profileId) };
 }
+
+export function applyPositionProtection(plan, retainedInvalidation) {
+  const retained = positive(retainedInvalidation);
+  if (retained == null) return plan;
+  const invalidation = Math.max(retained, positive(plan.invalidation) || 0);
+  // A retained stop above a newly suggested entry leaves no positive risk
+  // distance. Keep the defensive boundary without offering another entry.
+  if (!plan.available || !(positive(plan.entryReference) > invalidation)) {
+    return { ...plan, available:true, status:'defensive', invalidation,
+      entryReference:null, confirmation:null, buyLow:null, buyHigh:null, inBuyZone:false,
+      reassessment:null, secondaryReassessment:null, rewardRisk:null,
+      reason:'沿用当前持仓已生效的失效位；形态变化不能取消或下移防守边界。' };
+  }
+  return { ...plan, invalidation,
+    rewardRisk:positive(plan.reassessment) > plan.entryReference
+      ? (plan.reassessment - plan.entryReference) / (plan.entryReference - invalidation) : null };
+}

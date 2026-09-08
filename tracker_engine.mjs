@@ -117,6 +117,8 @@ function getTrackerPositions() {
       pair_id: p.id,
       shares: hasEvents ? evPos.shares : (cached.shares || 0),
       cost: hasEvents ? evPos.cost : (cached.cost || 0),
+      ledgerStatus:evPos.ledgerStatus || 'valid',
+      ledgerError:evPos.ledgerError || null,
       currency: cached.currency || null,
       base_currency: cached.base_currency || null,
       updated_at: cached.updated_at || Date.now(),

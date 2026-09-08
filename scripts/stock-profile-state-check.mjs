@@ -43,6 +43,14 @@ try {
   equal(firstBinding.profile_id, 'responsive', 'first actual buy binds the effective profile');
   ok(firstBinding.profile_version, 'binding records the technical profile version');
   ok(firstBinding.strategy_version, 'binding records the execution strategy version');
+  store.retainInvalidation('NVDA',{profileId:'responsive',invalidation:95,asOfDate:'2026-09-01'});
+  store.retainInvalidation('NVDA',{profileId:'balanced',invalidation:110,asOfDate:'2026-09-02'});
+  equal(store.getActiveBinding('NVDA').invalidation_price,95,'another profile cannot alter the formal stop');
+  store.retainInvalidation('NVDA',{profileId:'responsive',invalidation:90,asOfDate:'2026-09-02'});
+  equal(store.getActiveBinding('NVDA').invalidation_price,95,'lower levels cannot loosen an existing stop');
+  store.retainInvalidation('NVDA',{profileId:'responsive',invalidation:97,asOfDate:'2026-09-03'});
+  store.retainInvalidation('NVDA',{profileId:'responsive',invalidation:99,asOfDate:'2026-09-02'});
+  equal(store.getActiveBinding('NVDA').invalidation_price,97,'historical analyses cannot replace the latest protection');
 
   store.setPreference({ symbol:'NVDA', profileId:'confirmed' });
   const locked = store.resolveForPosition('NVDA', { shares:10 });
@@ -57,10 +65,12 @@ try {
   equal(restored.profile_version, ended.profile_version, 'restored position keeps its original profile version');
   equal(restored.strategy_version, ended.strategy_version, 'restored position keeps its original strategy version');
   equal(restored.bound_source, 'trade_event_void_restore', 'restored binding is distinguishable in the audit trail');
+  equal(restored.invalidation_price,97,'voiding a close restores the position protection');
 
   store.reconcileBinding('NVDA', 'US', { shares:0 });
   const secondBinding = store.reconcileBinding('NVDA', 'US', { shares:5 }, { source:'first_buy' });
   equal(secondBinding.profile_id, 'confirmed', 'a new position may use the newly selected profile after the old position closes');
+  equal(secondBinding.invalidation_price,null,'a separate position cannot inherit an old stop');
 } finally {
   if (previousSelector == null) delete process.env.STOCK_SIGNAL_PROFILE_SELECTOR_ENABLED;
   else process.env.STOCK_SIGNAL_PROFILE_SELECTOR_ENABLED = previousSelector;

@@ -25,7 +25,7 @@ import {
   fmtPct,
   binomialUpperTail, edgeGrade,
 } from "./indicators.mjs";
-import { OUTCOME_CONTRACT_VERSION, resolveNextSessionExecution } from "./outcome_contract.mjs";
+import { OUTCOME_CONTRACT_VERSION, resolveNextSessionExecution, resolveBarExit } from "./outcome_contract.mjs";
 import { getKline, auditStoredKline, countKline } from "./stock_kline.mjs";
 import { computeCompositeScore, SCORING_ENGINE_VERSION } from "./signal_scoring.mjs";
 import { arbitrateStockDecision } from "./stock_decision_arbiter.mjs";
@@ -114,24 +114,12 @@ function simulateTradePath(rows, idx, horizon, plan, direction, market) {
     const lo = rows[j].low || rows[j].close;
     maxHigh = Math.max(maxHigh, hi);
     minLow = Math.min(minLow, lo);
-    if (direction > 0) {
-      const hitStop = stop != null && lo <= stop;
-      const hitTarget = target != null && hi >= target;
-      if (hitStop || hitTarget) {
-        exit = hitStop ? stop : target; // same-day ambiguity: conservative, stop first.
-        exitReason = hitStop ? "stop" : "target";
-        exitDay = j - idx;
-        break;
-      }
-    } else if (direction < 0) {
-      const hitStop = stop != null && hi >= stop;
-      const hitTarget = target != null && lo <= target;
-      if (hitStop || hitTarget) {
-        exit = hitStop ? stop : target;
-        exitReason = hitStop ? "stop" : "target";
-        exitDay = j - idx;
-        break;
-      }
+    const fill = resolveBarExit(rows[j], { stop, target, direction });
+    if (fill) {
+      exit = fill.price;
+      exitReason = fill.reason;
+      exitDay = j - idx;
+      break;
     }
   }
   const rawReturn = (exit / entry - 1) * 100;
@@ -535,15 +523,14 @@ function simulatePolicySymbol(symbol, market, days = 600, useWalkForwardGate = t
         sell(i, px, Math.max(lot, shares * trimFraction), 'REDUCE', pending.signalDate);
       }
       else if (pending.action === 'CLOSE') sell(i, px, shares, 'CLOSE', pending.signalDate);
-      if (pending.stop != null) stop = pending.stop;
+      if (shares > 0 && pending.stop != null) stop = Math.max(stop ?? 0, pending.stop);
       if (pending.target != null) target = pending.target;
       pending = null;
     }
     if (shares > 0) {
-      const hitStop = stop != null && row.low <= stop;
-      const hitTarget = target != null && row.high >= target;
-      if (hitStop) sell(i, stop, shares, 'STOP');
-      else if (hitTarget) { sell(i, target, Math.max(lot, shares * 0.25), 'TARGET_TRIM'); target = null; }
+      const fill = resolveBarExit(row, { stop, target, direction:1 });
+      if (fill?.reason === 'stop') sell(i, fill.price, shares, 'STOP');
+      else if (fill?.reason === 'target') { sell(i, fill.price, Math.max(lot, shares * 0.25), 'TARGET_TRIM'); target = null; }
     }
     const equity = cash + shares * row.close;
     curve.push({ date:row.date, equity:+equity.toFixed(4) });
@@ -553,9 +540,11 @@ function simulatePolicySymbol(symbol, market, days = 600, useWalkForwardGate = t
       // 基于当前模拟持仓重算生产阶段/动作。
       const analysis = ev._analysis;
       if (!analysis) continue;
-      const position = shares > 0 ? { shares, cost: avgCost, target_shares: 0 } : null;
+      const position = shares > 0 ? { shares, cost: avgCost, target_shares: 0,
+        protection:{ profileId:cfg.profileId || analysis.signalProfiles?.effectiveProfileId, invalidation:stop } } : null;
       const v21 = computeV21StateForPosition(analysis, position, cfg);
       if (!v21) continue;
+      if (shares > 0 && v21.stopLoss > 0) stop = Math.max(stop ?? 0, v21.stopLoss);
       if (shares <= 0) {
         if (v21.executionAction === 'OPEN') {
           pending = { action:'OPEN', stop:v21.stopLoss, target:v21.takeProfit, signalDate:ev.date, tranchePct:v21.tranchePct };
@@ -574,10 +563,10 @@ function simulatePolicySymbol(symbol, market, days = 600, useWalkForwardGate = t
       const direction = actionDirection(ev.action);
       if (shares <= 0 && direction > 0) {
         const evidence = historicalEntryEvidence(series.events, i, 5);
-        if (!useWalkForwardGate || evidence.pass) pending = { action:'BUY', stop:ev.stopLoss, target:ev.takeProfit, signalDate:ev.date };
+        if (!useWalkForwardGate || evidence.pass) pending = { action:'OPEN', stop:ev.stopLoss, target:ev.takeProfit, signalDate:ev.date };
       } else if (shares > 0) {
-        if (ev.action === 'SELL') pending = { action:'EXIT', signalDate:ev.date };
-        else if (ev.action === 'REDUCE') pending = { action:'TRIM', signalDate:ev.date };
+        if (ev.action === 'SELL') pending = { action:'CLOSE', signalDate:ev.date };
+        else if (ev.action === 'REDUCE') pending = { action:'REDUCE', signalDate:ev.date };
         else if (direction > 0 && i - lastEntryIndex >= 3 && shares * row.close < initialCapital * 0.95) {
           const evidence = historicalEntryEvidence(series.events, i, 5);
           if (!useWalkForwardGate || evidence.pass) pending = { action:'ADD', stop:ev.stopLoss, target:ev.takeProfit, signalDate:ev.date };

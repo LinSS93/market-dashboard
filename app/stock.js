@@ -1645,6 +1645,7 @@ function posHtml(s, st){
 }
 function holdingHtml(s, mkt, st){
   const p = pos[s];
+  if (p?.ledgerStatus === 'invalid') return '<td title="'+esc(p.ledgerError || '')+'"><small class="muted">持仓待核对</small></td>';
   if (!p || !p.shares) return '<td><small class="muted">—</small></td>';
   const cost = Number(p.cost);
   const px = st && st.price != null ? Number(st.price) : null;
@@ -1670,11 +1671,12 @@ function renderPortfolioBar(raw, ana){
     return rate > 0 ? val / rate : val;
   };
   // 汇总持仓
-  let totalMvCny = 0, totalPlCny = 0, hasPositionCount = 0;
+  let totalMvCny = 0, totalPlCny = 0, hasPositionCount = 0, invalidPositionCount = 0;
   for(const w of wl){
     const mkt = (w.market || 'US').toUpperCase();
     const st = raw[w.symbol];
     const p = pos[w.symbol];
+    if (p?.ledgerStatus === 'invalid') { invalidPositionCount++; continue; }
     if(!p || !Number(p.shares) || !Number(p.cost)) continue;
     hasPositionCount++;
     const price = st && st.price != null ? Number(st.price) : null;
@@ -1683,6 +1685,11 @@ function renderPortfolioBar(raw, ana){
     const plCny = price != null ? toCny((price - cost) * shares, mkt) : 0;
     totalMvCny += mvCny;
     totalPlCny += plCny;
+  }
+  if(invalidPositionCount > 0){
+    el.innerHTML = '<div class="pb-item"><span class="pb-k">持仓汇总待核对</span><span class="pb-v">'+invalidPositionCount+' 只标的账本异常</span></div>';
+    el.style.display = 'flex';
+    return;
   }
   if(hasPositionCount === 0){ el.style.display = 'none'; el.innerHTML = ''; return; }
   const plCls = totalPlCny >= 0 ? ' pos' : ' neg';
@@ -2404,6 +2411,13 @@ function renderOptFlow(j,symbol=selectedSym){
 function updatePL(price, mkt, sym){
   const s = sym || selectedSym;
   const p = pos[s] || {};
+  if (p.ledgerStatus === 'invalid') {
+    for (const id of ['pos_card_shares','pos_card_cost','pos_card_pl','pos_card_mv']) {
+      const el = $(id);
+      if (el) { el.textContent = '待核对'; el.className = 'pos-v muted'; el.title = p.ledgerError || ''; }
+    }
+    return;
+  }
   const shares = p.shares || 0;
   const cost = p.cost || 0;
   // 同步更新持仓 tab 的 4 指标卡片

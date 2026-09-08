@@ -975,6 +975,8 @@ async function computePair(pair, runtime = {}) {
     executionAction = 'WATCH';
   // 关键数据可用性检查
   const criticalDataReasons = [];
+  if (trackerPosition?.ledgerStatus === 'invalid') criticalDataReasons.push(`持仓待核对：${trackerPosition.ledgerError}`);
+  if (getMarketStateFor(pair.etf_market || 'HK').verified === false) criticalDataReasons.push('ETF 交易日历未核验，请更新日历');
   if (etfPrice == null) criticalDataReasons.push('ETF 报价缺失');
   if (pair.underlying && undPrice == null) criticalDataReasons.push('正股报价缺失');
   if (etf?.stale || und?.stale) criticalDataReasons.push('报价已过期');

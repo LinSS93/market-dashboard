@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { parse } from 'csv-parse/sync';
 import { selectedStockStrategy } from './stock_signal_contract.mjs';
+import { computePositionFromEventRows, validateTradeDate } from './stock_trade_ledger.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DB_PATH = join(__dirname, 'data', 'market_data.db');
@@ -208,12 +209,16 @@ export function importTradesCsv(filePath) {
   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
   const tx = db.transaction(() => {
     const info = insertImport.run(sourceHash, filePath.split(/[\\/]/).pop(), Date.now(), records.length, JSON.stringify(FEE_MODEL));
+    const touchedSymbols = new Set();
     for (const r of records) {
       const market = String(r.market || 'HK').toUpperCase();
-      const price = Number(r.price), quantity = Math.round(Number(r.quantity));
+      const price = Number(r.price), quantity = Number(r.quantity);
+      if (!Number.isFinite(price) || !Number.isSafeInteger(quantity)) throw new Error('invalid trade price or quantity');
       if (!r.external_trade_id || !r.traded_at || !r.symbol || !['买入', '卖出'].includes(r.side) || !(price > 0) || !(quantity > 0)) throw new Error('invalid trade row: ' + JSON.stringify(r));
       const fee = estimateTradeFee(market, price, quantity, r.side === '卖出' ? 'sell' : 'buy');
       const ts = parseLocalTradeTime(r.traded_at);
+      validateTradeDate(String(r.traded_at).slice(0, 10));
+      touchedSymbols.add(String(r.symbol).padStart(5, '0'));
       insertTrade.run(
         String(r.symbol).padStart(5, '0'), market, r.side === '卖出' ? 'sell' : 'buy', quantity, price,
         String(r.traded_at).slice(0, 10), r.note || null, ts,
@@ -221,6 +226,9 @@ export function importTradesCsv(filePath) {
         String(r.external_trade_id), Number(info.lastInsertRowid), r.name || '', r.order_type || null,
         r.order_price ? Number(r.order_price) : null, r.source_ref || null, r.confidence || null
       );
+    }
+    for (const symbol of touchedSymbols) {
+      computePositionFromEventRows(db.prepare('SELECT * FROM stock_trade_events WHERE symbol=?').all(symbol));
     }
     return Number(info.lastInsertRowid);
   });

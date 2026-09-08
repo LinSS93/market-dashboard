@@ -32,6 +32,12 @@ export function initializeStockProfileStateSchema(db) {
     );
   `);
   try { db.prepare('ALTER TABLE stock_position_profile_bindings ADD COLUMN strategy_version TEXT').run(); } catch {}
+  for (const column of ['invalidation_price REAL', 'protection_as_of TEXT']) {
+    const name = column.split(' ')[0];
+    if (!db.prepare('PRAGMA table_info(stock_position_profile_bindings)').all().some(row => row.name === name)) {
+      db.exec(`ALTER TABLE stock_position_profile_bindings ADD COLUMN ${column}`);
+    }
+  }
 }
 
 function safeSymbol(value) {
@@ -51,14 +57,14 @@ export function createStockProfileStateStore({ db, getSystemSetting, setSystemSe
   function getActiveBinding(symbol) {
     const normalized = safeSymbol(symbol);
     if (!normalized) return null;
-    return db.prepare(`SELECT id,symbol,market,profile_id,profile_version,strategy_version,bound_at,bound_source
+    return db.prepare(`SELECT id,symbol,market,profile_id,profile_version,strategy_version,bound_at,bound_source,invalidation_price,protection_as_of
       FROM stock_position_profile_bindings WHERE symbol=? AND ended_at IS NULL ORDER BY id DESC LIMIT 1`).get(normalized) || null;
   }
 
   function getLatestBinding(symbol) {
     const normalized = safeSymbol(symbol);
     if (!normalized) return null;
-    return db.prepare(`SELECT id,symbol,market,profile_id,profile_version,strategy_version,bound_at,bound_source,ended_at,end_reason
+    return db.prepare(`SELECT id,symbol,market,profile_id,profile_version,strategy_version,bound_at,bound_source,ended_at,end_reason,invalidation_price,protection_as_of
       FROM stock_position_profile_bindings WHERE symbol=? ORDER BY id DESC LIMIT 1`).get(normalized) || null;
   }
 
@@ -106,6 +112,7 @@ export function createStockProfileStateStore({ db, getSystemSetting, setSystemSe
   function reconcileBinding(symbol, market, position, { source = 'trade_event' } = {}) {
     const normalized = safeSymbol(symbol);
     const active = getActiveBinding(normalized);
+    if (position?.ledgerStatus === 'invalid') return active;
     const hasPosition = Number(position?.shares) > 0;
     if (!hasPosition && active) {
       db.prepare('UPDATE stock_position_profile_bindings SET ended_at=?,end_reason=? WHERE id=? AND ended_at IS NULL')
@@ -122,9 +129,24 @@ export function createStockProfileStateStore({ db, getSystemSetting, setSystemSe
     const profileVersion = previous?.profile_version || getSignalProfile(profileId)?.version || null;
     const strategyVersion = previous?.strategy_version || STOCK_PROFILE_STRATEGY_VERSION;
     const boundSource = previous ? 'trade_event_void_restore' : source;
-    db.prepare(`INSERT INTO stock_position_profile_bindings(symbol,market,profile_id,profile_version,strategy_version,bound_at,bound_source)
-      VALUES(?,?,?,?,?,?,?)`).run(normalized, String(market || 'US').toUpperCase(), profileId, profileVersion, strategyVersion, Date.now(), String(boundSource || 'trade_event').slice(0, 40));
+    db.prepare(`INSERT INTO stock_position_profile_bindings(symbol,market,profile_id,profile_version,strategy_version,bound_at,bound_source,invalidation_price,protection_as_of)
+      VALUES(?,?,?,?,?,?,?,?,?)`).run(normalized, String(market || 'US').toUpperCase(), profileId, profileVersion, strategyVersion, Date.now(), String(boundSource || 'trade_event').slice(0, 40), previous?.invalidation_price ?? null, previous?.protection_as_of ?? null);
     return getActiveBinding(normalized);
+  }
+
+  // This position's stop can tighten, never loosen or disappear. Closing the
+  // actual ledger position releases it; voiding that close restores it.
+  function retainInvalidation(symbol, { profileId, invalidation, asOfDate } = {}) {
+    const binding = getActiveBinding(symbol);
+    const price = Number(invalidation);
+    if (!binding || binding.profile_id !== profileId || !Number.isFinite(price) || price <= 0
+        || !/^\d{4}-\d{2}-\d{2}$/.test(String(asOfDate || ''))
+        || (binding.protection_as_of && asOfDate < binding.protection_as_of)) return binding;
+    if (price > Number(binding.invalidation_price || 0) || asOfDate > String(binding.protection_as_of || '')) {
+      db.prepare('UPDATE stock_position_profile_bindings SET invalidation_price=?,protection_as_of=? WHERE id=? AND ended_at IS NULL')
+        .run(Math.max(price, Number(binding.invalidation_price || 0)), asOfDate, binding.id);
+    }
+    return getActiveBinding(symbol);
   }
 
   return {
@@ -135,5 +157,6 @@ export function createStockProfileStateStore({ db, getSystemSetting, setSystemSe
     setPreference,
     resolveForPosition,
     reconcileBinding,
+    retainInvalidation,
   };
 }

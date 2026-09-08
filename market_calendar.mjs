@@ -17,7 +17,8 @@ const CALENDARS = {
   },
   CN: {
     verifiedYear:2026, timeZone:'Asia/Shanghai', open:570, lunchStart:690, lunchEnd:780, close:900,
-    holidays:new Set(['2026-01-01','2026-01-02','2026-01-05','2026-02-16','2026-02-17','2026-02-18','2026-02-19','2026-02-20','2026-02-23','2026-04-06','2026-05-01','2026-05-04','2026-05-05','2026-06-19','2026-09-25','2026-10-01','2026-10-02','2026-10-05','2026-10-06','2026-10-07']),
+    // https://www.sse.com.cn/disclosure/dealinstruc/closed/c/c_20251222_10802510.shtml
+    holidays:new Set(['2026-01-01','2026-01-02','2026-02-16','2026-02-17','2026-02-18','2026-02-19','2026-02-20','2026-02-23','2026-04-06','2026-05-01','2026-05-04','2026-05-05','2026-06-19','2026-09-25','2026-10-01','2026-10-02','2026-10-05','2026-10-06','2026-10-07']),
     earlyClose:new Map(), source:'SSE 2026 holiday closure schedule',
   },
 };
@@ -33,6 +34,7 @@ export function getMarketStatus(market,now=Date.now()){
   if(!c) return {market:code,state:'closed',open:false,session:'unknown',label:'未知市场',verified:false};
   const p=parts(now,c.timeZone), verified=p.year===c.verifiedYear, weekend=p.weekday==='Sat'||p.weekday==='Sun';
   const base={market:code,date:p.date,verified,calendar_year:c.verifiedYear,source:c.source};
+  if(!verified) return {...base,state:'closed',open:false,session:'calendar_unverified',label:'交易日历待更新'};
   if(weekend) return {...base,state:'closed',open:false,session:'weekend',label:'周末休市'};
   if(c.holidays.has(p.date)) return {...base,state:'closed',open:false,session:'holiday',label:'节假日休市'};
   const close=c.earlyClose.get(p.date)||c.close, early=close!==c.close;
@@ -65,6 +67,7 @@ export function isTradingDate(market,dateStr){
   if(!c||!/^\d{4}-\d{2}-\d{2}$/.test(value))return false;
   if(Number(value.slice(0,4))!==c.verifiedYear||c.holidays.has(value))return false;
   const dayNum=new Date(value+'T12:00:00Z').getUTCDay();
+  if(!Number.isFinite(dayNum)||new Date(value+'T12:00:00Z').toISOString().slice(0,10)!==value)return false;
   return dayNum!==0&&dayNum!==6;
 }
 
@@ -83,6 +86,7 @@ function cachedNextMarketOpenAt(market,now){
 // null instead of guessing a session.
 export function nextMarketOpenAt(market,now=Date.now(),{lookaheadDays=14}={}){
   const current=getMarketStatus(market,now);
+  if(!CALENDARS[String(market||'').toUpperCase()])return null;
   if(current.open)return now;
   const minute=60_000,step=15*minute,end=now+Math.max(1,lookaheadDays)*24*60*minute;
   const firstMinute=Math.floor(now/minute)*minute+minute;

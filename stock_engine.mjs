@@ -41,9 +41,10 @@ import {
   resolveSignalProfileSelection,
 } from "./stock_signal_profiles.mjs";
 import { scaleStockProfileTranches, STOCK_PROFILE_STRATEGY_VERSION } from "./stock_profile_strategy.mjs";
-import { buildStockPricePlan, STOCK_PRICE_PLAN_VERSION } from "./stock_price_plan.mjs";
+import { buildStockPricePlan, applyPositionProtection, STOCK_PRICE_PLAN_VERSION } from "./stock_price_plan.mjs";
 import { buildStockStagePricePlan } from "./stock_stage_price_plan.mjs";
 import { createStockProfileStateStore, initializeStockProfileStateSchema } from "./stock_profile_state.mjs";
+import { computePositionFromEventRows, validateTradeDate } from './stock_trade_ledger.mjs';
 import { buildStockOpportunityAssessment } from "./stock_opportunity_model.mjs";
 import { buildStockPersonaVerdicts } from "./stock_persona_verdicts.mjs";
 import {
@@ -894,7 +895,7 @@ const insertShadowOutcome = db.prepare(`INSERT INTO stock_signal_shadow_outcomes
     evaluated_at=excluded.evaluated_at,outcome_contract_version=excluded.outcome_contract_version,
     entry_price_source=excluded.entry_price_source`);
 // ── 持仓推算：stock_trade_events 是唯一数据源（user_trades/stock_positions 已迁移并入） ──
-const _getTradeEventsBySymbol = db.prepare("SELECT id, date, event_type, shares, price, note, created_at, source, traded_at, commission, platform_fee, total_fee, currency, voided_at, void_reason FROM stock_trade_events WHERE symbol=? ORDER BY date, created_at, id");
+const _getTradeEventsBySymbol = db.prepare("SELECT id, date, event_type, shares, price, note, created_at, source, traded_at, commission, platform_fee, total_fee, currency, voided_at, void_reason FROM stock_trade_events WHERE symbol=? ORDER BY date, COALESCE(traded_at,created_at), id");
 
 // 事件流：返回统一的 {id, date, type:'buy'|'sell'|'cost_adjust', shares, price, source, note, fee, created_at} 数组（按日期升序）
 function getTradeEventStream(symbol) {
@@ -925,37 +926,25 @@ function voidTradeEvent(symbol, id, { reason = '' } = {}) {
   if (existing.source === 'signal_journal') return { ok:false, error:'该事件由执行账本生成，不能作废；请新增反向交易以保留审计链。' };
   const voidedAt = Date.now();
   const voidReason = String(reason || '用户在看板中作废').trim().slice(0, 160) || '用户在看板中作废';
-  db.prepare('UPDATE stock_trade_events SET voided_at=?, void_reason=? WHERE id=? AND symbol=?').run(voidedAt, voidReason, eventId, safeSymbol);
+  try {
+    db.transaction(() => {
+      db.prepare('UPDATE stock_trade_events SET voided_at=?, void_reason=? WHERE id=? AND symbol=?').run(voidedAt, voidReason, eventId, safeSymbol);
+      computePositionFromEventRows(getTradeEventStream(safeSymbol));
+    })();
+  } catch (error) {
+    if (error.code === 'INVALID_TRADE_LEDGER') return { ok:false, error:error.message, code:error.code };
+    throw error;
+  }
   return { ok:true, id:eventId, voidedAt, voidReason };
 }
 
 // 由不可变操作事件推算当前持仓：作废事件保留在账本中，但不参与仓位计算。
-function computePositionFromEventRows(events) {
-  let shares = 0, cost = 0, openedAt = null;
-  for (const ev of (events || [])) {
-    if (ev.voided_at) continue;
-    if (ev.type === 'buy') {
-      // 买入费用（佣金/平台费）计入成本基础
-      const fee = Number(ev.fee) || 0;
-      const totalCost = shares * cost + ev.shares * ev.price + fee;
-      shares += ev.shares;
-      cost = shares > 0 ? totalCost / shares : 0;
-      if (!openedAt && shares > 0) openedAt = ev.created_at || null;
-    } else if (ev.type === 'sell') {
-      shares = Math.max(0, shares - ev.shares);
-      if (shares === 0) { cost = 0; openedAt = null; }
-    } else if (ev.type === 'cost_adjust') {
-      shares = ev.shares;
-      cost = ev.price;
-      if (shares > 0 && !openedAt) openedAt = ev.created_at || null;
-      if (shares === 0) openedAt = null;
-    }
-  }
-  return { shares, cost: shares > 0 ? cost : 0, opened_at: openedAt };
-}
-
 function computePositionFromEvents(symbol) {
-  return computePositionFromEventRows(getTradeEventStream(symbol));
+  try { return computePositionFromEventRows(getTradeEventStream(symbol)); }
+  catch (error) {
+    if (error.code !== 'INVALID_TRADE_LEDGER') throw error;
+    return { shares:null, cost:null, opened_at:null, ledgerStatus:'invalid', ledgerError:error.message };
+  }
 }
 
 // C3 解耦：recalcTrackerPositionFromEvents 从 tracker_engine.mjs 移入此处。
@@ -968,6 +957,7 @@ function recalcTrackerPositionFromEvents(pairId) {
   const pair = db.prepare("SELECT id, etf, etf_market FROM tracker_pairs WHERE id=?").get(pid);
   if (!pair) return;
   const evPos = computePositionFromEvents(pair.etf);
+  if (evPos.ledgerStatus === 'invalid') return;
   // UPSERT 到 tracker_positions，保留 currency/base_currency
   const existing = db.prepare("SELECT currency, base_currency FROM tracker_positions WHERE pair_id=?").get(pid) || {};
   db.prepare(`INSERT INTO tracker_positions(pair_id,shares,cost,currency,base_currency,updated_at) VALUES(?,?,?,?,?,?)
@@ -985,7 +975,7 @@ function computeAllPositionsFromEvents() {
   for (const symbol of allSymbols) {
     const p = computePositionFromEvents(symbol);
     if (p.shares > 0 || eventSymbols.has(symbol)) {
-      out.push({ symbol, shares: p.shares, cost: p.cost, opened_at: p.opened_at });
+      out.push({ symbol, ...p });
     }
   }
   return out;
@@ -1317,7 +1307,7 @@ function tradingTimeFraction(market) {
 // Historical validation is assembled only by laboratory research endpoints.
 // Current data, setup/price confirmation and explicit risk overlays are the
 // only paths that may block or downgrade an executable technical action.
-const SIGNAL_ENGINE_VERSION = "stock-signal-v2026.09.06-three-assessments-v1";
+const SIGNAL_ENGINE_VERSION = "stock-signal-v2026.09.08-position-protection-v1";
 const COMPATIBLE_SIGNAL_ENGINE_VERSIONS = Object.freeze([SIGNAL_ENGINE_VERSION]);
 const LEGACY_OUTCOME_CONTRACT_VERSION = "legacy-next-close-unversioned-v1";
 const HISTORICAL_REPLAY_ORIGIN = "historical_replay";
@@ -2082,6 +2072,8 @@ function buildSwingDecisionContext(analysis, position = null, { profileId = null
   const cost = Math.max(0, Number(position?.cost || 0));
   const targetShares = Math.max(0, Number(position?.target_shares || 0));
   const hasPosition = shares > 0 && cost > 0;
+  const protection = hasPosition && position?.protection?.profileId === selectedProfileId ? position.protection : null;
+  const ledgerState = { ledgerStatus:position?.ledgerStatus || 'valid', ledgerError:position?.ledgerError || null };
   const pnlPct = hasPosition && currentPrice > 0 ? (currentPrice / cost - 1) * 100 : null;
   const dataOk = plan?.dataQuality?.level === 'ok' && analysis?.daily !== false;
   const riskHigh = plan?.risk?.level === 'high';
@@ -2092,8 +2084,8 @@ function buildSwingDecisionContext(analysis, position = null, { profileId = null
       version: 'stock-decision-context-v6-three-assessments', profileId: selectedProfileId,
       valid: false,
       sourceAction: plan?.action || 'WAIT',
-      position: { hasPosition, shares, targetShares, cost, pnlPct },
-      zones: {},
+      position: { hasPosition, shares, targetShares, cost, pnlPct, ...ledgerState },
+      zones: { invalidation:protection?.invalidation ?? null },
       executionContext: {
         dataOk: false, riskHigh: true,
         technicalAction: String(plan?.action || 'WAIT').toUpperCase(),
@@ -2109,7 +2101,7 @@ function buildSwingDecisionContext(analysis, position = null, { profileId = null
   const overheat = (Number.isFinite(selectedRsi) && selectedRsi >= overheatRsi)
     || (fastDistPct != null && fastDistPct >= 10)
     || (bollPctB != null && bollPctB >= 0.95);
-  const pricePlan = buildStockPricePlan({
+  const pricePlan = applyPositionProtection(buildStockPricePlan({
     profileId: selectedProfileId,
     setupKey,
     currentPrice,
@@ -2123,7 +2115,7 @@ function buildSwingDecisionContext(analysis, position = null, { profileId = null
     cost,
     overheat,
     policy: plan?.policy?.pricePlan,
-  });
+  }), protection?.invalidation);
   const validFrom = analysis.asOfDate || new Date().toISOString().slice(0, 10);
   const longTerm = analysis?.longTermTrend || null;
   return {
@@ -2131,7 +2123,7 @@ function buildSwingDecisionContext(analysis, position = null, { profileId = null
     valid: true,
     sourceAction: plan.action || 'WAIT',
     position: {
-      hasPosition, shares, targetShares,
+      hasPosition, shares, targetShares, ...ledgerState,
       cost: swingPrice(cost, market),
       currentPrice: swingPrice(currentPrice, market),
       pnlPct: pnlPct != null ? +pnlPct.toFixed(2) : null,
@@ -2200,7 +2192,7 @@ function invalidateActiveEtfPairCache() { _activeEtfPairCache = null; }
 function applyLeveragedEtfRiskOverlay(decision, analysis, position = null) {
   const sym = String(analysis?.symbol || "").toUpperCase();
   const pair = sym ? _getActiveEtfPairMap()[sym] : null;
-  if (!pair) return decision;
+  if (!pair || decision?.executionAction === 'CLOSE') return decision;
   const shares = Math.max(0, Number(position?.shares || 0));
   const hasPosition = shares > 0;
   const underlying = latestAnalysis?.[pair.underlying] || null;
@@ -2302,7 +2294,9 @@ function attachCurrentDecision(result, sym, mkt) {
     return { ...(result || { symbol:sym, market:mkt, error:'analysis unavailable' }), swingDecision, personaVerdicts, liveQuote, priceRisk: [] };
   }
   const position = { symbol: sym, shares: 0, cost: 0, ...computePositionFromEvents(sym) };
+  stockProfileState.reconcileBinding(sym, mkt, position, { source:'existing_position' });
   const selection = stockProfileState.resolveForPosition(sym, position);
+  position.protection = { profileId:selection.binding?.profile_id, invalidation:selection.binding?.invalidation_price ?? null };
   const selectedProfiles = Object.fromEntries(Object.entries(result.signalProfiles?.profiles || {}).map(([id, profile]) => [id, {
     ...profile,
     formalActionEligible: id === selection.effectiveProfileId,
@@ -2333,6 +2327,12 @@ function attachCurrentDecision(result, sym, mkt) {
     });
   }
   const finalDecision = profileDecisions[selection.effectiveProfileId] || profileDecisions.balanced;
+  if (position.shares > 0 && selectedStockStrategy(decisionAnalysis)?.dataQuality?.level === 'ok') {
+    const binding = stockProfileState.retainInvalidation(sym, {
+      profileId:selection.effectiveProfileId, invalidation:finalDecision.zones?.invalidation, asOfDate:result.asOfDate,
+    });
+    signalProfiles.positionBinding = binding || signalProfiles.positionBinding;
+  }
   const personaVerdicts = buildStockPersonaVerdicts({
     signalProfiles,
     profileDecisions,
@@ -2445,6 +2445,8 @@ function computePriceRisk(ai, position) {
 }
 function applyCriticalDataGate(decision, { result = null, quote = null, market = 'US', extraReasons = [] } = {}) {
   const reasons = [...extraReasons];
+  if (decision?.position?.ledgerStatus === 'invalid') reasons.push(`持仓待核对：${decision.position.ledgerError}`);
+  if (getMarketStateFor(market).verified === false) reasons.push('市场交易日历未核验，请更新日历后再执行');
   const strategy = selectedStockStrategy(result);
   if (!result || result.error) reasons.push(result?.reason || result?.error || '技术分析尚未完成');
   if (result && !hasCurrentStockSignalContract(result)) reasons.push('当前人格信号输入不完整');
@@ -4979,24 +4981,34 @@ export function stockHandler(req, res) {
           const allowedTypes = new Set(['buy','sell','cost_adjust']);
           const event_type = allowedTypes.has(t.event_type) ? t.event_type : null;
           if (!event_type) throw new Error("invalid event_type");
-          const shares = Math.max(0, Math.round(Number(t.shares) || 0));
-          const price = Math.max(0, Number(t.price) || 0);
-          if (shares <= 0 || price <= 0) throw new Error("shares and price must be positive");
+          const shares = Number(t.shares);
+          const price = Number(t.price);
+          if (!Number.isSafeInteger(shares) || shares <= 0 || !Number.isFinite(price) || price <= 0) throw new Error("shares must be a positive integer and price must be finite and positive");
           const market = String(t.market || "US").toUpperCase().slice(0,4);
-          const date = String(t.date || new Date().toISOString().slice(0,10)).slice(0,10);
+          const date = validateTradeDate(t.date || marketLocalToday(market));
           const note = String(t.note || "").trim().slice(0,100) || null;
           // 费用（可选）：写入 total_fee 字段，用于成本推算
-          const fee = Math.max(0, Number(t.fee) || 0);
+          const fee = Number(t.fee ?? 0);
+          if (!Number.isFinite(fee) || fee < 0) throw new Error('fee must be finite and nonnegative');
           const createdAt = Date.now();
           const { pos, profileBinding } = db.transaction(() => {
             const positionBefore = computePositionFromEvents(symbol);
             // 交易事件与人格绑定同事务提交，避免“交易已写入但策略锁定失败”。
             db.prepare(`INSERT INTO stock_trade_events(symbol,market,event_type,shares,price,date,note,created_at,total_fee) VALUES(?,?,?,?,?,?,?,?,?)`)
               .run(symbol, market, event_type, shares, price, date, note, createdAt, fee);
-            const pos = computePositionFromEvents(symbol);
+            const pos = computePositionFromEventRows(getTradeEventStream(symbol));
             const bindingSource = event_type === 'buy' && positionBefore.shares <= 0 ? 'first_buy' : 'trade_event';
             const profileBinding = stockProfileState.reconcileBinding(symbol, market, pos, { source:bindingSource });
-            return { pos, profileBinding };
+            const cached = latestAnalysis?.[symbol];
+            const cachedDecision = cached?.profileDecisions?.[profileBinding?.profile_id] || cached?.swingDecision;
+            if (event_type === 'buy' && pos.shares > 0 && cached?.asOfDate <= date
+                && (bindingSource !== 'first_buy' || cachedDecision?.position?.hasPosition === false)
+                && cachedDecision?.profileId === profileBinding?.profile_id
+                && selectedStockStrategy(cached, profileBinding?.profile_id)?.dataQuality?.level === 'ok') {
+              stockProfileState.retainInvalidation(symbol, { profileId:profileBinding.profile_id,
+                invalidation:cachedDecision.zones?.invalidation, asOfDate:cached.asOfDate });
+            }
+            return { pos, profileBinding:stockProfileState.getActiveBinding(symbol) };
           })();
           // 同步：若该 symbol 是某个 tracker pair 的 ETF，刷新 tracker_positions 缓存
           const tp = db.prepare("SELECT id FROM tracker_pairs WHERE etf=?").get(symbol);
@@ -5046,8 +5058,9 @@ function computeOneAnalysis(sym, mkt) {
 }
 
 let analysisInFlight = false;
+let analysisRefreshRequested = false;
 const yieldToEventLoop = () => new Promise(resolve => setImmediate(resolve));
-async function analyzeAll() {
+export async function analyzeAll() {
   if (analysisInFlight) { analysisRefreshRequested = true; return; }
   analysisInFlight = true;
   try {

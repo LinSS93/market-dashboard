@@ -9,7 +9,7 @@ function check(condition, message) {
   if (!condition) failures.push(message);
 }
 
-check(SIGNAL_ENGINE_VERSION === 'stock-signal-v2026.09.06-three-assessments-v1',
+check(SIGNAL_ENGINE_VERSION === 'stock-signal-v2026.09.08-position-protection-v1',
   'the direction-timing-risk contract starts a separate formal-signal cohort');
 check(COMPATIBLE_SIGNAL_ENGINE_VERSIONS.length === 1 && COMPATIBLE_SIGNAL_ENGINE_VERSIONS[0] === SIGNAL_ENGINE_VERSION,
   'the changed action contract is not mixed with earlier formal outcomes');
