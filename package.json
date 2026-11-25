@@ -43,7 +43,7 @@
     "health": "node scripts/health-check.mjs"
   },
   "dependencies": {
-    "better-sqlite3": "^12.11.1",
+    "better-sqlite3": "^13.2.0",
     "csv-parse": "^7.0.2",
     "pdf-parse": "^2.4.5"
   },
