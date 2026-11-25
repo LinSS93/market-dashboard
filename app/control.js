@@ -49,7 +49,7 @@
       radar_v2:{enabled:$('radarEnabled').checked,tiers:checkedValues($('radarTiers'))},
     },
   }}
-  async function loadSettings(){const response=await fetch('/control/settings',{cache:'no-store'});if(!response.ok)throw new Error('配置读取失败');const data=await response.json();settings=data.settings;integration=data.webhook;$('settingsTime').textContent='更新于 '+fmtTime(data.updatedAt);renderSettings();}
+  async function loadSettings(){const response=await fetch('/control/settings',{cache:'no-store'});if(!response.ok)throw new Error('配置读取失败');const data=await response.json();settings=data.settings;integration=data.webhook;$('settingsTime').textContent='更新于 '+fmtTime(data.updatedAt);renderSettings();renderSummary(data);}
   // D1 新增：API Key 管理
   let apiKeysData=null;
   function renderApiKeys(){const box=$('apiKeysBody');if(!box||!apiKeysData)return;const entries=Object.entries(apiKeysData);box.innerHTML=entries.map(([provider,info])=>{const statePill=info.enabled?'<span class="state-pill on">已启用</span>':(info.source==='none'?'<span class="state-pill">未配置</span>':'<span class="state-pill wait">已禁用</span>');const sourceLabel={environment:'环境变量',database:'数据库',none:'未配置'}[info.source]||info.source;return '<div class="setting-row" style="grid-template-columns:minmax(120px,1fr) minmax(180px,1.25fr) auto"><div><div class="setting-title">'+esc(info.label)+'</div><div class="setting-note">'+sourceLabel+(info.apiKeyMasked?' · '+esc(info.apiKeyMasked):'')+'</div></div><div class="setting-note">'+esc(info.baseUrl)+(info.updatedAt?'<br>更新于 '+fmtTime(info.updatedAt):'')+'</div><div style="display:flex;gap:6px;align-items:center">'+statePill+'<button class="btn ghost api-key-edit" data-provider="'+esc(provider)+'" type="button">编辑</button>'+(info.source!=='none'?'<button class="btn ghost api-key-delete" data-provider="'+esc(provider)+'" type="button">删除</button>':'')+'</div></div>';}).join('');
@@ -64,7 +64,7 @@
       // 1. 保存档位/开关配置
       const response=await fetch('/control/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({settings:collectSettings()})});
       const data=await response.json();if(!response.ok)throw new Error(data.error||'保存失败');
-      settings=data.settings;integration=data.webhook;$('settingsTime').textContent='更新于 '+fmtTime(data.updatedAt);renderSettings();
+      settings=data.settings;integration=data.webhook;$('settingsTime').textContent='更新于 '+fmtTime(data.updatedAt);renderSettings();renderSummary(data);
       // 2. 同时保存通知文案
       const tplBody={stock:$('notifyTemplateStock')?.value||'',etf:$('notifyTemplateEtf')?.value||''};
       const tplR=await fetch('/stock/alert-template',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(tplBody)}).then(r=>r.json());
@@ -117,7 +117,7 @@
   function renderAlerts(rows){
     if(!rows?.length){$('recentAlerts').innerHTML='<div class="empty">暂无提醒记录</div>';return}
     const moduleLabel={stock:'股票监控',etf:'杠杆 ETF',radar:'机会雷达'};
-    $('recentAlerts').innerHTML='<table class="audit-table"><thead><tr><th>时间</th><th>模块</th><th>标的</th><th>动作</th><th>渠道</th><th>状态</th><th>说明</th></tr></thead><tbody>'+rows.map(row=>'<tr><td>'+esc(fmtTime(row.ts))+'</td><td>'+esc(moduleLabel[row.type]||row.type||'—')+'</td><td>'+esc(row.symbol_code||row.pair_id||'—')+'</td><td>'+esc(ACTION_LABELS[row.signal]||(row.signal==='DIGEST'?'日报':row.signal)||'—')+'</td><td>'+esc(CHANNEL_LABELS[row.channel]||row.channel||'—')+'</td><td>'+esc(STATUS_LABELS[row.status]||row.status||'—')+'</td><td title="'+esc(row.detail||'')+'">'+esc((row.detail||'—').replace(/market_state[:：]\s*(\w+)/gi,(_,state)=>'市场状态：'+(MARKET_STATE_LABELS[state]||state)))+'</td></tr>').join('')+'</tbody></table>';
+    $('recentAlerts').innerHTML='<table class="audit-table"><thead><tr><th>时间</th><th>模块</th><th>标的</th><th>动作</th><th>渠道</th><th>状态</th><th>说明</th></tr></thead><tbody>'+rows.map(row=>'<tr><td>'+esc(fmtTime(row.ts))+'</td><td>'+esc(moduleLabel[row.type]||row.type||'—')+'</td><td>'+esc(row.symbol_code||row.pair_id||'—')+'</td><td>'+esc((row.type==='stock'?STOCK_ACTION_LABELS:row.type==='etf'?ETF_ACTION_LABELS:RADAR_TIER_LABELS)[row.signal]||(row.signal==='DIGEST'?'日报':row.signal)||'—')+'</td><td>'+esc(CHANNEL_LABELS[row.channel]||row.channel||'—')+'</td><td>'+esc(STATUS_LABELS[row.status]||row.status||'—')+'</td><td title="'+esc(row.detail||'')+'">'+esc((row.detail||'—').replace(/market_state[:：]\s*(\w+)/gi,(_,state)=>'市场状态：'+(MARKET_STATE_LABELS[state]||state)))+'</td></tr>').join('')+'</tbody></table>';
   }
   function renderRuntimeMetrics(metrics){
     const box=$('runtimeMetrics');if(!box)return;
@@ -176,7 +176,7 @@
     }catch(error){notify(error.message,true)}
     finally{button.disabled=false}
   }
-  async function loadStatus(){try{const response=await fetch('/control/status',{cache:'no-store'});if(!response.ok)throw new Error('状态读取失败');const data=await response.json();settings=data.settings;integration=data.webhook;renderSummary(data);renderRuntime(data);renderRuntimeMetrics(data.runtimeMetrics);renderDataSources(data);renderAlerts(data.recentAlerts);renderSettings();$('headerStatus').textContent='已更新 '+new Date(data.ts).toLocaleTimeString('zh-CN',{hour12:false});}catch(error){$('headerStatus').textContent=error.message;$('headerStatus').style.color='#c9372c'}}
+  async function loadStatus(){try{const response=await fetch('/control/status',{cache:'no-store'});if(!response.ok)throw new Error('状态读取失败');const data=await response.json();renderRuntime(data);renderRuntimeMetrics(data.runtimeMetrics);renderDataSources(data);renderAlerts(data.recentAlerts);$('headerStatus').textContent='已更新 '+new Date(data.ts).toLocaleTimeString('zh-CN',{hour12:false});}catch(error){$('headerStatus').textContent=error.message;$('headerStatus').style.color='#c9372c'}}
 
   // ---------- LLM token 用量 ----------
   let tokenTrendChart = null;
@@ -192,6 +192,7 @@
       if(!response.ok) throw new Error('token 用量读取失败');
       const data = await response.json();
       renderTokenSummary(data.summary || {}, data.daily || []);
+      await DashboardCharts.load();
       renderTokenTrend(data.daily || []);
       renderTokenBreakdown(data.breakdown || []);
       $('tokenUsageTime').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN',{hour12:false});
@@ -275,12 +276,34 @@
     $('tokenRangeGroup').querySelectorAll('.range-btn').forEach(b=>b.classList.toggle('active', b===btn));
     loadTokenUsage();
   });
-  Promise.all([loadSettings(),loadStatus(),loadApiKeys(),loadNotifyTemplate(),loadTokenUsage()]).catch(error=>{$('headerStatus').textContent=error.message;$('headerStatus').style.color='#c9372c'});
-  statusTimer=setInterval(loadStatus,30000);
-  tokenUsageTimer=setInterval(loadTokenUsage,60000);  // token 用量每 60 秒刷新
-  $('operationsDrawer')?.addEventListener('toggle',()=>{
-    if($('operationsDrawer').open) setTimeout(()=>tokenTrendChart&&tokenTrendChart.resize(),0);
-  });
+  Promise.all([loadSettings(),loadApiKeys(),loadNotifyTemplate()]).then(()=>{
+    $('headerStatus').textContent='设置已就绪';
+  }).catch(error=>{$('headerStatus').textContent=error.message;});
+  const drawer = $('operationsDrawer');
+  function syncDrawer() {
+    clearInterval(statusTimer);
+    clearInterval(tokenUsageTimer);
+    if (!drawer.open || document.hidden) return;
+    loadStatus();
+    loadTokenUsage();
+    statusTimer=setInterval(loadStatus,30000);
+    tokenUsageTimer=setInterval(loadTokenUsage,60000);
+    tokenTrendChart?.resize();
+  }
+  drawer.addEventListener('toggle',syncDrawer);
+  document.addEventListener('visibilitychange',syncDrawer);
+  const sections = [...document.querySelectorAll('.settings-content > section, .settings-content > details')];
+  const indexLinks = [...document.querySelectorAll('.settings-index a')];
+  function showSettingsSection() {
+    const anchor = document.getElementById(location.hash.slice(1));
+    const section = sections.find(el => el === anchor || el.contains(anchor)) || sections[0];
+    for (const el of sections) el.hidden = el !== section;
+    drawer.open = section === drawer;
+    for (const link of indexLinks) link.setAttribute('aria-current', String(link.hash === '#' + section.id));
+  }
+  document.querySelector('.settings-index a[href="#operationsDrawer"]')?.addEventListener('click', () => { drawer.open = true; });
+  window.addEventListener('hashchange',showSettingsSection);
+  showSettingsSection();
   window.addEventListener('beforeunload',()=>{clearInterval(statusTimer);clearInterval(tokenUsageTimer);});
   window.addEventListener('resize',()=>{tokenTrendChart&&tokenTrendChart.resize();});
 })();

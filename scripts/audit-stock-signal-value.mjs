@@ -13,23 +13,28 @@ const dbPath = option('db', 'data/market_data.db');
 const db = new Database(dbPath, { readonly: true, fileMustExist: true });
 const requestedEngine = option('engine');
 const allowLatest = process.argv.includes('--latest');
-const engine = requestedEngine || (allowLatest ? db.prepare(`SELECT engine_version
+const latestIdentity = allowLatest && !requestedEngine ? db.prepare(`SELECT engine_version,profile_id,profile_version,strategy_version
   FROM stock_signal_log
   WHERE sample_origin='live_frozen' AND COALESCE(engine_version,'')<>''
-  GROUP BY engine_version
-  ORDER BY MAX(date) DESC, COUNT(*) DESC LIMIT 1`).pluck().get() : null);
+    AND COALESCE(profile_id,'')<>'' AND COALESCE(profile_version,'')<>''
+    AND COALESCE(strategy_version,'')<>'' AND profile_id<>'legacy_unknown'
+  GROUP BY engine_version,profile_id,profile_version,strategy_version
+  ORDER BY MAX(date) DESC, COUNT(*) DESC LIMIT 1`).get() : null;
+const engine = requestedEngine || latestIdentity?.engine_version;
+const profileId = option('profile', latestIdentity?.profile_id);
+const profileVersion = option('profile-version', latestIdentity?.profile_version);
+const strategyVersion = option('strategy', latestIdentity?.strategy_version);
 
-if (!engine) {
-  console.log('请显式指定要审计的引擎，例如：');
-  console.log('  node scripts/audit-stock-signal-value.mjs --engine=stock-signal-v2026.08.28-scoring-v2.5.0-safety-event-overlay');
-  console.log('如只想查看数据库最近一次记录，可额外使用 --latest；不同引擎版本不能混合。');
+if (!engine || !profileId || !profileVersion || !strategyVersion) {
+  console.log('请同时指定 --engine、--profile、--profile-version、--strategy；或用 --latest 查看最近一组完整身份。');
   process.exit(0);
 }
 
-const logs = db.prepare(`SELECT date,symbol,market,action,payload
+const logs = db.prepare(`SELECT date,symbol,market,action,COALESCE(first_payload,payload) payload
   FROM stock_signal_log
-  WHERE sample_origin='live_frozen' AND engine_version=?
-  ORDER BY market,symbol,date`).all(engine);
+  WHERE sample_origin='live_frozen' AND engine_version=? AND profile_id=? AND profile_version=? AND strategy_version=?
+    AND first_signal_ts IS NOT NULL AND first_payload IS NOT NULL
+  ORDER BY market,symbol,date`).all(engine,profileId,profileVersion,strategyVersion);
 const actions = new Map();
 const bySymbol = new Map();
 for (const row of logs) {
@@ -48,12 +53,15 @@ for (const rows of bySymbol.values()) {
   }
 }
 
-const outcomes = db.prepare(`SELECT l.market,l.action,l.payload,o.horizon,o.net_directional_return_pct
+const outcomes = db.prepare(`SELECT l.market,l.action,l.first_payload payload,o.horizon,o.net_directional_return_pct
   FROM stock_signal_log l
   JOIN stock_signal_outcomes o ON o.signal_id=l.id
-  WHERE l.sample_origin='live_frozen' AND l.engine_version=?
-    AND o.net_directional_return_pct IS NOT NULL
-  ORDER BY l.market,l.action,o.horizon`).all(engine);
+  WHERE l.sample_origin='live_frozen' AND l.engine_version=? AND l.profile_id=?
+    AND l.profile_version=? AND l.strategy_version=?
+    AND l.first_signal_ts IS NOT NULL AND l.first_payload IS NOT NULL
+    AND o.outcome_contract_version='next-session-open-v1'
+    AND o.entry_price_source='next_session_open' AND o.net_directional_return_pct IS NOT NULL
+  ORDER BY l.market,l.action,o.horizon`).all(engine,profileId,profileVersion,strategyVersion);
 const outcomeGroups = new Map();
 for (const row of outcomes) {
   const setup = snapshotFromStoredPayload(row).setupKey;
@@ -65,6 +73,7 @@ for (const row of outcomes) {
 console.log('股票监控信号价值审计（只读，不调参）');
 console.log(`数据文件：${dbPath}`);
 console.log(`引擎：${engine}`);
+console.log(`人格/版本/策略：${profileId} / ${profileVersion} / ${strategyVersion}`);
 if (allowLatest && !requestedEngine) console.log('注意：此处选择的是数据库最新记录，不代表当前源码引擎。');
 console.log(`正式冻结快照：${logs.length} 条；覆盖 ${bySymbol.size} 个市场-股票；日期 ${logs.at(0)?.date || '—'} 至 ${logs.at(-1)?.date || '—'}`);
 
@@ -87,13 +96,11 @@ for (const [key, values] of [...outcomeGroups.entries()].sort((left, right) => l
   const horizon = Number(horizonText);
   const avg = values.reduce((sum, value) => sum + value, 0) / values.length;
   const wins = values.filter(value => value > 0).length;
-  if (horizon === 5 && ['PROBE', 'ADD', 'BUY'].includes(action)) matureFiveDayEntries += values.length;
+  if (horizon === 5 && ['OPEN', 'ADD'].includes(action)) matureFiveDayEntries += values.length;
   console.log(`  ${market} / ${setup} / ${action} / ${horizon}日：n=${values.length}，均值=${avg.toFixed(2)}%，胜率=${(wins / values.length * 100).toFixed(1)}%`);
 }
 
 console.log('\n结论：');
-if (matureFiveDayEntries < 30) {
-  console.log(`  可执行多头的 5 日样本只有 ${matureFiveDayEntries}/30；仅可观察，不得据此调整阈值、权重或把评分升级为行动。`);
-} else {
-  console.log(`  可执行多头的 5 日样本为 ${matureFiveDayEntries}；仍需按市场和形态分层后再判断是否有稳定增量价值。`);
-}
+console.log(`  有效次日开盘的正式 OPEN/ADD 5 日绝对收益样本：${matureFiveDayEntries}。`);
+console.log('  本脚本只报告绝对收益与胜率，不含点时自选股成员资格或同股随机日期对照；不得据此宣称入场时机达标。');
+console.log('  正式同股净超额验收请使用 scripts/audit-stock-entry-alpha.mjs。');

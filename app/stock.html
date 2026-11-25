@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script defer src="/assets/workspace-nav.js"></script>
 <title>股票监控</title>
-<script src="vendor/echarts.min.js"></script>
 <link rel="stylesheet" href="shared.css">
 <link rel="stylesheet" href="workspace-theme.css">
 <link rel="stylesheet" href="stock.css">
@@ -13,15 +13,8 @@
      下一次提交会逐段清理被覆盖的死代码，本提交保持纯搬运以便回退。 -->
 </head>
 <body class="workspace-app stock-workspace">
-<header>
-  <h1><a href="/">Market Dashboard</a></h1>
-  <nav>
-    <a href="/stock" class="ac">股票监控</a>
-    <a href="/tracker">杠杆 ETF 追踪</a>
-    <a href="/radar">机会雷达</a>
-    <a href="/lab">实验室</a>
-    <a href="/control">控制中心</a>
-  </nav>
+<header class="workspace-header">
+  <h1><a href="/" aria-label="Market Dashboard 首页">Market Dashboard</a></h1>
   <div class="header-status-area workspace-header-status">
     <span class="conn-indicator" id="connIndicator" title="后端连接状态"></span>
     <span class="hint" id="status">连接中…</span>
@@ -32,56 +25,75 @@
 <div id="globalIndexBar" class="global-index-bar" aria-label="全球大盘指数"></div>
 
 <div class="wrap">
-  <div class="toolbar">
-    <div class="market-filter-buttons" id="mktFilter" role="group" aria-label="市场筛选">
-      <button class="active" data-mkt="US" onclick="toggleMarket('US')">美股</button>
-      <button class="active" data-mkt="HK" onclick="toggleMarket('HK')">港股</button>
-      <button class="active" data-mkt="KR" onclick="toggleMarket('KR')">韩股</button>
-      <button class="active" data-mkt="CN" onclick="toggleMarket('CN')">A股</button>
-      <button class="active" onclick="selectAllMarkets()">全选</button>
-    </div>
-    <span class="toolbar-spacer"></span>
-    <button class="btn" id="toggleAddBtn" type="button" aria-controls="addForm" aria-expanded="false" onclick="toggleAdd()">+ 添加</button>
-    <button class="btn" id="openSettingsBtn" type="button" onclick="openSettingsModal()">看板设置</button>
-    <input type="hidden" id="sortSel" value="auto">
-  </div>
-
-  <div id="addForm" class="card" hidden>
-    <div class="fld">代码<input id="f_sym" placeholder="如 MU / 07709 / 000660 / 600519" oninput="autoDetectMarket()" onkeydown="if(event.key==='Enter')addStock()"></div>
-    <div class="fld">市场<select id="f_mkt" onchange="markManualMarket()"><option value="US">美股</option><option value="HK">港股</option><option value="KR">韩股</option><option value="CN">A股</option></select></div>
-    <div class="fld">标签<input id="f_label" placeholder="可选，如 海力士"></div>
-    <button class="btn" id="saveBtn" type="button" onclick="addStock(this)">保存</button>
-    <button class="btn ghost" type="button" onclick="setAddFormOpen(false)">取消</button>
-  </div>
-
   <div class="main-layout split-layout">
     <!-- 左：股票列表（可滚动） -->
     <div class="list-panel split-list">
-      <div class="list-card">
+      <div class="list-card" data-list-view="focus">
+        <div class="board-list-heading">
+          <h2>自选决策看板</h2>
+          <div class="board-segment" aria-label="列表视图" role="group">
+            <button type="button" data-list-mode="focus" aria-pressed="true">浏览标的</button>
+            <button type="button" data-list-mode="table" aria-pressed="false">表格管理</button>
+          </div>
+        </div>
+        <details class="lf-review" data-review="stock">
+          <summary>低频交易 · 30 天复盘</summary>
+        </details>
+        <script defer src="/assets/low-frequency-review.js"></script>
+        <div class="portfolio-summary">
+        <div id="portfolioBar" class="portfolio-bar" style="display:none"></div>
+        <div id="actionQueueBar" class="action-queue-bar" style="display:none"></div>
+        </div>
+        <div class="toolbar">
+          <div class="market-filter-buttons" id="mktFilter" role="group" aria-label="市场筛选">
+            <button class="active" onclick="selectAllMarkets()">全部市场</button>
+            <button data-mkt="US" onclick="toggleMarket('US')">美股</button>
+            <button data-mkt="HK" onclick="toggleMarket('HK')">港股</button>
+            <button data-mkt="KR" onclick="toggleMarket('KR')">韩股</button>
+            <button data-mkt="CN" onclick="toggleMarket('CN')">A股</button>
+          </div>
         <div class="list-tools">
           <input id="watchSearch" type="search" placeholder="搜索代码或名称" oninput="reSort()" aria-label="搜索自选股">
           <select id="signalFilter" onchange="reSort()" aria-label="按信号筛选">
             <option value="all">全部信号</option><option value="entry">可试仓 / 可加仓</option><option value="hold">持有观察</option><option value="observe">观望等待</option><option value="risk">减仓 / 清仓 / 风险回避</option>
           </select>
-          <span id="watchCount" class="list-count">0</span>
+          <span id="watchCount" class="list-count">…</span>
         </div>
-        <div id="portfolioBar" class="portfolio-bar" style="display:none"></div>
-        <div id="actionQueueBar" class="action-queue-bar" style="display:none"></div>
+          <span class="toolbar-spacer"></span>
+          <button class="btn" id="toggleAddBtn" type="button" aria-controls="addForm" aria-expanded="false" onclick="toggleAdd()">+ 添加</button>
+          <button class="btn ghost" id="openSettingsBtn" type="button" onclick="openSettingsModal()">看板设置</button>
+          <input type="hidden" id="sortSel" value="auto">
+        </div>
+
+        <div id="addForm" class="card" hidden>
+          <div class="fld">代码<input id="f_sym" placeholder="如 MU / 07709 / 000660 / 600519" oninput="autoDetectMarket()" onkeydown="if(event.key==='Enter')addStock()"></div>
+          <div class="fld">市场<select id="f_mkt" onchange="markManualMarket()"><option value="US">美股</option><option value="HK">港股</option><option value="KR">韩股</option><option value="CN">A股</option></select></div>
+          <div class="fld">标签<input id="f_label" placeholder="可选，如 海力士"></div>
+          <button class="btn" id="saveBtn" type="button" onclick="addStock(this)">保存</button>
+          <button class="btn ghost" type="button" onclick="setAddFormOpen(false)">取消</button>
+        </div>
+
         <div class="card-inner">
-        <table class="stock-grid-table">
-          <colgroup>
-            <col style="width:20%">
-            <col style="width:8%">
-            <col style="width:7%">
-            <col style="width:10%">
-            <col style="width:11%">
-            <col style="width:9%">
-            <col style="width:10%">
-            <col style="width:10%">
-            <col style="width:10%">
-            <col style="width:5%">
-          </colgroup>
-          <thead><tr><th style="padding-left:36px"><button class="sort-header" type="button" id="sortCode" onclick="cycleSort('code')">名称 / 代码 <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th><button class="sort-header" type="button" id="sortPrice" onclick="cycleSort('price')">现价 <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th><button class="sort-header" type="button" id="sortChg" onclick="cycleSort('chg')">涨跌% <span class="sort-indicator" aria-hidden="true">&#8597;</span></button></th><th>盘前/盘后</th><th>信号</th><th>量价</th><th data-col="sentiment">期权 / 空头</th><th>持仓 / 盈亏</th><th>盈亏</th><th></th></tr></thead>
+        <div class="board-loading" role="status">正在读取自选行情…</div>
+        <div id="instrumentBoard" class="instrument-board"></div>
+        <div class="management-views board-segment" role="group" aria-label="股票表格列组">
+          <button type="button" data-fields="quotes" aria-pressed="true">行情</button>
+          <button type="button" data-fields="signals" aria-pressed="false">信号</button>
+          <button type="button" data-fields="positions" aria-pressed="false">持仓</button>
+        </div>
+        <table class="management-table" id="stockManagementTable" aria-label="自选股票管理表" data-fields="quotes">
+          <thead><tr>
+            <th scope="col" data-field="name"><button class="sort-header" type="button" id="sortCode" onclick="cycleSort('code')">名称 / 代码 <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+            <th scope="col" data-field="price"><button class="sort-header" type="button" id="sortPrice" onclick="cycleSort('price')">现价 <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+            <th scope="col" data-field="chg"><button class="sort-header" type="button" id="sortChg" onclick="cycleSort('chg')">涨跌幅 <span class="sort-indicator" aria-hidden="true">↕</span></button></th>
+            <th scope="col" data-field="ext">盘前 / 盘后</th>
+            <th scope="col" data-field="signal">信号</th>
+            <th scope="col" data-field="ind">量价</th>
+            <th scope="col" data-field="sentiment">期权 / 空头</th>
+            <th scope="col" data-field="holding">持仓 / 成本</th>
+            <th scope="col" data-field="pl">浮动盈亏</th>
+            <th scope="col" data-field="action">操作</th>
+          </tr></thead>
           <tbody id="gridBody"></tbody>
         </table>
         <div id="empty" class="hint" style="padding:14px 0;display:none">还没有添加股票。点击「+ 添加股票」加入。</div>
@@ -92,8 +104,8 @@
     <!-- 右：详情面板（固定可见） -->
     <div class="detail-panel split-detail">
 
-  <div id="detail" class="detail card">
-    <div class="detail-head">
+  <div id="detail" class="detail">
+    <div class="detail-head board-detail-head">
       <button class="back-btn" type="button" onclick="hideDetailPanel()">← 返回列表</button>
       <!-- 三段式常驻标题栏：不论切到哪个 tab 都可见 -->
       <div id="d_head_idle" class="head-idle">
@@ -124,6 +136,7 @@
     <div class="detail-tabs" role="tablist" aria-label="股票详情">
       <button class="detail-tab active" data-tab="decision" onclick="switchDetailTab('decision',this)">决策</button>
       <button class="detail-tab" data-tab="signals" onclick="switchDetailTab('signals',this)">信号</button>
+      <button class="detail-tab" data-tab="intel" onclick="switchDetailTab('intel',this)">情报</button>
       <button class="detail-tab" data-tab="position" onclick="switchDetailTab('position',this)">持仓</button>
     </div>
 
@@ -143,7 +156,7 @@
       </details>
 
       <!-- 层 4：与三人格算法同源的解释图 -->
-      <section class="stock-study-panel">
+      <details class="stock-study-panel fold" id="stockStudy"><summary>价格走势与人格解释图</summary>
         <div class="stock-study-head">
           <div><strong>人格解释图</strong><small id="stockChartProfileNote">图表视角，不改变正式决策</small></div>
           <div class="stock-study-profile" role="group" aria-label="图表人格视角">
@@ -154,34 +167,35 @@
         </div>
         <div id="stockChartStudySummary" class="stock-study-summary"></div>
         <div class="charts"><div id="chPrice" class="chart stock-profile-chart"></div></div>
-      </section>
+      </details>
 
-      <!-- 层 5：深度情报（始终展开，6 个子板块） -->
+    </section>
+    <section class="detail-tab-panel" data-panel="intel">
       <div class="intel-section-title"><h3>深度情报</h3></div>
       <div class="intel-grid intel-grid-open">
         <!-- 子 1：分组事件 -->
         <section class="intel-section">
-          <div class="intel-head"><span class="intel-icon">🏭</span><h4>分组事件<span class="muted intel-meta" id="d_group_risk_meta"></span></h4></div>
+          <div class="intel-head"><h4>分组事件<span class="muted intel-meta" id="d_group_risk_meta"></span></h4></div>
           <div id="d_group_risk" class="intel-body"></div>
         </section>
         <!-- 子 2：财报节奏 -->
         <section class="intel-section">
-          <div class="intel-head"><span class="intel-icon">📅</span><h4>财报节奏</h4></div>
+          <div class="intel-head"><h4>财报节奏</h4></div>
           <div id="d_earnings_cal" class="intel-body"></div>
         </section>
         <!-- 子 3：期权异动与情绪 -->
         <section class="intel-section">
-          <div class="intel-head"><span class="intel-icon">📊</span><h4>期权异动与情绪<span class="muted intel-meta" id="d_opt_meta"></span></h4></div>
+          <div class="intel-head"><h4>期权异动与情绪<span class="muted intel-meta" id="d_opt_meta"></span></h4></div>
           <div id="d_opt" class="intel-body optflow"></div>
         </section>
         <!-- 子 4：空头情绪 -->
         <section class="intel-section">
-          <div class="intel-head"><span class="intel-icon">🔻</span><h4>空头情绪<span class="muted intel-meta" id="d_short_meta"></span></h4></div>
+          <div class="intel-head"><h4>空头情绪<span class="muted intel-meta" id="d_short_meta"></span></h4></div>
           <div id="d_short" class="intel-body"></div>
         </section>
         <!-- 子 5：LLM 新闻解读 -->
         <section class="intel-section">
-          <div class="intel-head"><span class="intel-icon">📰</span><h4>LLM 新闻解读<span class="muted intel-meta" id="d_news_llm_meta"></span></h4>
+          <div class="intel-head"><h4>LLM 新闻解读<span class="muted intel-meta" id="d_news_llm_meta"></span></h4>
             <button id="d_news_llm_btn" class="btn ghost intel-action" type="button">解读最新 5 条（会调用模型）</button>
           </div>
           <div id="d_news_llm" class="intel-body news-llm-panel"><div class="detail-note soft compact">选择股票后加载最近新闻解读。</div></div>
@@ -195,6 +209,7 @@
           <h3>历史信号</h3>
           <span class="muted" id="d_signals_meta"></span>
         </div>
+        <p class="signals-positioning">试仓、加仓按本次冻结买区执行，出区即放弃。减仓和清仓结合现有持仓。打开「低频交易 · 30 天复盘」查看扣费表现。</p>
         <div id="d_signals_list" class="signals-list"></div>
       </div>
     </section>
@@ -228,9 +243,9 @@
   </div><!-- /main-layout -->
 </div><!-- /wrap -->
 
-<div id="alertModal" class="modal">
+<dialog id="alertModal" class="modal" aria-label="提醒中心">
   <div class="modal-box alert-center-box">
-    <span class="closeX" onclick="closeAlertModal()">×</span>
+    <button type="button" class="closeX" aria-label="关闭" onclick="closeAlertModal()">×</button>
     <h2>本机浏览器通知</h2>
     <p class="alert-center-lead">这里只管理当前浏览器的桌面通知权限。股票动作档位、Webhook 与通知文案统一在控制中心设置。</p>
     <div class="alert-channel">
@@ -240,12 +255,12 @@
     </div>
     <p class="hint" style="margin-top:14px;line-height:1.6">浏览器提醒仅在本页保持打开时生效。<a href="/control#notification-settings">前往控制中心管理正式通知设置</a></p>
   </div>
-</div>
+</dialog>
 
 <!-- 分组选择模态框：Chip 选择 + 输入框新建，替代 window.prompt -->
-<div id="groupModal" class="modal">
+<dialog id="groupModal" class="modal" aria-label="分组管理">
   <div class="modal-box group-modal-box">
-    <span class="closeX" onclick="closeGroupModal()">×</span>
+    <button type="button" class="closeX" aria-label="关闭" onclick="closeGroupModal()">×</button>
     <h2>设置分组</h2>
     <div id="groupModalSymbol" class="group-modal-symbol muted"></div>
     <div id="groupModalCurrent" class="group-modal-current"></div>
@@ -263,12 +278,12 @@
       <button type="button" class="btn primary" id="groupModalSave">保存</button>
     </div>
   </div>
-</div>
+</dialog>
 
 <!-- 看板设置模态框：股票监控专属配置（上下排列：看板默认/列显隐 + 风险配置） -->
-<div id="settingsModal" class="modal">
+<dialog id="settingsModal" class="modal" aria-label="看板设置">
   <div class="modal-box settings-modal-box">
-    <span class="closeX" onclick="closeSettingsModal()">×</span>
+    <button type="button" class="closeX" aria-label="关闭" onclick="closeSettingsModal()">×</button>
     <h2>看板设置</h2>
     <p class="settings-lead muted">股票监控与杠杆 ETF 追踪共用的全局配置。</p>
 
@@ -291,14 +306,14 @@
       <div id="settingsProfileState" class="save-state"></div>
       <div class="settings-hint muted">未持仓标的的默认人格；已持仓标的沿用建仓时绑定的人格（需平仓后才跟随此设置）。</div>
     </div>
-
-    <div class="sec">
+    <details class="sec settings-group">
+      <summary>列表偏好与表格列</summary>
+      <div class="sec">
       <div class="sec-t">默认市场筛选</div>
       <div id="settingsDefaultMarkets" class="chks settings-markets"></div>
       <div class="settings-hint muted">页面加载时默认勾选的市场；运行时仍可点击顶部按钮临时切换。</div>
-    </div>
-
-    <div class="sec">
+      </div>
+      <div class="sec">
       <div class="sec-t">默认信号筛选</div>
       <select id="settingsDefaultSignalFilter" class="settings-select" aria-label="默认信号筛选">
         <option value="all">全部信号</option>
@@ -308,16 +323,15 @@
         <option value="risk">减仓 / 清仓 / 风险回避</option>
       </select>
       <div class="settings-hint muted">页面加载时下拉的默认值。</div>
-    </div>
-
-    <div class="sec">
+      </div>
+      <div class="sec">
       <div class="sec-t">列显隐</div>
       <div id="settingsColumnToggles" class="chks settings-cols"></div>
       <div class="settings-hint muted">取消勾选的列会从列表隐藏；名称/代码列固定显示。</div>
-    </div>
-
-    <div class="sec">
-      <div class="sec-t">风险配置</div>
+      </div>
+    </details>
+    <details class="sec settings-group">
+      <summary>账户与风险参数</summary>
       <div class="settings-hint muted">仓位计算公式：建议股数 = 账户金额 × 单笔风险占比 × 批次比例 / 单股风险。账户金额以人民币（CNY）为基准，按实时汇率转换为各市场本币（USD/HKD/KRW）。</div>
       <div id="settingsFxStatus" class="settings-fx-status muted"></div>
       <div class="setting-row"><div><div class="setting-title">账户金额（CNY）</div><div class="setting-note">人民币基准金额，仓位计算时按实时汇率转换为各市场本币。</div></div><div class="setting-note">默认 100,000</div><div><input id="settingsRiskAccountSize" type="number" min="1" step="1000" class="settings-risk-input" aria-label="账户金额"></div></div>
@@ -330,7 +344,7 @@
         <button type="button" class="btn ghost" id="settingsRiskResetBtn">恢复默认</button>
         <span id="settingsRiskState" class="save-state"></span>
       </div>
-    </div>
+    </details>
 
     <div class="settings-notify-jump">
       <a href="/control" class="settings-jump-link" target="_blank" rel="noopener">前往控制中心配置通知总开关 / Webhook / 通知文案 →</a>
@@ -341,15 +355,15 @@
       <span id="settingsSaveState" class="save-state"></span>
     </div>
   </div>
-</div>
+</dialog>
 
-<script src="action-taxonomy.cjs"></script>
-<script src="market-thresholds.cjs"></script>
-<script src="dashboard-shared.js"></script>
-<script src="data-health-ui.js"></script>
-<script src="sortable-list.js"></script>
-<script src="notification-center.js"></script>
-<script src="stock.js"></script>
-<script src="stock-earnings-patch.js"></script>
+<script defer src="action-taxonomy.cjs"></script>
+<script defer src="market-thresholds.cjs"></script>
+<script defer src="dashboard-shared.js"></script>
+<script defer src="data-health-ui.js"></script>
+<script defer src="sortable-list.js"></script>
+<script defer src="notification-center.js"></script>
+<script defer src="stock.js"></script>
+<script defer src="stock-earnings-patch.js"></script>
 </body>
 </html>

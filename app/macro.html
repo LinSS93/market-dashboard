@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<script defer src="/assets/workspace-nav.js"></script>
+<title>宏观看板 · Market Dashboard</title><link rel="stylesheet" href="/shared.css"><link rel="stylesheet" href="/workspace-theme.css">
+<style>
+.macro-workspace main{width:min(1140px,calc(100% - 40px));margin:28px auto 48px}
+.macro-workspace h2{margin:0;font-size:28px;letter-spacing:-.04em}
+.macro-workspace .section-title{margin:0;font-size:18px}
+.macro-workspace .actions{display:flex;gap:8px;flex-wrap:wrap}
+.macro-workspace .note,.macro-workspace small,#status{font-size:13px;color:var(--ws-muted);line-height:1.6}
+.macro-workspace h3.section-title{margin:26px 0 10px}
+.metric-grid,#markets{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(min(270px,100%),1fr))}
+.macro-workspace .metric,.macro-workspace #markets article{min-width:0;padding:20px 22px;background:var(--ws-surface);border:0;border-radius:var(--ws-radius-lg);box-shadow:0 3px 8px rgb(22 45 73 / .045),0 12px 28px -15px rgb(22 45 73 / .22)}
+.metric-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.metric h4,.macro-workspace #markets h3{font-size:16px;margin:0;color:var(--ws-ink-soft)}
+.metric strong,.macro-workspace #markets strong{display:inline-block;margin:12px 0 4px;font-size:34px;line-height:1.12;font-variant-numeric:tabular-nums;letter-spacing:-.045em}
+.metric p,.macro-workspace #markets p{font-size:14px;line-height:1.6;margin:7px 0;color:var(--ws-ink-soft)}
+.metric footer{margin-top:12px;font-size:12px;color:var(--ws-muted);background:none;padding:0;text-align:left}
+.metric-badge{font-size:12px;padding:3px 8px;border-radius:var(--ws-radius-pill);background:var(--ws-surface-soft);color:var(--ws-ink-soft)}
+.metric-badge.warn{background:var(--ws-amber-soft);color:#794e0d}.metric-badge.hot{background:var(--ws-red-soft);color:#903729}
+.macro-workspace #markets svg{width:100%;height:64px}
+.macro-workspace summary{cursor:pointer;font-weight:600}.method{margin-top:18px;color:var(--ws-muted)}
+@media(max-width:640px){.macro-workspace main{width:calc(100% - 24px);margin-top:18px}.metric-grid,#markets{gap:10px}.macro-workspace .metric,.macro-workspace #markets article{padding:16px 18px}}
+</style></head><body class="workspace-app macro-workspace"><header class="workspace-header">
+  <h1><a href="/" aria-label="Market Dashboard 首页">Market Dashboard</a></h1></header><main>
+<div class="page-heading"><h2>宏观看板</h2>
+<div class="actions"><button class="btn" id="refresh">刷新看板</button><button class="btn ghost" id="push" disabled>推送至飞书</button></div></div><p id="status" role="status"></p>
+<h3 class="section-title">期权压力与市场情绪</h3><section id="sentiment-grid" class="metric-grid" aria-label="期权压力与市场情绪"></section>
+<h3 class="section-title">市场广度</h3><p class="note">站上 200 日均线的成分股占比；20 日变化按本期成分名单中的同一批有效股票计算。</p><section id="breadth-grid" class="metric-grid" aria-label="市场广度"></section>
+<h3 class="section-title">信用与港元资金</h3><section id="funding-grid" class="metric-grid" aria-label="信用与港元资金"></section>
+<div class="comparison-tools"><h3 class="section-title">三地波幅</h3><div class="board-segment" role="group" aria-label="比较市场"><button type="button" data-region="" aria-pressed="true">并排比较</button><button type="button" data-region="A股" aria-pressed="false">A 股</button><button type="button" data-region="港股" aria-pressed="false">港股</button><button type="button" data-region="美股" aria-pressed="false">美股</button></div></div><p class="note">20 日日均波幅相对 252 日均值，达到 1.25 倍标记为升温。</p>
+<section id="markets" aria-label="三地市场波幅"></section>
+<details class="method"><summary>指标定义与回测口径</summary><p>取复权收盘价对数收益的绝对值，用 20 日均值除以 252 日均值。曲线显示最近 30 个交易日，虚线为 1.25 倍阈值。每隔五个交易日按当日状态分组，比较随后五日日均绝对收益。历史样本按 2022 年初切分，卡片展示后段结果。各市场使用当地日期，只纳入此前交易日。</p></details>
+</main><script src="/macro.js" defer></script></body></html>

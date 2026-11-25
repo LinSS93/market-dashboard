@@ -6,8 +6,8 @@
 //       * int_index: b_KOSPI/b_VIX/b_HSI/b_HSCEI（国际指数，逗号分隔，f[1]=price f[9]=prevClose）
 //       * us_index: gb_inx/gb_ixic（美股指数，逗号分隔，f[1]=price f[2]=changePct f[5]=prevClose）
 //   - 腾讯备份：所有指数统一 ~ 分隔，f[3]=price f[4]=prevClose
-//   - mini 走势：腾讯 web.ifzq.gtimg.cn 日 K（30 天收盘价），1h 缓存
-// 调度：跟随股票看板刷新频率（前端每 5s 拉报价，mini 走势 1h 拉一次）
+//   - 走势优先使用腾讯分时点；不足两个点时使用近 30 个交易日的日 K 收盘价。
+// 分时点缓存 60 秒，日 K 缓存 1 小时。
 import { httpGet } from './quote.mjs';
 
 // 指数定义：sinaCode=新浪主源代码，sinaFormat=新浪解析格式，quoteCode=腾讯备份代码，klineCode=腾讯日K代码

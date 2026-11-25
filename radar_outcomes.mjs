@@ -15,7 +15,9 @@ import {
   insertOutcome,
   updateOutcomeReturns,
   getOutcomesNeedingUpdate,
+  getMarketOutcomesNeedingUpdate,
   getCandidatesNeedingOutcomes,
+  getRunTopCandidatesNeedingOutcomes,
 } from './radar_schema.mjs';
 
 // 各市场基准指数符号与时区（按本地日历解析 availableAt）
@@ -27,15 +29,29 @@ const MARKET_TIMEZONES = Object.freeze({ US: 'America/New_York', HK: 'Asia/Hong_
 const HORIZONS = [1, 3, 5, 20, 60];
 const EXCESS_HORIZONS = [5, 20, 60];
 
-// 从 radar_daily_bars 读取K线（数据财富，只读）。缓存 prepared statement。
+// 从 K 线源读取行情（数据财富，只读）。缓存 prepared statement。
+// 2026-09-13 双源合并修复：radar_daily_bars 财富表自 8 月 universe 扩容后不再覆盖新票
+// （实测 45 天内 outcomes 大量 insufficient_bars/no_next_trading_day），而 radar_v2_bars
+// 由扫描器维护全 universe 各 320 根 qfq。合并两源按 date 去重（v2 优先、过滤 data_suspect），
+// 基准指数（QQQ/02800/000300）只在 radar_daily_bars，由 v2 空结果自然回落。
 let _wealthBarsStmt = null;
+let _v2WealthBarsStmt = null;
 function loadWealthBars(market, symbol) {
   if (!_wealthBarsStmt) {
     _wealthBarsStmt = getRadarDb().prepare(
       'SELECT date, open, high, low, close, volume FROM radar_daily_bars WHERE market = ? AND symbol = ? ORDER BY date ASC'
     );
+    _v2WealthBarsStmt = getRadarDb().prepare(
+      "SELECT date, open, high, low, close, volume FROM radar_v2_bars WHERE market = ? AND symbol = ? AND data_suspect = 0 ORDER BY date ASC"
+    );
   }
-  return _wealthBarsStmt.all(market, symbol);
+  const legacy = _wealthBarsStmt.all(market, symbol);
+  const v2 = _v2WealthBarsStmt.all(market, symbol);
+  if (!v2.length) return legacy;
+  if (!legacy.length) return v2;
+  const byDate = new Map(legacy.map(b => [b.date, b]));
+  for (const b of v2) byDate.set(b.date, b);   // v2 优先（新鲜，qfq 口径）
+  return [...byDate.values()].sort((a, b) => a.date < b.date ? -1 : 1);
 }
 
 // === 日期工具（P0：按市场时区解析） ===
@@ -222,8 +238,10 @@ export function backfillOutcome({ candidateId, runId, market, symbol, availableA
  * @param {number} limit - 最多处理条数
  * @returns {object} { total, updated, errors }
  */
-export function updateMaturedOutcomes(limit = 50) {
-  const pending = getOutcomesNeedingUpdate.all(limit);
+export function updateMaturedOutcomes(limit = 50, market = null) {
+  const pending = market
+    ? getMarketOutcomesNeedingUpdate.all(market, limit)
+    : getOutcomesNeedingUpdate.all(limit);
   let updated = 0;
   const errors = [];
 
@@ -235,7 +253,7 @@ export function updateMaturedOutcomes(limit = 50) {
     }
     try {
       const stockBars = loadWealthBars(outcome.market, outcome.symbol);
-      if (!stockBars) continue;
+      if (!stockBars || stockBars.length < 2) continue;
 
       const benchmarkBars = loadWealthBars(outcome.market, benchSymbol);
       const { returns, excessReturns } = computeAllReturns(stockBars, benchmarkBars, outcome.entry_date);
@@ -293,4 +311,111 @@ export function backfillPendingOutcomes(limit = 50) {
   }
 
   return { total: candidates.length, ok, pending: pendingCount, errors };
+}
+
+// === 按 run 回填（效果账本饥饿修复，2026-09-13） ===
+//
+// 断更根因：getCandidatesNeedingOutcomes 全局 created_at ASC 排队 + 每次 50 条，
+// 8 月 universe 扩容后日新增 ~2600 条/run（complete run 实际 candidates ~130-300），
+// 队列日吞吐远追不上新增，ASC 语义让新候选永远排在积压之后 → 部署环境 outcomes 自
+// 2026-07-31 起断更 45 天（实测积压 47.9 万条）。
+// 修复：scanner run 完成后直接回填"本 run 的 topN"（DEFAULT_TOP_N 语义本就是每市场 top50），
+// 不再经过全局队列；全局队列保留为低频兜底。
+
+/**
+ * 回填指定 run 的 topN 候选（按 score DESC）中尚未建立 outcome 的行。
+ * 完整日扫完成后调用；尚无次日开盘价的候选由后续日扫重试。
+ * @param {object} opts - { runId, market, topN? }
+ * @returns {object} { total, ok, pending, errors }
+ */
+export function backfillRunTopOutcomes({ runId, market, topN = 50 } = {}) {
+  const candidates = getRunTopCandidatesNeedingOutcomes.all({ run_id: runId, market, limit: topN });
+  let ok = 0;
+  let pendingCount = 0;
+  const errors = [];
+
+  for (const c of candidates) {
+    const result = backfillOutcome({
+      candidateId: c.id,
+      runId: c.run_id,
+      market: c.market,
+      symbol: c.symbol,
+      availableAt: c.created_at,
+    });
+    if (result.status === 'ok') ok++;
+    else if (result.status === 'pending') pendingCount++;
+    else errors.push({ candidateId: c.id, error: result.error });
+  }
+
+  return { total: candidates.length, ok, pending: pendingCount, errors };
+}
+
+/** 次日及后续日扫重试近期完整扫描的前列候选。 */
+export function backfillRecentRunTopOutcomes({ market, topN = 50, lookbackDays = 45 } = {}) {
+  const since = Date.now() - lookbackDays * 86400000;
+  const runs = getRadarDb().prepare(`
+    SELECT id FROM radar_v2_runs
+    WHERE market = ? AND trigger = 'scheduled_daily' AND status = 'complete'
+      AND started_at >= ?
+    ORDER BY started_at DESC LIMIT 60
+  `).all(market, since);
+  const summary = { runs: runs.length, total: 0, ok: 0, pending: 0, errors: [] };
+  for (const run of runs) {
+    const result = backfillRunTopOutcomes({ runId: run.id, market, topN });
+    summary.total += result.total;
+    summary.ok += result.ok;
+    summary.pending += result.pending;
+    summary.errors.push(...result.errors);
+  }
+  return summary;
+}
+
+/**
+ * 市场级 outcome 结算（DB-only，可重复执行）：刷新已有未成熟 outcome，
+ * 再回填近期完整日扫 topN 中尚缺 outcome 的候选。
+ * 供扫描终态同步调用；不发起任何网络请求。
+ * @param {string} market - US/HK/CN
+ * @param {{updateLimit?: number, topN?: number}} [opts]
+ * @returns {{market, updated, pendingScanned, backfill, errors}}
+ */
+export function settleOutcomesForMarket(market, { updateLimit = 10000, topN = 50 } = {}) {
+  const summary = { market, updated: 0, pendingScanned: 0, backfill: null, errors: [] };
+  try {
+    const updated = updateMaturedOutcomes(updateLimit, market);
+    summary.updated = updated.updated;
+    summary.pendingScanned = updated.total;
+    summary.errors.push(...updated.errors);
+  } catch (error) {
+    summary.errors.push({ stage: 'update', error: error?.message || String(error) });
+  }
+  try {
+    summary.backfill = backfillRecentRunTopOutcomes({ market, topN });
+    summary.errors.push(...(summary.backfill.errors || []).slice(0, 20));
+  } catch (error) {
+    summary.errors.push({ stage: 'backfill', error: error?.message || String(error) });
+  }
+  return summary;
+}
+
+/**
+ * 未成熟 outcome 涉及的标的（按最老 entry_date 优先）。
+ * 用于扫描完成后定向刷新 K 线：标的可能已离开 universe，缓存不会再被扫描器更新，
+ * 导致 entry+5 永远缺 bar、matured 卡在 0。只处理近 120 天，避免退市/长期停牌标的
+ * 每天占用修复预算；更老的积压在 `/radar/status` 中单列为 stale。
+ *
+ * 排序修正（2026-10-22）：旧实现按 newest_entry_date DESC，最新标的每天重复占用
+ * 120 只刷新窗口，老积压永远轮不到。改为最老 entry 优先，让积压真正被消化。
+ */
+export function getPendingOutcomeSymbols(market, limit = 40, olderThanMs = Date.now() - 86400000) {
+  return getRadarDb().prepare(`
+    SELECT symbol, MIN(entry_date) AS oldest_entry_date, MAX(entry_date) AS newest_entry_date,
+           MAX(updated_at) AS last_updated, COUNT(*) AS pending
+    FROM radar_v2_outcomes
+    WHERE market = ? AND matured < 3 AND entry_date IS NOT NULL
+      AND entry_date >= date('now', '-120 day')
+      AND updated_at < ?
+    GROUP BY symbol
+    ORDER BY oldest_entry_date ASC, last_updated ASC
+    LIMIT ?
+  `).all(market, olderThanMs, limit);
 }

@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import { computeCompositeScore } from '../signal_scoring.mjs';
 import { arbitrateStockDecision, buildStockDecisionExplanation } from '../stock_decision_arbiter.mjs';
-import { computeV21StateForPosition } from '../stock_backtest.mjs';
+import { computeV21StateForPosition, estimateRoundTripCostPct as backtestCost } from '../stock_backtest.mjs';
+import { estimateRoundTripCostPct as sharedCost } from '../stock_execution_cost.mjs';
+import { calculatePositionCapacity, capacityForEntryObservation } from '../stock_position_capacity.mjs';
 import { buildSwingDecisionContext, SIGNAL_ENGINE_VERSION, COMPATIBLE_SIGNAL_ENGINE_VERSIONS } from '../stock_engine.mjs';
 
 const failures = [];
@@ -9,7 +11,24 @@ function check(condition, message) {
   if (!condition) failures.push(message);
 }
 
-check(SIGNAL_ENGINE_VERSION === 'stock-signal-v2026.09.08-position-protection-v1',
+for (const [market,row,expected] of [
+  ['US',{close:100,volume:100_000_000},0.08],
+  ['US',{close:100,volume:10_000_000},0.12],
+  ['US',{close:100,volume:2_000_000},0.18],
+  ['US',{close:100,volume:500_000},0.30],
+  ['US',{close:100,volume:100_000},0.50],
+  ['US',{},0.25],['HK',{},0.35],['KR',{},0.30],['CN',{},0.30],
+]) check(sharedCost(row,market)===expected && backtestCost(row,market)===expected,
+  `round-trip cost parity ${market} ${JSON.stringify(row)}`);
+
+const riskCapacity={targetShares:0,shares:500,entryReference:100,invalidation:95,
+  accountSize:30000,maxPositionRiskPct:10};
+check(calculatePositionCapacity(riskCapacity)===100 &&
+  capacityForEntryObservation({decision:{zones:{entryReference:100,invalidation:95}},
+    position:{shares:500,target_shares:0},accountSize:30000,maxPositionRiskPct:10})===100,
+  'formal sizing and daily observation share the entryReference cumulative-risk capacity');
+
+check(SIGNAL_ENGINE_VERSION === 'stock-signal-v2026.11.23-low-frequency-v1',
   'the direction-timing-risk contract starts a separate formal-signal cohort');
 check(COMPATIBLE_SIGNAL_ENGINE_VERSIONS.length === 1 && COMPATIBLE_SIGNAL_ENGINE_VERSIONS[0] === SIGNAL_ENGINE_VERSION,
   'the changed action contract is not mixed with earlier formal outcomes');

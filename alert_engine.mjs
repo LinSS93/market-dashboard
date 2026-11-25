@@ -324,7 +324,8 @@ function stockAlertAction(a, position = null) {
     return {
       action:action === 'NONE' || action === 'HOLD' ? null : action, label,
       notifyEligible: swing.exitPending ? !!swing.notifyEligible : !!swing.actionable,
-      detail: [swing.summary, swing.tranchePct ? `建议比例：${swing.tranchePct}% ${swing.trancheBasis || ''}` : '', levels,
+      detail: [swing.summary, swing.lowFrequency && ['OPEN','ADD'].includes(action) ? `买入区间 ${z.buyLow}–${z.buyHigh}，下单时出区即放弃` : '',
+        swing.tranchePct ? `建议比例：${swing.tranchePct}% ${swing.trancheBasis || ''}` : '', levels,
         swing.recommendedShares ? `建议股数：${swing.recommendedShares}` : '', swing.validUntil ? `有效至：${swing.validUntil}` : ''].filter(Boolean).join('；')
     };
   }
@@ -616,6 +617,29 @@ export async function sendRadarDigest(market, digestData) {
   const result = await pushFeishu(msg);
   updateAlertAudit(auditRow.event_key, result.ok ? 'sent' : 'failed', result.error || null);
   console.log(`[radar_v2] ${market} digest 推送: ok=${result.ok} (crossConfirm=${crossConfirm.length}, new=${newSignals.length}, risks=${risks.length})`);
+  return { ok: result.ok, error: result.error };
+}
+
+/**
+ * 机会雷达候选池质量周报推送（radar_weekly_report.mjs 构建文案）。
+ * 门控/审计结构与 sendRadarDigest 完全一致（radar_v2 webhook 门控）。
+ */
+export async function sendRadarWeeklyReport(message) {
+  if (!moduleWebhookEnabled('radar_v2')) return { ok: false, skipped: 'module-disabled' };
+  if (!message) return { ok: false, skipped: 'no-message' };
+
+  const now = Date.now();
+  const eventKey = [now, 'radar_v2', 'ALL', 'weekly', 'server'].join('|');
+  const auditRow = recordAlertAudit({
+    event_key: eventKey, ts: now, type: 'radar_v2',
+    symbol_code: 'ALL', channel: 'webhook', signal: 'WEEKLY_QUALITY',
+    detail: message.split('\n')[0] || '候选池质量周报', market_state: '',
+    status: 'queued',
+  });
+
+  const result = await pushFeishu(message);
+  updateAlertAudit(auditRow.event_key, result.ok ? 'sent' : 'failed', result.error || null);
+  console.log(`[radar_v2] weekly quality 推送: ok=${result.ok}`);
   return { ok: result.ok, error: result.error };
 }
 

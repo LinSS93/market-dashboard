@@ -11,7 +11,9 @@
   const EXECUTION_LABEL = { OPEN:'可试仓', ADD:'可加仓', HOLD:'持有观察', REDUCE:'减仓', CLOSE:'清仓', NONE:'不交易' };
   const OUTCOME_LABEL = { target_hit:'历史·触及目标', reassessment_hit:'触及复核位', invalidated:'失效', unresolved:'期满未决', confirmation_expired:'确认过期', expired:'已过期', reclaimed:'价格收复', risk_continues:'风险延续', pending:'待结算', insufficient:'数据不足' };
   const PROFILE_STATUS_LABEL = { baseline_collecting:'建立基线', outcome_collecting:'等待结算', sample_insufficient:'样本积累中', descriptive_only:'描述性观察' };
-  let payload = null;
+  let activeView = 'ledger';
+  let controller;
+  let rankingController;
 
   function label(map, value) { return map[value] || value || '—'; }
   function setConnection(ok, text) {
@@ -31,13 +33,16 @@
   function renderSummary(data) {
     const summary = data.summary || {};
     const coverage = data.coverage || {};
-    const drift = data.signalDrift || null;
+
     $('rsTotal').textContent = summary.observations ?? 0;
     $('rsMature').textContent = summary.mature ?? 0;
     $('rsPending').textContent = summary.pending ?? 0;
     const coverageLabel = coverage.status === 'healthy' ? '健康' : coverage.status === 'attention' ? '需关注' : coverage.status === 'unobserved' ? '未观测' : '—';
     $('rsCoverage').textContent = coverageLabel;
     $('rsCoverageNote').textContent = coverage.latestByMarket?.length ? `${coverage.latestByMarket.length} 个市场有最近运行记录` : '尚无采集运行记录';
+    $('researchFilterMeta').textContent = `已显示 ${summary.observations ?? 0} 条冻结观察`;
+  }
+  function renderModelSummary(drift) {
     const driftLabel = drift?.status === 'stable' ? '稳定'
       : drift?.status === 'warning' ? '需复核'
       : drift?.status === 'provisional_drift' ? '初步对照'
@@ -49,7 +54,7 @@
     $('rsDriftNote').textContent = drift
       ? `5日真实冻结样本：当前 ${currentFive.count ?? 0} / 正式基线 ${baselineFive.count ?? 0}`
       : '尚无冻结样本评估';
-    $('researchFilterMeta').textContent = `已显示 ${summary.observations ?? 0} 条冻结观察`;
+
   }
   function skipText(run) {
     const skipped = run.skipped || {};
@@ -246,7 +251,7 @@
   function renderCohorts(data) {
     const cohorts = data.cohorts || [];
     $('cohortRows').innerHTML = cohorts.length ? cohorts.map(row => '<tr>'
-      + '<td>' + esc(label(MARKET_LABEL, row.market)) + '</td><td>' + esc(label(KIND_LABEL, row.scenarioKind)) + '</td><td>' + esc(label(STATE_LABEL, row.state)) + '</td>'
+      + '<td>' + esc(label(MARKET_LABEL, row.market)) + '</td><td><button type="button" class="cohort-drill" data-market="' + esc(row.market) + '" data-kind="' + esc(row.scenarioKind) + '" data-stage="' + esc(row.state) + '" title="查看这组冻结记录">' + esc(label(KIND_LABEL, row.scenarioKind)) + '</button></td><td>' + esc(label(STATE_LABEL, row.state)) + '</td>'
       + '<td>' + Number(row.observations || 0) + '</td><td>' + Number(row.mature || 0) + ' / ' + Number(row.pending || 0) + '</td>'
       + '<td class="outcome-cell">' + esc(finalSummary(row)) + '</td><td>' + esc(row.latestAsOfDate || '—') + '</td></tr>').join('')
       : '<tr><td colspan="7" class="research-empty">当前筛选下暂无冻结观察。</td></tr>';
@@ -266,21 +271,83 @@
     const method = data.method || {};
     $('methodRows').innerHTML = Object.values(method).map(value => '<li>' + esc(value) + '</li>').join('') || '<li>方法说明暂不可用。</li>';
   }
-  function render(data) {
-    payload = data;
-    renderSummary(data); renderCoverage(data); renderDrift(data); renderResearchRanking(data); renderSignalProfiles(data); renderCohorts(data); renderDaily(data); renderRecent(data); renderMethod(data);
+  function selectView(view) {
+    activeView = view;
+    const models = view === 'models';
+    $('ledgerGrid').removeAttribute('aria-busy');
+    $('modelsGrid').removeAttribute('aria-busy');
+    $('ledgerGrid').hidden = models;
+    $('modelsGrid').hidden = !models;
+    document.querySelector('.research-method').hidden = models;
+    document.querySelectorAll('.research-stat').forEach(el => {
+      el.hidden = el.hasAttribute('data-model-stat') !== models;
+    });
+    $('onlineSampleTitle').textContent = models ? '模型验证' : '线上实验样本';
+    for (const id of ['researchKind','researchState']) $(id).closest('label').hidden = models;
+    document.querySelectorAll('[data-research-view]').forEach(button => {
+      button.setAttribute('aria-pressed', String(button.dataset.researchView === view));
+    });
+    load();
   }
-  async function load() {
-    $('researchRefresh').disabled = true;
+  function renderView(data, models) {
+    if (models) {
+      renderModelSummary(data.signalDrift); renderDrift(data); renderSignalProfiles(data);
+      $('researchFilterMeta').textContent = '模型评估已更新';
+    } else {
+      renderSummary(data); renderCoverage(data); renderCohorts(data); renderDaily(data); renderRecent(data); renderMethod(data);
+    }
+  }
+  async function loadRanking() {
+    rankingController?.abort();
+    if (activeView !== 'models' || !$('researchRankingPanel').open) return;
+    const request = rankingController = new AbortController();
+    const params = new URLSearchParams({ view:'ranking', market:$('researchMarket').value });
+    $('rankingMeta').textContent = '正在计算研究因子…';
+    $('rankingRows').textContent = '';
     try {
-      const response = await fetch('/stock/scenario-research/dashboard?' + query(), { cache:'no-store' });
+      const response = await fetch('/stock/scenario-research/dashboard?' + params, { cache:'no-store', signal:request.signal });
       if (!response.ok) throw new Error('HTTP ' + response.status);
       const data = await response.json();
-      render(data);
-      setConnection(true, `实验室账本已更新 · ${new Date().toLocaleTimeString('zh-CN', { hour:'2-digit', minute:'2-digit' })}`);
+      if (!request.signal.aborted) renderResearchRanking(data);
     } catch (error) {
-      setConnection(false, '实验室账本暂不可用：' + (error?.message || '请求失败'));
-    } finally { $('researchRefresh').disabled = false; }
+      if (!request.signal.aborted) $('rankingMeta').textContent = '因子读取失败，可点刷新数据重试';
+    }
+  }
+  async function load() {
+    controller?.abort();
+    const request = controller = new AbortController();
+    const models = activeView === 'models';
+    const params = new URLSearchParams(query());
+    if (models) { params.delete('kind'); params.delete('state'); }
+    params.set('view', models ? 'model-summary' : 'ledger');
+    loadRanking();
+    $('resetResearchFilters').hidden = ![...params.keys()].some(key => key !== 'view');
+    const recent = DashboardRecentRead.read(activeView, params.toString());
+    if (recent) renderView(recent.data, models);
+    else if (!models) $('recentRows').innerHTML = '<tr><td colspan="4">正在读取当前筛选的记录…</td></tr>';
+    $('researchFilterMeta').textContent = recent ? DashboardRecentRead.label(recent) + ' · 正在更新' : '正在读取…';
+    $('researchRefresh').disabled = true;
+    const panel = models ? $('modelsGrid') : $('ledgerGrid');
+    panel.setAttribute('aria-busy','true');
+    try {
+      const response = await fetch('/stock/scenario-research/dashboard?' + params, { cache:'no-store', signal:request.signal });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const data = await response.json();
+      if (request !== controller) return;
+      renderView(data, models);
+      DashboardRecentRead.save(activeView, params.toString(), data);
+      setConnection(true, '实验数据已更新');
+    } catch (error) {
+      if (request !== controller) return;
+      $('researchFilterMeta').textContent = (recent ? DashboardRecentRead.label(recent) + ' · ' : '') + '读取失败，请刷新重试';
+      if (!recent && !models) $('recentRows').innerHTML = '<tr><td colspan="4">当前筛选读取失败，请重试。</td></tr>';
+      setConnection(false, error.message);
+    } finally {
+      if (request === controller) {
+        $('researchRefresh').disabled = false;
+        panel.removeAttribute('aria-busy');
+      }
+    }
   }
   function seedQueryFilter() {
     const params = new URLSearchParams(location.search);
@@ -290,8 +357,27 @@
   }
   document.addEventListener('DOMContentLoaded', () => {
     seedQueryFilter();
+    document.querySelectorAll('[data-research-view]').forEach(button => {
+      button.addEventListener('click', () => selectView(button.dataset.researchView));
+    });
     ['researchMarket','researchKind','researchState'].forEach(id => $(id).addEventListener('change', load));
+    $('cohortRows').addEventListener('click', event => {
+      const row = event.target.closest('.cohort-drill');
+      if (!row) return;
+      $('researchMarket').value = row.dataset.market;
+      $('researchKind').value = row.dataset.kind;
+      $('researchState').value = row.dataset.stage;
+      $('recentRows').innerHTML = '<tr><td colspan="4">正在读取这组记录…</td></tr>';
+      load();
+      $('recentSamples').focus({preventScroll:true});
+      $('recentSamples').scrollIntoView({block:'center'});
+    });
+    $('resetResearchFilters').addEventListener('click', () => {
+      for (const id of ['researchMarket','researchKind','researchState']) $(id).value='';
+      load();
+    });
     $('researchRefresh').addEventListener('click', load);
+    $('researchRankingPanel').addEventListener('toggle', loadRanking);
     load();
   });
 })();

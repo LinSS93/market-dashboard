@@ -1,122 +1,112 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Market Dashboard · 市场决策看板</title>
-<link rel="stylesheet" href="shared.css">
-<link rel="stylesheet" href="workspace-theme.css">
-<link rel="stylesheet" href="land.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>市场工作台 · Market Dashboard</title>
+  <link rel="stylesheet" href="/workspace-theme.css">
+  <link rel="stylesheet" href="/land.css">
+  <script defer src="/assets/workspace-nav.js"></script>
 </head>
 <body class="workspace-app land-workspace">
-<header>
-  <h1><a href="/">Market Dashboard</a></h1>
-  <nav>
-    <a href="/stock">股票监控</a>
-    <a href="/tracker">杠杆 ETF 追踪</a>
-    <a href="/radar">机会雷达</a>
-    <a href="/lab">实验室</a>
-    <a href="/control">控制中心</a>
-  </nav>
-  <div class="workspace-header-status">
-    <span class="land-version">本地优先 · 单进程 · 数据落盘</span>
-  </div>
+<header class="workspace-header">
+  <h1><a href="/" aria-label="Market Dashboard 首页">Market Dashboard</a></h1>
 </header>
-
 <main class="land-main">
-  <!-- Hero -->
-  <section class="land-hero">
-    <div class="land-hero-copy">
-      <p class="land-eyebrow">MARKET DECISION DASHBOARD</p>
-      <h2 class="land-title">一站式多市场<br>决策看板</h2>
-      <p class="land-sub">股票监控 · 杠杆 ETF 追踪 · 机会雷达，统一信号引擎驱动，纯 Node 标准库单进程运行，行情与决策数据全部落盘在本地。</p>
-      <div class="land-hero-cta">
-        <a class="btn land-btn-primary" href="/stock">进入股票监控 →</a>
-        <a class="btn land-btn-ghost" href="/radar">浏览机会雷达</a>
-      </div>
-      <ul class="land-hero-tags">
-        <li>No 外部后端</li>
-        <li>US / HK / KR / CN</li>
-        <li>数据本地落盘</li>
-        <li>MCP 只读接口</li>
-      </ul>
-    </div>
-    <div class="land-hero-visual">
-      <img src="assets/land-hero.jpg" alt="市场数据看板抽象示意" loading="eager">
-    </div>
-  </section>
-
-  <!-- 能力亮点 -->
-  <section class="land-section">
-    <h3 class="land-section-title">为什么值得关注</h3>
-    <div class="land-features">
-      <div class="land-feature">
-        <div class="land-feature-ic land-feature-ic-blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div>
-        <h4>统一信号引擎</h4>
-        <p>股票与 ETF 共用一套动作档位与信号引擎，回测、审计、漂移报告闭环，每次算法改动都有版本号可追溯。</p>
-      </div>
-      <div class="land-feature">
-        <div class="land-feature-ic land-feature-ic-green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22h14a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v3"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><circle cx="11" cy="14" r="2"/><path d="M12.5 15.5 15 18"/></svg></div>
-        <h4>LLM 语义证据</h4>
-        <p>机会雷达对接官方公告与新闻，由大模型抽取结构化语义证据进入评分，而非简单关键词加权。</p>
-      </div>
-      <div class="land-feature">
-        <div class="land-feature-ic land-feature-ic-amber"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg></div>
-        <h4>多市场覆盖</h4>
-        <p>美股、港股、韩股、A 股统一日历与行情适配，跨市场基准指数参照，支持盘前盘后风险覆盖。</p>
-      </div>
-      <div class="land-feature">
-        <div class="land-feature-ic land-feature-ic-red"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5"/><path d="M9 7V2"/><path d="M15 7V2"/><path d="M6 13V8h12v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4Z"/></svg></div>
-        <h4>AI Agent 可读</h4>
-        <p>内置 MCP 只读接口，AI 代理可直接读取看板数据用于进一步分析，接口仅暴露查询能力，安全可控。</p>
-      </div>
-    </div>
-  </section>
-
-  <!-- 看板入口 -->
-  <section class="land-section">
-    <h3 class="land-section-title">四个看板</h3>
-    <div class="land-boards">
-      <a class="land-board" href="/stock">
-        <div class="land-board-head">
-          <span class="land-board-name">股票监控</span>
-          <span class="land-board-arrow">→</span>
-        </div>
-        <p>自选股 / 持仓、日 K 与波段信号、决策卡、期权异动、空头情绪、价格提醒。</p>
-        <span class="land-board-route">/stock</span>
-      </a>
-      <a class="land-board" href="/tracker">
-        <div class="land-board-head">
-          <span class="land-board-name">杠杆 ETF 追踪</span>
-          <span class="land-board-arrow">→</span>
-        </div>
-        <p>配对追踪、跨币种 NAV 核算、溢价 / 折价信号、分位数与直方图审计。</p>
-        <span class="land-board-route">/tracker</span>
-      </a>
-      <a class="land-board" href="/radar">
-        <div class="land-board-head">
-          <span class="land-board-name">机会雷达</span>
-          <span class="land-board-arrow">→</span>
-        </div>
-        <p>全市场批量快照 → 流动性 / 技术 / 证据评分 → 研究优先级候选池与档案。</p>
-        <span class="land-board-route">/radar</span>
-      </a>
-      <a class="land-board" href="/control">
-        <div class="land-board-head">
-          <span class="land-board-name">控制中心</span>
-          <span class="land-board-arrow">→</span>
-        </div>
-        <p>信号提醒开关、飞书 Webhook、雷达调度、数据源状态与执行审计。</p>
-        <span class="land-board-route">/control</span>
-      </a>
-    </div>
-  </section>
-
-  <!-- 底部 -->
-  <footer class="land-footer">
-    <p>Market Dashboard —— 个人工具，不构成任何投资建议。</p>
-    <p class="land-footer-meta">纯 Node 标准库 + SQLite · 运行于 Node.js 26 · MIT License</p>
-  </footer>
+  <header class="overview-title"><div><p id="overviewDate"></p><h2>市场总览</h2></div><button type="button" class="btn ghost" id="overviewRefresh">刷新行情</button></header>
+  <div class="overview-grid">
+    <section class="index-monitor" aria-labelledby="indexTitle">
+      <div class="monitor-heading"><h3 id="indexTitle">全球指数</h3><small>分时优先 · 日线备用</small></div>
+      <div id="indexChooser" class="index-chooser" aria-label="选择指数"></div>
+      <div id="indexReadout" class="index-readout" aria-live="polite">正在读取指数…</div>
+      <div id="indexPlot" class="index-plot"></div>
+    </section>
+    <section class="movement-panel" aria-labelledby="movementTitle">
+      <div class="monitor-heading"><h3 id="movementTitle">自选股涨跌榜</h3><a href="/stock">全部自选 →</a></div>
+      <div class="board-segment" role="group" aria-label="排行顺序"><button type="button" data-order="down" aria-pressed="true">跌幅优先</button><button type="button" data-order="up" aria-pressed="false">涨幅优先</button></div>
+      <div id="watchBreadth" class="watch-breadth"></div>
+      <div id="movementList" aria-live="polite">正在读取自选行情…</div>
+      <small id="marketStamp"></small>
+    </section>
+  </div>
+  <section class="next-actions"><h3>研究入口</h3><div>
+    <a href="/radar"><strong>机会候选池</strong><span>按入池依据比较标的</span></a>
+    <a href="/assets/rsi6.html"><strong>超卖扫描</strong><span>从触发记录查标的档案</span></a>
+    <a href="/lab"><strong>实验账本</strong><span>从样本分组查冻结记录</span></a>
+  </div></section>
 </main>
+<script type="module">
+const byId = id => document.getElementById(id);
+let indices = [], quotes = [], selected = '', order = 'down';
+const format = n => n.toLocaleString('zh-CN',{maximumFractionDigits:2,minimumFractionDigits:2});
+const pct = n => (n>0?'+':'') + n.toFixed(2) + '%';
+function add(parent, tag, text) {
+  const el = document.createElement(tag);
+  el.textContent = text;
+  parent.append(el);
+  return el;
+}
+function drawIndex() {
+  const item = indices.find(row => row.label === selected) || indices[0];
+  const head = byId('indexReadout'), plot = byId('indexPlot');
+  head.replaceChildren(); plot.replaceChildren();
+  if (!item) { head.textContent = '暂无指数行情'; return; }
+  selected = item.label;
+  for (const button of byId('indexChooser').children) button.setAttribute('aria-pressed',String(button.textContent === selected));
+  add(head,'small',item.label);
+  add(head,'strong',Number.isFinite(item.price)?format(item.price):'—');
+  if (Number.isFinite(item.changePct)) add(head,'span',pct(item.changePct));
+  const pts = (item.points || []).filter(Number.isFinite);
+  if (pts.length < 2) { plot.textContent = '暂无走势数据'; return; }
+  const lo=Math.min(...pts), hi=Math.max(...pts);
+  const line = pts.map((v,i) => (i?'L':'M')+(i*600/(pts.length-1)).toFixed(2)+' '+(128-(v-lo)/(hi-lo||1)*116).toFixed(2)).join(' ');
+  plot.innerHTML = '<svg viewBox="0 0 600 142" preserveAspectRatio="none" role="img" aria-label="所选指数近期走势"><path d="'+line+' L600 142H0Z" fill="rgba(174,176,255,.17)"/><path d="'+line+'" vector-effect="non-scaling-stroke" fill="none" stroke="#c3c5ff" stroke-width="3"/></svg>';
+  const scale=add(plot,'div','');scale.className='chart-range';
+  add(scale,'span','区间低点 '+format(lo));add(scale,'span','区间高点 '+format(hi));
+}
+function drawQuotes() {
+  const root=byId('movementList');root.replaceChildren();
+  const breadth=byId('watchBreadth');breadth.replaceChildren();
+  if (quotes.length) {
+    const up = quotes.filter(q => q.changePct > 0).length, down = quotes.filter(q => q.changePct < 0).length;
+    add(breadth,'div','上涨 '+up+' · 平盘 '+(quotes.length-up-down)+' · 下跌 '+down);
+    const bar = add(breadth,'div','');bar.className='breadth-bar';bar.setAttribute('aria-hidden','true');
+    for (const [tone,count] of [['up',up],['flat',quotes.length-up-down],['down',down]]) {
+      if (count) { const piece = add(bar,'i','');piece.className=tone;piece.style.flexGrow=count; }
+    }
+  }
+  for (const row of [...quotes].sort((a,b)=>order==='up'?b.changePct-a.changePct:a.changePct-b.changePct).slice(0,5)) {
+    const link=add(root,'a','');link.href='/stock?symbol='+encodeURIComponent(row.symbol);
+    const name=add(link,'div','');add(name,'strong',row.name||row.symbol);add(name,'small',row.symbol);
+    const change=add(link,'b',pct(row.changePct));change.className=row.changePct<0?'loss':'gain';
+  }
+  if (!quotes.length) root.textContent='暂无带涨跌幅的自选行情';
+}
+for (const button of document.querySelectorAll('[data-order]')) button.onclick=()=>{
+  order=button.dataset.order;document.querySelectorAll('[data-order]').forEach(b=>b.setAttribute('aria-pressed',String(b===button)));drawQuotes();
+};
+async function get(path) {
+  const r=await fetch(path,{cache:'no-store',signal:AbortSignal.timeout(20000)});
+  if(!r.ok) throw Error(String(r.status));
+  return r.json();
+}
+async function refresh() {
+  const refreshButton=byId('overviewRefresh');refreshButton.disabled=true;
+  await Promise.allSettled([
+    get('/market/index-bar').then(data=>{
+      indices=data.items || [];const choices=byId('indexChooser');choices.replaceChildren();
+      for(const row of indices){const b=add(choices,'button',row.label);b.type='button';b.onclick=()=>{selected=row.label;drawIndex();};}
+      drawIndex();
+    }).catch(()=>{drawIndex();byId('indexReadout').append(' · 本次读取失败，可刷新重试');}),
+    Promise.all([get('/stock-snapshot'),get('/stock-watchlist')]).then(([raw,list])=>{
+      quotes=list.flatMap(w=>Number.isFinite(raw[w.symbol]?.changePct)?[{...raw[w.symbol],symbol:w.symbol}]:[]);
+      drawQuotes();byId('marketStamp').textContent=Number.isFinite(raw.ts)?'行情快照 '+new Date(raw.ts).toLocaleString('zh-CN',{hour12:false}):'';
+    }).catch(()=>{if(!quotes.length) byId('movementList').textContent='自选行情读取失败，可刷新重试';byId('marketStamp').textContent='本次刷新未完成';})
+  ]);
+  refreshButton.disabled=false;
+}
+byId('overviewDate').textContent=new Date().toLocaleDateString('zh-CN',{year:'numeric',month:'long',day:'numeric',weekday:'long'});
+byId('overviewRefresh').onclick=refresh;refresh();
+</script>
 </body>
 </html>

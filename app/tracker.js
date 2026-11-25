@@ -25,10 +25,12 @@ function selectAllMarkets(){
 }
 function syncMktFilterUI(){
   document.querySelectorAll('#mktFilter button[data-mkt]').forEach(btn => {
-    btn.classList.toggle('active', activeMarkets.has(btn.dataset.mkt));
+    const selected = activeMarkets.size < TRACKER_MARKETS.length && activeMarkets.has(btn.dataset.mkt);
+    btn.classList.toggle('active',selected);
+    btn.setAttribute('aria-pressed',String(selected));
   });
   const allBtn = document.querySelector('#mktFilter button:not([data-mkt])');
-  if (allBtn) allBtn.classList.toggle('active', activeMarkets.size === TRACKER_MARKETS.length);
+  if (allBtn) { allBtn.classList.toggle('active',activeMarkets.size === TRACKER_MARKETS.length); allBtn.setAttribute('aria-pressed',String(activeMarkets.size === TRACKER_MARKETS.length)); }
 }
 
 function esc(s){ return (s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
@@ -85,17 +87,32 @@ function trackerPremiumText(x){
   if(x.premium==null) return '—';
   return (x.premium>0?'+':'')+Number(x.premium).toFixed(2)+'%';
 }
+// 实时溢价的方向描述：只回答"此刻是溢价还是折价"，不做高低判断。
+// 高低（历史位置）统一由收盘分位表达，避免"溢价偏高"与"历史低位折价"同时出现自相矛盾。
 function trackerPremiumState(x){
   if(x.premium==null) return {label:'暂未计算', tone:'neutral'};
-  if(x.premium<=-2) return {label:'折价偏深', tone:'bull'};
-  if(x.premium>=2) return {label:'溢价偏高', tone:'bear'};
-  return {label:'处于常见区间', tone:'neutral'};
+  const p=Number(x.premium);
+  if(!Number.isFinite(p)) return {label:'暂未计算', tone:'neutral'};
+  if(Math.abs(p)<0.5) return {label:'接近平价', tone:'neutral'};
+  return p<0 ? {label:'当前为折价', tone:'bull'} : {label:'当前为溢价', tone:'bear'};
+}
+// 分位口径徽标：官方收盘 NAV 反推 / 官方样本不足时的模型估算
+function premiumBasisLabel(basis){
+  if(basis==='official_close') return '官方收盘';
+  if(basis==='model_estimate') return '模型估算';
+  return '口径未知';
+}
+function premiumBasisHint(basis){
+  if(basis==='official_close') return '官方收盘 NAV 反推溢价';
+  if(basis==='model_estimate') return '模型估算溢价（官方样本不足 30 天）';
+  return '口径未知';
 }
 function navQualityText(x){
+  if(x.nav_quality==='official') return '官方收盘 NAV';
   if(x.nav_quality==='cross_market_approx') return '跨市场近似';
   if(x.nav_quality==='date_mismatch') return x.underlying_stale ? '正股休市' : '日期错位';
   if(x.nav_quality==='cross_market_exact') return '跨市场复利精确';
-  if(x.nav_quality==='aligned') return '单交易日精确';
+  if(x.nav_quality==='aligned') return '单交易日推算';
   return '—';
 }
 
@@ -112,28 +129,54 @@ function renderPremiumHero(x){
     state.textContent=prem.label; state.className='prem-state tone-'+prem.tone;
   }
   $('d_prem_navq').textContent='NAV 质量 · '+navQualityText(x)+(x.nav_sessions>1?'（'+x.nav_sessions+' 正股日）':'');
+  // 大数字是实时溢价：显式标出实时时点，避免与下一行的收盘分位混读成同一时刻
+  const liveTag=$('d_prem_live_tag');
+  const underlyingClosed = x.premium_reliability==='underlying_closed';
+  if(liveTag){
+    const t=String(x.etf_provider_time||'').trim();
+    const hasPrem=x.premium!=null;
+    liveTag.textContent=hasPrem ? (underlyingClosed ? '实时 · 参考值' : '实时'+(t?' · '+t:'')) : '实时';
+    liveTag.title=underlyingClosed
+      ? '正股市场已收盘，ETF 仍在交易；此时溢价为参考值'
+      : (hasPrem ? ('实时溢价时点：'+(t||'未知')) : '实时溢价不可用');
+  }
+  // 跨市场收盘缺口：正股已收盘但 ETF 仍在交易（如 KR 15:30 KST 后港股交易到 16:00）。
+  // 此时正股报价冻结、ETF 仍在动，模型外推必然产生虚假溢价，明确标注为参考值，避免被读成精确值。
+  const warn=$('d_prem_warn');
+  if(warn){
+    warn.hidden=!underlyingClosed;
+    warn.textContent=underlyingClosed ? '正股已收盘，溢价参考值不可靠（ETF 仍在交易）' : '';
+  }
   const repair=x.nav_repair_rate, samples=x.nav_audit_samples||0, volDecay=x.vol_decay_pct_ann;
   const repairText=repair!=null?repair.toFixed(0)+'%':'—';
   const volText=volDecay!=null?(volDecay>0?'+':'')+volDecay.toFixed(1)+'%':'—';
   $('d_prem_reliability').textContent='NAV 次日收敛 '+repairText+' · 波动损耗 '+volText+'/年 · '+samples+' 收盘样本';
   // 分位由 loadPremiumDistribution 异步填充；命中缓存时立即回填，避免重渲染闪烁
   const pctile=$('d_prem_pctile');
-  pctile.style.color='';
-  pctile.className='prem-pctile tone-neutral';
-  pctile.textContent='90 天分位 …';
+  const basis=$('d_prem_basis'), pctileText=$('d_prem_pctile_text');
+  if(pctile) { pctile.style.color=''; pctile.className='prem-pctile tone-neutral'; }
+  if(basis) basis.hidden=true;
+  if(pctileText) pctileText.textContent='上一交易日收盘分位加载中…';
   if(trackerPremiumCache.id===selectedId && trackerPremiumCache.j){
     updateHeroPercentile(trackerPremiumCache.j);
   }
 }
 function updateHeroPercentile(j){
-  const el=$('d_prem_pctile'); if(!el) return;
+  const el=$('d_prem_pctile'), badge=$('d_prem_basis'), txt=$('d_prem_pctile_text');
+  if(!el||!badge||!txt) return;
+  el.style.color='';
+  el.className='prem-pctile tone-neutral';
   if(!j || j.error || j.status==='insufficient' || !j.samples){
-    el.style.color='';
-    el.className='prem-pctile tone-neutral';
-    el.textContent='90 天分位 · '+(j?.message||j?.error||'收盘样本积累中');
+    badge.hidden=true;
+    txt.textContent='上一交易日收盘分位 · '+(j?.message||j?.error||'收盘样本积累中');
     return;
   }
-  el.textContent='90 天分位 P'+j.current_percentile.toFixed(0)+' · '+(j.verdict||'正常区间');
+  // 分位是"上一交易日收盘"口径，必须带口径徽标 + as_of 日期
+  const asOf=j.as_of||j.last_date||'—';
+  badge.hidden=false;
+  badge.className='prem-basis basis-'+(j.basis||'none');
+  badge.textContent=premiumBasisLabel(j.basis);
+  txt.textContent=' 上一交易日收盘分位 · '+asOf+' · P'+Number(j.current_percentile).toFixed(2)+' · '+(j.verdict||'正常区间')+'（n='+j.samples+'）';
   if(j.verdict_color) el.style.color=j.verdict_color;
 }
 
@@ -180,40 +223,43 @@ function decisionLabel(action){
 function displayTrackerMarketState(value){return ({open:'交易中',closed:'已收盘',pre:'盘前',post:'盘后',extended:'盘前/盘后',official_close:'正式收盘'})[value]||value||'—';}
 function displayTrackerChannel(value){return ({webhook:'Webhook',feishu:'Webhook',browser:'浏览器',server:'服务端记录'})[value]||value||'服务端记录';}
 function displayTrackerGate(value){return ({pass:'门控通过',date_mismatch:'日期错位',nav_approximate:'NAV 仅供参考',low_liquidity:'流动性偏低',extreme_move:'极端波动',underlying_unconfirmed:'正股未确认',underlying_falling:'正股下跌',underlying_avoid:'正股回避',underlying_exit:'正股退出',underlying_kill_switch:'正股极端风险',etf_kill_switch:'ETF 极端风险',drawdown_kill_switch:'回撤止损',product_unverified:'系统暂未收录',premium_history_insufficient:'历史样本积累中',premium_unavailable:'溢折价不可用',premium_overpriced_entry:'高溢价阻止追入',premium_risk:'高溢价减杠杆'})[value]||value||'—';}
-function displayNavQuality(value){return ({aligned:'单交易日精确',cross_market_exact:'跨市场复利精确',cross_market_approx:'跨市场近似',date_mismatch:'日期错位'})[value]||value||'—';}
+function displayNavQuality(value){return ({official:'官方收盘 NAV',aligned:'单交易日推算',cross_market_exact:'跨市场复利精确',cross_market_approx:'跨市场近似',date_mismatch:'日期错位'})[value]||value||'—';}
 async function loadTrackerAlerts(pairId){
   const box=$('d_alert_audit');if(!box)return;
   try{
     const rows=await fetch('/tracker/alerts?pair_id='+encodeURIComponent(pairId)+'&limit=40').then(r=>r.json());
+    if (selectedId !== pairId) return;
     if(!rows.length){preserveTrackerScroll(()=>{box.innerHTML='<div class="detail-note soft compact">暂无已推送提醒。仅在 ETF 最终动作发生变化且 ETF 自身市场可交易时落库。</div>';});return;}
     const rowsHtml=rows.map(r=>'<tr><td class="lc-mute">'+esc(new Date(r.ts).toLocaleString('zh-CN',{hour12:false}))+'</td><td>'+esc(displayTrackerChannel(r.channel))+'</td><td><span class="badge '+sigClass(r.signal)+'">'+esc(trackerSignalLabel(r.signal))+'</span></td><td class="lc-mute">'+esc(displayTrackerMarketState(r.market_state))+'</td><td>'+esc(r.detail||'—')+'</td></tr>').join('');
     preserveTrackerScroll(()=>{box.innerHTML='<div class="lc-table-wrap"><table class="lc-table"><thead><tr><th>时间</th><th>渠道</th><th>信号</th><th>市场</th><th>说明</th></tr></thead><tbody>'+rowsHtml+'</tbody></table></div><div class="swing-foot">显示最近 '+rows.length+' 条已推送提醒。同一信号在冷却期内重复触发会被合并；仅记录实际触发的提醒，未触发的状态转移不在此列。</div>';});
-  }catch(e){preserveTrackerScroll(()=>{box.innerHTML='<div class="detail-note soft compact">提醒记录读取失败</div>';});}
+  }catch(e){if (selectedId !== pairId) return; preserveTrackerScroll(()=>{box.innerHTML='<div class="detail-note soft compact">提醒记录读取失败</div>';});}
 }
 async function loadTrackerSignalAudit(pairId){
   const box=$('d_signal_audit');if(!box)return;
   try{
     const rows=await fetch('/tracker/signal-audit?pair_id='+encodeURIComponent(pairId)+'&limit=40').then(r=>r.json());
+    if (selectedId !== pairId) return;
     if(!rows.length){preserveTrackerScroll(()=>{box.innerHTML='<div class="detail-note soft compact">暂无已记录的信号。信号会在每次刷新时落库，回看需要至少 1 个刷新周期。</div>';});return;}
     const rowsHtml=rows.map(r=>'<tr><td class="lc-mute">'+esc(new Date(r.ts).toLocaleString('zh-CN',{hour12:false}))+'</td><td class="lc-mute">'+esc(trackerSignalLabel(r.original_signal||r.final_signal))+'</td><td><span class="badge '+sigClass(r.final_signal)+'">'+esc(trackerSignalLabel(r.final_signal))+'</span></td><td>'+esc(r.underlying_action?DashboardActions.label(r.underlying_action):'—')+'</td><td>'+esc(displayTrackerGate(r.signal_gate))+'</td><td class="lc-mute">'+esc(displayNavQuality(r.nav_quality))+'</td><td class="lc-mute">'+esc(displayTrackerMarketState(r.market_state))+'</td></tr>').join('');
     preserveTrackerScroll(()=>{box.innerHTML='<div class="lc-table-wrap"><table class="lc-table"><thead><tr><th>时间</th><th>正股请求</th><th>ETF 最终</th><th>正股</th><th>执行约束</th><th>NAV</th><th>市场</th></tr></thead><tbody>'+rowsHtml+'</tbody></table></div><div class="swing-foot">显示最近 '+rows.length+' 条动作记录。方向只来自正股当前生效人格；ETF 的溢折价、NAV、流动性与杠杆风险只能调整执行或降低动作，不能单独制造买点。</div>';});
-  }catch(e){preserveTrackerScroll(()=>{box.innerHTML='<div class="detail-note soft compact">信号记录读取失败</div>';});}
+  }catch(e){if (selectedId !== pairId) return; preserveTrackerScroll(()=>{box.innerHTML='<div class="detail-note soft compact">信号记录读取失败</div>';});}
 }
 // 只读已收盘的独立日样本，描述历史位置；不把分位数翻译成买卖建议。
 async function loadPremiumDistribution(pairId){
   const box=$('d_premium_dist'); if(!box) return;
   try{
     const j=await fetch('/tracker/premium-distribution?pair='+encodeURIComponent(pairId)+'&days=90&buckets=20').then(r=>r.json());
+    if (selectedId !== pairId) return;
     trackerPremiumCache = { id: pairId, j };
     // 同步刷新溢价主区的 90 天分位
     if(selectedId===pairId) updateHeroPercentile(j);
     const meta=$('d_dist_meta');
     if(j.error||j.status==='insufficient'){
-      if(meta) meta.textContent='最近 90 天 · '+(j.message||j.error||'收盘样本积累中');
+      if(meta) meta.textContent='最近 '+(j.days||90)+' 天 · '+premiumBasisLabel(j.basis)+'口径 · '+(j.message||j.error||'收盘样本积累中');
       preserveTrackerScroll(()=>{box.innerHTML='<div class="hint">'+esc(j.message||j.error||'数据不足')+'</div>';});
       return;
     }
-    if(meta) meta.textContent='最近 '+j.days+' 天 · '+j.samples+' 个收盘样本 · 当前 P'+j.current_percentile.toFixed(0);
+    if(meta) meta.textContent='最近 '+j.days+' 天 · '+premiumBasisLabel(j.basis)+'口径 · '+j.samples+' 个收盘样本 · 截至 '+(j.as_of||'—');
     const cur = j.current_premium;
     const color = j.verdict_color || '#8a9099';
     const s = j.stats || {};
@@ -228,29 +274,30 @@ async function loadPremiumDistribution(pairId){
     const statsHtml = '<div class="pd-stats">'
       + statsArr.map(([k,v])=>'<div><span class="k">'+k+'</span><b>'+fmtPct(v)+'</b></div>').join('')
       + '</div>';
-    // 提示
-    const first = j.first_ts?new Date(j.first_ts).toLocaleDateString('zh-CN'):'—';
-    const last = j.last_ts?new Date(j.last_ts).toLocaleDateString('zh-CN'):'—';
+    // 提示：口径与时点必须写清楚——这里分位是"上一交易日收盘"口径，不是盘中实时
+    const first = j.first_date||'—';
+    const last = j.last_date||'—';
     const hintHtml = '<div class="pd-hint">'
-      + '数据范围：'+first+' → '+last+' · 均值 '+fmtPct(s.mean)+' · 标准差 '+(s.std==null?'—':s.std.toFixed(2)+'%')+' · '
-      + '<span style="color:#1a9d5a">≤5%ile 历史低位折价（适合买）</span> · <span style="color:#c9372c">≥95%ile 历史高位溢价（适合卖）</span>'
+      + '口径：'+premiumBasisHint(j.basis)+' · 数据范围：'+first+' → '+last
+      + ' · 剔除异常样本 '+Number(j.excluded_suspect||0)+' 条（|溢价|&gt;'+Number(j.suspect_threshold_abs||8)+'%）'
+      + ' · 均值 '+fmtPct(s.mean)+' · 标准差 '+(s.std==null?'—':s.std.toFixed(2)+'%')+' · '
+      + '<span style="color:#1a9d5a">≤5%ile 历史低位折价</span> · <span style="color:#c9372c">≥95%ile 历史高位溢价</span>'
       + '</div>';
     preserveTrackerScroll(()=>{
       box.innerHTML = chartHtml + statsHtml + hintHtml;
-      // 用 ECharts 渲染直方图 + 当前值标记线
-      // 用 requestAnimationFrame 等待 DOM 布局完成，避免容器宽度为 0 导致图表缩到最左侧
-      requestAnimationFrame(()=>{
-        const chartEl = document.getElementById('d_premium_dist_chart');
-        if(!chartEl || !window.echarts) return;
-        // 容器宽度仍为 0 时再等一帧（面板首次渲染）
-        if(chartEl.clientWidth === 0){
-          requestAnimationFrame(()=>renderPremiumDistChart(chartEl, j, cur, color, fmtPct));
-          return;
-        }
-        renderPremiumDistChart(chartEl, j, cur, color, fmtPct);
-      });
+      const fold = document.querySelector('.history-distribution');
+      const chartEl = $('d_premium_dist_chart');
+      const draw = async () => {
+        if (!fold.open || !chartEl.isConnected || selectedId !== pairId) return;
+        if (chPremDist?.getDom() === chartEl) { chPremDist.resize(); return; }
+        try { await DashboardCharts.load(); } catch { return; }
+        if (fold.open && chartEl.isConnected && selectedId === pairId) renderPremiumDistChart(chartEl,j,cur,color,fmtPct);
+      };
+      fold.ontoggle = draw;
+      if (fold.open) requestAnimationFrame(draw);
     });
   }catch(e){
+    if (selectedId !== pairId) return;
     preserveTrackerScroll(()=>{box.innerHTML='<div class="hint">溢价分布读取失败：'+esc(e.message||e)+'</div>';});
   }
 }
@@ -446,33 +493,50 @@ function etfVolCellHtml(x){
 }
 function toggleAdd(){
   const f = $("addForm");
-  f.style.display = f.style.display === "none" ? "flex" : "none";
+  f.hidden = !f.hidden;
+  f.style.display = f.hidden ? 'none' : 'flex';
+  $('toggleAddBtn').setAttribute('aria-expanded', String(!f.hidden));
 }
 
+let earningsPending = false;
+async function refreshTrackerEarnings() {
+  if (earningsPending || Date.now() - earningsUpcomingAt < 6*60*60*1000) return;
+  earningsPending = true;
+  try {
+    const response = await fetch('/stock/earnings-upcoming?days=14');
+    if (!response.ok) return;
+    const events = await response.json();
+    if (!Array.isArray(events)) return;
+    earningsUpcoming = events;
+    earningsUpcomingAt = Date.now();
+    renderGrid(trackerRows);
+  } catch (error) { console.warn('财报日历拉取失败', error); }
+  finally { earningsPending = false; }
+}
 async function loadLatest(){
   try {
     const r = await fetch("/tracker/latest");
+    if (!r.ok) throw Error('HTTP '+r.status);
     const rows = await r.json();
+    document.querySelector('.board-loading')?.remove();
     trackerRows = Array.isArray(rows) ? rows : [];
-    // 财报日历：6 小时 TTL（与股票看板一致），用于左侧列表 earn-flag 提示
-    const needEarnings = !earningsUpcomingAt || Date.now()-earningsUpcomingAt >= 6*60*60*1000;
-    if(needEarnings){
-      try {
-        const er = await fetch('/stock/earnings-upcoming?days=14').then(r=>r.json()).catch(()=>[]);
-        earningsUpcoming = Array.isArray(er) ? er : [];
-        earningsUpcomingAt = Date.now();
-      } catch(e) { console.warn('财报日历拉取失败:', e); }
-    }
     $("status").textContent = "已更新 " + new Date().toLocaleTimeString();
     renderGrid(rows);
+    void refreshTrackerEarnings();
     detectTrackerAlerts(rows);
-    if (selectedId == null && rows.length) selectPair(rows[0]);
-    else if (selectedId != null) loadDetail(selectedId,{full:false});
-  } catch(e){ $("status").textContent = "获取失败"; }
+    const requested = requestedPair && trackerRows.find(row => String(row.id) === requestedPair);
+    if (requested) { requestedPair = null; selectPair(requested); }
+    else if (selectedId != null && document.body.classList.contains('reading-instrument')) loadDetail(selectedId,{full:false});
+  } catch(e){
+    $("status").textContent = "获取失败";
+    const pending = document.querySelector('.board-loading');
+    if (pending) pending.textContent = '组合读取失败，请刷新重试';
+  }
 }
 
 function renderGrid(rawRows){
   const tb = $("gridBody");
+  const restoreFocus = rememberManagementFocus(tb,'id');
   tb.innerHTML = "";
   let rows=(Array.isArray(rawRows)?rawRows:[]).slice();
   const mode=$("sortSel")?.value||'auto';
@@ -502,6 +566,7 @@ function renderGrid(rawRows){
   trackerListControls.setCount(rows.length,Array.isArray(rawRows)?rawRows.length:0);
   $("empty").style.display = rows.length ? "none" : "block";
   $("empty").textContent=(Array.isArray(rawRows)&&rawRows.length)?'没有符合筛选条件的追踪项':'还没有追踪项。点击「+ 添加」加入一对 ETF 与正股。';
+  const cards = [];
   for (const x of rows){
     const decision=trackerDecision(x);
     const tr = document.createElement("tr");
@@ -520,15 +585,29 @@ function renderGrid(rawRows){
       : x.market_execution_status==='risk_pending_market_open' ? '风险动作待开盘'
       : x.signal_available===false ? '数据暂不足，先观察' : '';
     tr.innerHTML =
-      '<td><button type="button" class="drag-handle" title="拖动排序" aria-label="拖动 '+esc(x.etf)+' 排序">⋮⋮</button><span class="pair-copy"><span class="etf-name">'+esc(x.etf_name || x.label || x.etf)+'</span><span class="etf-code">'+esc(x.etf)+'<span class="mkt-badge mkt-'+mkt+'">'+mktTag(mkt)+'</span>'+productTag+earnTag+'</span>'+(x.underlying?'<span class="etf-under">↳ '+esc(x.underlying)+' · '+esc(x.underlying_name)+'</span>':'')+'</span></td>'+
-      '<td>'+marketPrice(x.etf_price,x.etf_market)+'</td>'+
-      '<td class="'+pCls+'">'+pTxt+'</td>'+
-      '<td>'+(decision.action ? '<span class="badge '+sigClass(decision.action)+'" title="'+esc(x.reason||'')+'">'+esc(decision.label)+'</span>'+(executionHint?'<span class="row-state">'+esc(executionHint)+'</span>':'') : '<span class="muted">—</span>')+'</td>'+
-      '<td><button class="btn delbtn" title="取消追踪" aria-label="取消追踪" onclick="event.stopPropagation();delPair('+x.id+')"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1 1 L9 9 M9 1 L1 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button></td>';
+      '<td data-field="name"><div class="management-identity"><button type="button" class="drag-handle" title="拖动排序" aria-label="拖动 '+esc(x.etf)+' 排序">⠿</button><div><strong>'+esc(x.etf_name || x.label || x.etf)+'</strong><small>'+esc(x.etf)+' · '+esc(mktTag(mkt))+productTag+earnTag+'</small>'+(x.underlying?'<small>正股 '+esc(x.underlying)+(x.underlying_name?' · '+esc(x.underlying_name):'')+'</small>':'')+'</div></div></td>'+
+      '<td data-field="price" data-label="现价">'+marketPrice(x.etf_price,x.etf_market)+'</td>'+
+      '<td data-field="prem" data-label="估算折溢价" class="'+pCls+'">'+pTxt+'</td>'+
+      '<td data-field="signal" data-label="当前动作"><span class="management-signal" data-tone="'+DashboardActions.group(decision.action)+'" title="'+esc(x.reason||'')+'">'+esc(decision.label)+'</span>'+(executionHint?'<small>'+esc(executionHint)+'</small>':'')+'</td>'+
+      '<td data-field="action"><button type="button" class="delbtn" aria-label="取消追踪 '+esc(x.etf)+'">移除</button></td>';
+    tr.querySelector('.delbtn').onclick = event => { event.stopPropagation(); delPair(x.id); };
     setupTrackerDrag(tr);
+    cards.push({key:String(x.id),code:x.etf+' · '+mktTag(mkt),name:x.etf_name || x.label || x.etf,
+      value:pTxt, secondary:'现价 '+marketPrice(x.etf_price,x.etf_market), note:[x.underlying,decision.label].filter(Boolean).join(' · '),
+      group:prem == null ? 'unknown' : prem < 0 ? 'discount' : prem > 0 ? 'premium' : 'par'});
+    tr.tabIndex = 0;
+    tr.onkeydown = event => {
+      if (event.target !== tr || event.key !== 'Enter') return;
+      event.preventDefault();
+      selectPair(x);
+    };
     tr.onclick = () => { if(!trackerDragJustFinished) selectPair(x); };
     tb.appendChild(tr);
   }
+  const groups = [['discount','折价'],['premium','溢价'],['par','平价'],['unknown','待估值']];
+  InstrumentBoard.render(groups,cards,
+    id => selectPair(rows.find(row => String(row.id) === id)));
+  restoreFocus?.();
 }
 
 function setupTrackerDrag(tr){
@@ -570,6 +649,7 @@ function updateTrackerSortButtons(){
     if(!btn)return;
     const ind=btn.querySelector('.sort-indicator');
     const active = mode === key + '_asc' || mode === key + '_desc';
+    btn.closest('th').setAttribute('aria-sort', active ? (mode === key + '_asc' ? 'ascending' : 'descending') : 'none');
     btn.setAttribute('aria-pressed', String(active));
     if(ind) ind.innerHTML = active ? (mode === key + '_asc' ? '&#8593;' : '&#8595;') : '&#8597;';
   });
@@ -585,14 +665,14 @@ function restoreTrackerSortMode(){
   updateTrackerSortButtons();
 }
 
-function showDetailPanel(){
-  const panel=document.querySelector('.split-detail');
-  if(panel) panel.classList.add('active');
-}
-function hideDetailPanel(){
-  const panel=document.querySelector('.split-detail');
-  if(panel) panel.classList.remove('active');
-}
+let requestedPair = new URLSearchParams(location.search).get('pair');
+const trackerNavigation = DashboardDetailHistory(['pair'], id => {
+  const row = trackerRows.find(item => String(item.id) === id);
+  if (row) selectPair(row);
+  else requestedPair = id;
+}, () => { requestedPair = null; InstrumentBoard.close(); });
+function showDetailPanel(){ trackerNavigation.enter(selectedId); InstrumentBoard.open(selectedId); }
+function hideDetailPanel(){ trackerNavigation.back(); }
 function selectPair(x){
   selectedId = x.id;
   document.querySelectorAll("#gridBody tr").forEach(tr => tr.classList.toggle("sel", tr.dataset.id == x.id));
@@ -611,7 +691,10 @@ function closeDetail(){
   const distMeta=$("d_dist_meta"); if(distMeta)distMeta.textContent='最近 90 天 · 只统计已收盘独立交易日';
   const summaryBox=$("d_decision_summary"); if(summaryBox)summaryBox.innerHTML='<div class="hint">数据整理中…</div>';
   ["d_prem_big","d_prem_state","d_prem_navq","d_prem_reliability"].forEach(id=>{ const el=$(id); if(el) el.textContent='—'; });
-  const pctile=$("d_prem_pctile"); if(pctile){ pctile.style.color=''; pctile.textContent='90 天分位 …'; }
+  const pctile=$("d_prem_pctile"); if(pctile){ pctile.style.color=''; pctile.className='prem-pctile tone-neutral'; }
+  const basisBadge=$("d_prem_basis"); if(basisBadge) basisBadge.hidden=true;
+  const pctileText=$("d_prem_pctile_text"); if(pctileText) pctileText.textContent='收盘分位加载中…';
+  const liveTag=$("d_prem_live_tag"); if(liveTag){ liveTag.textContent='实时'; liveTag.title=''; }
   ["d_price","d_nav","d_und","d_asof"].forEach(id=>{ const el=$(id); if(el){ el.textContent='—'; el.className='kl-v'; } });
   const navK=$("d_nav_k"); if(navK)navK.textContent='估算 NAV';
   const marketAsof=$('d_market_asof'); if(marketAsof)marketAsof.textContent='—';
@@ -629,7 +712,12 @@ async function loadDetail(id,opts={}){
   const heavy=opts.full===true||newPair||(Date.now()-trackerHeavyAt>=60000);
   if(heavy){trackerHeavyId=id;trackerHeavyAt=Date.now();}
   // 切换标的时清空溢价分布缓存，避免显示错误股票的数据
-  if(newPair) trackerPremiumCache = { id: null, j: null };
+  if (newPair) {
+    trackerPremiumCache = { id:null, j:null };
+    if (chPremDist) { chPremDist.dispose(); chPremDist=null; }
+    if (chPrem) chPrem.clear();
+    for (const key of ['d_dist_meta','d_premium_dist','d_alert_audit','d_signal_audit']) $(key).textContent = '正在读取…';
+  }
   const decision=trackerDecision(x);
   selectedId = id;
   // 三段式表头：切到 main 态并填充字段
@@ -667,7 +755,7 @@ async function loadDetail(id,opts={}){
   // 溢价主区：数值行 + 大数字 + NAV 质量 + 信号可信度
   $("d_price").textContent = marketPrice(x.etf_price,x.etf_market);
   $("d_nav").textContent = marketPrice(x.nav,x.etf_market);
-  $("d_nav_k").textContent = x.nav_quality==='cross_market_approx' ? '估算 NAV · 近似' : x.nav_quality==='date_mismatch' ? (x.underlying_stale ? '估算 NAV · 正股休市' : '估算 NAV · 日期错位') : '估算 NAV';
+  $("d_nav_k").textContent = x.nav_quality==='official' ? '官方 NAV · 收盘' : x.nav_quality==='cross_market_approx' ? '估算 NAV · 近似' : x.nav_quality==='date_mismatch' ? (x.underlying_stale ? '估算 NAV · 正股休市' : '估算 NAV · 日期错位') : '估算 NAV';
   $("d_und").textContent = marketPrice(x.underlying_price,x.underlying_market);
   const asOf = x.etf_provider_time ? String(x.etf_provider_time) : '报价时间未知';
   $("d_asof").textContent = asOf;
@@ -696,6 +784,9 @@ async function loadDetail(id,opts={}){
   if(heavy){
     const h = await fetch("/tracker/history?pair=" + id + "&minutes=240");
     const hist = await h.json();
+    if (selectedId !== id) return;
+    try { await DashboardCharts.load(); }
+    catch { $('chPrem').textContent='图表组件加载失败'; return; }
     if(selectedId===id)drawCharts(hist,newPair);
   }
 }
@@ -726,14 +817,16 @@ function drawCharts(hist,replace=false){
     return Number.isFinite(nav) && nav > 0 ? +nav.toFixed(3) : null;
   });
   const premVals = rows.map(r => r.premium==null?null:+r.premium.toFixed(2));
+  // 窄容器（手机）：标题与图例同排放不下会互相重叠，隐藏图表内标题（卡片头已有文字），图例紧凑化
+  const narrowChart = chPrem.getWidth() < 480;
   chPrem.setOption({
     animation:false,
-    title: {
+    title: narrowChart ? undefined : {
       text: "ETF 现价 · 估算 NAV · 溢价率",
       left: 10, top: 6,
       textStyle: { fontSize: 15, fontWeight: 600, color: '#1f2329' }
     },
-    grid: { left: 60, right: 28, top: 40, bottom: 38, containLabel: false },
+    grid: { left: 60, right: narrowChart ? 36 : 28, top: narrowChart ? 28 : 40, bottom: 38, containLabel: false },
     tooltip: { trigger: "axis", backgroundColor:'#fff', borderColor:'#e4e8ee', textStyle:{color:'#1f2329',fontSize:13},
       formatter: p => {
         if(!p||!p.length) return '';
@@ -748,9 +841,9 @@ function drawCharts(hist,replace=false){
     },
     legend: {
       data: ['ETF 现价','估算 NAV','溢价率'],
-      top: 14, right: 18,
-      textStyle: { fontSize: 13, color: '#5a606b' },
-      itemWidth: 22, itemHeight: 12, itemGap: 16,
+      top: narrowChart ? 4 : 14, right: 18,
+      textStyle: { fontSize: narrowChart ? 11 : 13, color: '#5a606b' },
+      itemWidth: narrowChart ? 16 : 22, itemHeight: narrowChart ? 10 : 12, itemGap: narrowChart ? 8 : 16,
       icon: 'roundRect'
     },
     xAxis: {
@@ -809,17 +902,7 @@ let alertCfg = { etfTiers: ['PROBE','ADD','TRIM','EXIT'], stockTiers: ['OPEN','A
 const trkAlertState = {};
 let trkAlertPrimed = false;
 function normSig(s){ return s ? DashboardActions.normalize(s) : null; }
-function showToast(msg){
-  let box = $('toastBox');
-  if (!box){ box = document.createElement('div'); box.id = 'toastBox';
-    box.style.cssText = 'position:fixed;right:18px;bottom:18px;z-index:9999;display:flex;flex-direction:column;gap:8px';
-    document.body.appendChild(box); }
-  const t = document.createElement('div');
-  t.style.cssText = 'background:#1f2329;color:#fff;padding:10px 14px;border-radius:8px;font-size:13px;box-shadow:0 4px 14px rgba(0,0,0,.25);max-width:330px;line-height:1.5';
-  t.textContent = msg;
-  box.appendChild(t);
-  setTimeout(() => { t.style.transition = 'opacity .4s'; t.style.opacity = '0'; setTimeout(() => t.remove(), 400); }, 6000);
-}
+function showToast(msg){ DashboardPageNotices.add(msg); }
 function notifyAlertTrk(symbol, signal, detail){
   const label=trackerSignalLabel(signal), ico = DashboardActions.isEntry(signal) ? '🟢' : DashboardActions.isRisk(signal) ? '🔴' : '🔵';
   const text = `${ico} ${symbol} ${label}\n${detail || ''}`;
@@ -883,8 +966,8 @@ function populateAlertModal(){
   const b = $('browserChk'); if (b) b.checked = !!alertCfg.browser;
   DashboardNotificationCenter.render(alertCfg);
 }
-function openAlertModal(){ populateAlertModal(); $('alertModal').style.display = 'flex'; DashboardNotificationCenter.load(alertCfg); }
-function closeAlertModal(){ $('alertModal').style.display = 'none'; }
+function openAlertModal(){ populateAlertModal(); $('alertModal').showModal(); DashboardNotificationCenter.load(alertCfg); }
+function closeAlertModal(){ $('alertModal').close(); }
 
 function collectTiers(field){
   const boxId = field === 'etfTiers' ? 'etfTierBox' : 'stockTierBox';
@@ -960,7 +1043,10 @@ async function delPair(id){
   try {
     const r = await fetch("/tracker/pairs?id=" + id, { method: "DELETE" });
     if (!r.ok) throw new Error("HTTP " + r.status);
-    if (selectedId === id) closeDetail();
+    if (selectedId === id) {
+      if (document.body.classList.contains('reading-instrument')) hideDetailPanel();
+      closeDetail();
+    }
     flash("已取消追踪", "#8a9099");
     loadLatest();
   } catch(e){
@@ -975,17 +1061,11 @@ window.addEventListener("resize", () => { if (chPrem) chPrem.resize(); if (chPre
 // 开盘 → 高频 5s；全休市 → 低频 60s（仅做状态轮询，后端此时本就不产生新数据）。
 let marketStatusCache={};
 function renderTrackerMarketStatus(){
-  const cont=$("mktStatus");if(!cont)return;
-  const defs=[{key:'US',name:'美股'},{key:'HK',name:'港股'},{key:'KR',name:'韩股'},{key:'CN',name:'A股'}];
-  let html='';
-  for(const d of defs){
-    const st=marketState(d.key),dot=st.tone==='on'?'🟢':st.tone==='amber'?'🟡':'⚪';
-    const title=st.source?' title="'+esc(st.source)+'"':'';
-    html+='<span class="mktpill '+st.tone+'"'+title+'>'+dot+' '+d.name+' '+esc(st.label)+'</span>';
-  }
-  const anyOpen=['US','HK','KR'].some(m=>marketState(m).open);
-  html+='<span class="mktpill '+(anyOpen?'on':'off')+'">'+(anyOpen?'🔄 实时刷新 5s':'💤 休市低频 60s')+'</span>';
-  if(cont.innerHTML!==html)cont.innerHTML=html;
+  const rows = [['US','美股'],['HK','港股'],['KR','韩股'],['CN','A股']].map(([key,name]) => {
+    const st = marketState(key);
+    return {name,open:st.open,label:st.label,detail:st.note || ''};
+  });
+  DashboardMarketStatus.display(rows, DashboardMarketStatus.anyOpen() ? 'ETF 行情每 5 秒刷新' : 'ETF 行情轮询已暂停，每 60 秒检查交易时段');
 }
 async function loadMarketStatus(){await DashboardMarketStatus.load(()=>{marketStatusCache=DashboardMarketStatus.cache();renderTrackerMarketStatus();if(trackerRows.length&&($("sortSel")?.value||'auto')==='auto')renderGrid(trackerRows);});}
 function marketState(mkt){

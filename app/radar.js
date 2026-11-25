@@ -78,7 +78,7 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
     failed: '未满足',
     active: '监控中',
   };
-  const CHANNEL_LABELS = { event: '事件', trend: '趋势', fundamental: '基本面' };
+  const CHANNEL_LABELS = { screener: '筛选', event: '事件', trend: '趋势', fundamental: '基本面' };
   const STATUS_LABELS = {
     active: '监控中',
     confirmed: '已确认',
@@ -157,6 +157,7 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const json = await resp.json();
       if (!json.ok) throw new Error(json.error || '操作失败');
+      DashboardRecentRead.clear('radar');
       // 从本地列表中移除
       state.items = state.items.filter(
         (s) => !(s.market === market && s.symbol === symbol)
@@ -165,8 +166,7 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
       if (state.selectedSymbol &&
           state.selectedSymbol.market === market &&
           state.selectedSymbol.symbol === symbol) {
-        state.selectedSymbol = null;
-        renderDetailEmpty();
+        clearSelection();
       }
       renderList();
       // 显示 Undo 提示（5 秒内可撤销）
@@ -201,6 +201,7 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const json = await resp.json();
       if (!json.ok) throw new Error(json.error || '操作失败');
+      DashboardRecentRead.clear('radar');
       elStatus.textContent = '已恢复 ' + market + ':' + symbol;
       // 重新加载列表
       loadAndRender();
@@ -237,26 +238,10 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
       return;
     }
 
-    let html = '<div class="queue-group bucket-dismissed">';
-    html += '<div class="queue-group-head">';
-    html += '<span class="queue-group-label">已隐藏标的</span>';
-    html += '<span class="queue-group-count">' + filtered.length + '</span>';
-    html += '<span class="queue-group-hint">点击"恢复"将标的放回候选池</span>';
-    html += '</div>';
-    for (const s of filtered) {
-      html += '<div class="dossier-card dismissed-card">';
-      html += '<div class="card-row-main">';
-      html += '<span class="dossier-symbol">' + esc(s.symbol) + '</span>';
-      html += '<span class="dossier-market">' + esc(marketLabel(s.market)) + '</span>';
-      html += '<span class="time-tag" style="margin-left:auto">隐藏于 ' + formatTime(s.created_at) + '</span>';
-      html += '</div>';
-      html += '<div class="card-row-meta">';
-      html += '<button class="restore-btn" data-market="' + esc(s.market) + '" data-symbol="' + esc(s.symbol) + '">恢复到候选池</button>';
-      html += '</div>';
-      html += '</div>';
-    }
-    html += '</div>';
-    elList.innerHTML = html;
+    elList.innerHTML = '<div class="record-sheet">' + filtered.map(s =>
+      '<div class="hidden-record"><div class="record-identity"><strong>' + esc(s.symbol) + '</strong><small>' + esc(marketLabel(s.market)) +
+      '</small></div><time>隐藏于 ' + formatTime(s.created_at) + '</time><button class="restore-btn" data-market="' + esc(s.market) +
+      '" data-symbol="' + esc(s.symbol) + '">恢复到候选池</button></div>').join('') + '</div>';
   }
 
   // 公司简介（V2-owned API，返回 { ok, profile, as_of, source }）
@@ -356,172 +341,79 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
   // 兼容两种数据形态：
   //   queue item: { bucket, admission_driver: { fact: { content }, direction, available_at, change_type }, coverage, reversal_evidence }
   //   archive item: { summary: { action, conflict_detected }, latest_fact, latest_direction, latest_available_at, latest_change_type }
-  function renderSymbolCard(s) {
-    const isActive = state.selectedSymbol &&
-      state.selectedSymbol.market === s.market &&
-      state.selectedSymbol.symbol === s.symbol;
-    const isQueueItem = !!s.admission_driver;
-    const bucket = s.bucket || null;
-    const sm = s.summary || {};
-    const action = isQueueItem ? (s.action || 'watch') : (sm.action || 'watch');
-    const dir = isQueueItem
-      ? (s.admission_driver.direction || 'neutral')
-      : (s.latest_direction || 'neutral');
-    // 卡片主文案：queue 用 admission_driver.fact（真正驱动入池的信号）；archive 用 latest_fact
-    const fact = isQueueItem
-      ? (s.admission_driver.fact?.content || eventTypeLabel(s.admission_driver.change_type))
-      : (s.latest_fact || eventTypeLabel(s.latest_change_type));
-    const availableAt = isQueueItem ? s.admission_driver.available_at : s.latest_available_at;
-    const conflict = isQueueItem ? false : (sm.conflict_detected || false);
-    // 通道与评分覆盖（queue item 才有）
-    const coverage = isQueueItem ? (s.coverage || {}) : null;
-    const covText = coverage
-      ? (coverage.channel_count + ' 通道' + (coverage.has_current_score ? ' · 有评分' : ' · 待评分'))
-      : '';
+  let queueCategory = 'all', cachedQueue = false;
 
-    // 卡片样式类：queue item 用 bucket-xxx；archive item 用 action-xxx
-    const cardCls = isQueueItem
-      ? 'bucket-' + (bucket || 'unscored')
-      : 'action-' + action;
-
-    // 综合评分徽章（queue item 才有）
-    // 有评分：显示数值，标注"研究排序分，非收益预测"
-    // 无评分：显示"待评分"，不显示伪分数
-    let scoreBadge = '';
-    if (isQueueItem) {
-      if (s.composite_score != null) {
-        scoreBadge = '<span class="card-score-badge" title="研究排序分，非收益预测">' + esc(String(s.composite_score)) + '</span>';
-      } else {
-        scoreBadge = '<span class="card-score-badge unscored" title="尚无当前评分">待评分</span>';
-      }
-    }
-
-    // 资产待审计标签（provisional 资产，UI 提示数据可信度）
-    const auditTag = isQueueItem && s.eligibility && s.eligibility.common_equity_provisional
-      ? '<span class="audit-pending-tag" title="资产分类未审计，暂按普通股处理">资产待审计</span>'
-      : '';
-
-    // 评分待更新标签（最近一次完整日扫未刷新该标的评分，已退出多通道共振组）
-    const staleTag = isQueueItem && coverage && coverage.score_stale
-      ? '<span class="stale-score-tag" title="最近一次完整日扫未刷新该标的评分，暂不进入多通道共振组">数据待更新</span>'
-      : '';
-
-    // 基本面未覆盖标签（软门槛：共振组中无基本面档案的标的提示核验基本面，
-    // 负向基本面已由困境反转分桶承接，不在此重复标注）
-    const fundamentalTag = isQueueItem && bucket === 'cross_confirm' && s.fundamental_coverage === 'uncovered'
-      ? '<span class="fundamental-uncovered-tag" title="尚无基本面档案；当前共振只来自技术、事件或趋势通道">基本面未覆盖</span>'
-      : '';
-
-    // 困境反转正向证据（负面事件 + 正向证据并存，解释为什么负面标的仍值得研究）
-    const reversalChannel = isQueueItem && s.reversal_evidence ? channelLabel(s.reversal_evidence.channel) : null;
-    const reversalTag = reversalChannel
-      ? '<span class="reversal-tag" title="负面事件与' + esc(reversalChannel) + '正向证据并存（困境反转）">正向证据·' + esc(reversalChannel) + '</span>'
-      : '';
-
-    // bucket 标签（候选池卡片才显示，让用户区分多通道共振/待确认信号/风险预警）
-    const bucketTag = isQueueItem && s.bucket && BUCKET_LABELS[s.bucket]
-      ? '<span class="bucket-tag bucket-tag-' + s.bucket + '" title="' + esc(BUCKET_HINTS[s.bucket] || '') + '">' + esc(BUCKET_LABELS[s.bucket]) + '</span>'
-      : '';
-
-    return (
-      '<div class="dossier-card symbol-card ' + cardCls + (isActive ? ' active' : '') +
-        '" data-market="' + esc(s.market) + '" data-symbol="' + esc(s.symbol) +
-        '" role="button" tabindex="0">' +
-        '<div class="card-row-main">' +
-          // 顺序：公司名称（第一重点）→ 股票代码 → 市场标志 → 方向徽章 → 评分徽章
-          (s.name ? '<span class="dossier-name">' + esc(s.name) + '</span>' : '<span class="dossier-name dossier-name-muted">未命名</span>') +
-          '<span class="dossier-symbol">' + esc(s.symbol) + '</span>' +
-          '<span class="dossier-market">' + esc(marketLabel(s.market)) + '</span>' +
-          '<span class="card-dir-badge ' + dir + '">' + esc(DIR_SHORT[dir] || dir) + '</span>' +
-          scoreBadge +
-        '</div>' +
-        '<div class="card-row-fact">' + esc(fact) + '</div>' +
-        '<div class="card-row-meta">' +
-          '<span class="time-tag">' + formatTime(availableAt) + '</span>' +
-          (covText ? '<span class="cov-tag">' + esc(covText) + '</span>' : '') +
-          bucketTag +
-          staleTag +
-          fundamentalTag +
-          reversalTag +
-          auditTag +
-          (conflict ? '<span class="conflict-tag">结论冲突</span>' : '') +
-          (isQueueItem ? '<button class="dismiss-btn" data-market="' + esc(s.market) + '" data-symbol="' + esc(s.symbol) + '" title="不感兴趣，从候选池移除">不感兴趣</button>' : '') +
-        '</div>' +
-      '</div>'
-    );
+  function readableFact(value) {
+    return String(value || '暂无事件摘要')
+      .replace(/^profit_alert:\s*PROFIT WARNING$/i,'盈利预警')
+      .replace(/^momentum_20d(?= 上榜)/,'20 日动量')
+      .replace(/^w52_high(?= 上榜)/,'52 周新高');
   }
 
-  // 机会候选池：3 组布局（困境反转 → 多通道共振 → 待确认信号）。
-  // 服务端已按 配额优先级（risk → cross_confirm → new_signal）+ 市场轮转排好序，
-  // 前端只按 bucket 分组、不重排，保证分组配额与市场平衡不被本地排序打散。
-  // 搜索已由服务端完成（覆盖整个候选池，而非仅已加载的 30 条）。
+  function renderSymbolCard(s) {
+    const driver = s.admission_driver;
+    const direction = directionLabel(driver?.direction || s.latest_direction);
+    const fact = driver ? driver.fact?.content || eventTypeLabel(driver.change_type)
+      : s.latest_fact || eventTypeLabel(s.latest_change_type);
+    const category = BUCKET_LABELS[s.bucket] || ACTION_LABELS[s.summary?.action] || '观察';
+    const coverage = s.coverage;
+    const evidence = [category];
+    if (coverage?.channel_count != null) evidence.push(coverage.channel_count + ' 通道');
+    if (coverage?.score_stale) evidence.push('数据待更新');
+    if (s.eligibility?.common_equity_provisional) evidence.push('资产待审计');
+    if (s.bucket === 'cross_confirm' && s.fundamental_coverage === 'uncovered') evidence.push('基本面未覆盖');
+    if (s.reversal_evidence) evidence.push('正向证据：' + channelLabel(s.reversal_evidence.channel));
+    if (s.summary?.conflict_detected) evidence.push('结论冲突');
+    const attrs = ' data-market="' + esc(s.market) + '" data-symbol="' + esc(s.symbol) + '"';
+    const selected = state.selectedSymbol?.market === s.market && state.selectedSymbol?.symbol === s.symbol;
+    if (s.trade_plan && s.trade_plan.available) {
+      evidence.push('买区 ' + s.trade_plan.buyLow + '–' + s.trade_plan.buyHigh + ' · 止损 ' + s.trade_plan.stopLoss + ' · 建议 ' + s.trade_plan.recommendedShares + ' 股');
+    } else if (Number.isFinite(s.excess20Pct)) {
+      evidence.push('近 20 日较大盘 ' + (s.excess20Pct > 0 ? '+' : '') + s.excess20Pct.toFixed(2) + ' 个百分点');
+    }
+    const when = formatTime(driver?.available_at || s.latest_available_at);
+    return '<div class="radar-record' + (driver ? ' with-action' : '') + '">' +
+      '<button type="button" class="symbol-card record-row' + (selected ? ' active' : '') + '" aria-current="' + selected + '"' + attrs + '>' +
+        '<span class="record-identity"><strong>' + esc(s.name || s.symbol) + '</strong><small>' +
+        esc(s.symbol + ' · ' + marketLabel(s.market)) + '</small></span>' +
+        '<span class="record-evidence"><strong title="' + esc(fact) + '">' + esc(readableFact(fact)) + '</strong><small>' +
+        esc(evidence.join(' · ')) + '</small></span>' +
+        '<span class="record-metric"><strong>' + (driver ? esc(s.composite_score ?? '待评分') : esc(direction)) +
+        '</strong><small>' + (driver ? esc(direction) + ' · ' : '') + when + '</small></span></button>' +
+        (driver ? '<button type="button" class="dismiss-btn record-action"' + attrs + (cachedQueue ? ' disabled' : '') +
+        ' aria-label="隐藏 '+esc(s.name || s.symbol)+'">隐藏</button>' : '') + '</div>';
+  }
+
+  function recordHeader(isQueue) {
+    return '<div class="record-head"><span>标的</span><span>' + (isQueue ? '入池依据' : '最新证据') +
+      '</span><span>' + (isQueue ? '研究分 / 时间' : '方向 / 时间') + '</span>' +
+      (isQueue ? '<span class="head-action">操作</span>' : '') + '</div>';
+  }
+
   function renderQueueList() {
     const items = state.items;
-    const total = state.queueTotal != null ? state.queueTotal : items.length;
-
-    elCount.textContent = items.length + ' / ' + total;
-
-    if (items.length === 0) {
-      const msg = state.search.trim() ? '没有匹配代码或名称的候选' : '暂无符合准入条件的研究对象';
-      elList.innerHTML = '<div class="dossier-empty">' + esc(msg) + '</div>';
-      return;
+    elCount.textContent = '已载入 ' + items.length + ' / ' + (state.queueTotal ?? items.length);
+    const counts = new Map();
+    for (const item of items) counts.set(item.bucket,(counts.get(item.bucket) || 0) + 1);
+    const groups = [['all','全部',items.length]];
+    for (const [key,title] of Object.entries(BUCKET_LABELS)) {
+      if (counts.has(key) || key === queueCategory) groups.push([key,title,counts.get(key) || 0]);
     }
-
-    const riskItems = items.filter((s) => s.bucket === 'risk_review');
-    const crossItems = items.filter((s) => s.bucket === 'cross_confirm');
-    const newSignalItems = items.filter((s) => s.bucket === 'new_signal');
-
-    let html = '';
-
-    // 组 1：困境反转（负面信号+正向证据并存，置顶展示）
-    if (riskItems.length > 0) {
-      const bk = state.queueBuckets && state.queueBuckets.risk_review;
-      const countText = bk && bk.total > riskItems.length
-        ? riskItems.length + ' / ' + bk.total
-        : String(riskItems.length);
-      html += '<div class="queue-group bucket-risk_review">';
-      html += '<div class="queue-group-head">';
-      html += '<span class="queue-group-label">' + esc(BUCKET_LABELS.risk_review) + '</span>';
-      html += '<span class="queue-group-count">' + esc(countText) + '</span>';
-      html += '<span class="queue-group-hint">' + esc(BUCKET_HINTS.risk_review) + '</span>';
-      html += '</div>';
-      html += riskItems.map(renderSymbolCard).join('');
-      html += '</div>';
+    const filters = DashboardCollection.filters(groups,queueCategory,key => { queueCategory = key; renderQueueList(); });
+    const sheet = document.createElement('div');
+    sheet.className = 'record-sheet queue-sheet';
+    const rows = queueCategory === 'all' ? items : items.filter(s => s.bucket === queueCategory);
+    const empty = !items.length && !state.search.trim() ? '暂无符合准入条件的研究对象' : '当前筛选下没有候选';
+    sheet.innerHTML = recordHeader(true) + (rows.length ? rows.map(renderSymbolCard).join('') : '<p class="collection-empty">'+empty+'</p>');
+    elList.replaceChildren(filters);
+    if (queueCategory !== 'all') {
+      const hint = document.createElement('p'); hint.className = 'collection-note';
+      const total = state.queueBuckets?.[queueCategory]?.total;
+      hint.textContent = BUCKET_HINTS[queueCategory] + (total != null ? ' · 本组已载入 ' + rows.length + ' / ' + total : '');
+      elList.append(hint);
     }
-
-    // 组 2：多通道共振（多通道+高分，cross_confirm）
-    if (crossItems.length > 0) {
-      const bk = state.queueBuckets && state.queueBuckets.cross_confirm;
-      const countText = bk && bk.total > crossItems.length
-        ? crossItems.length + ' / ' + bk.total
-        : String(crossItems.length);
-      html += '<div class="queue-group bucket-cross_confirm">';
-      html += '<div class="queue-group-head">';
-      html += '<span class="queue-group-label">' + esc(BUCKET_LABELS.cross_confirm) + '</span>';
-      html += '<span class="queue-group-count">' + esc(countText) + '</span>';
-      html += '<span class="queue-group-hint">' + esc(BUCKET_HINTS.cross_confirm) + '</span>';
-      html += '</div>';
-      html += crossItems.map(renderSymbolCard).join('');
-      html += '</div>';
-    }
-
-    // 组 3：待确认信号（单通道或中低分，new_signal）
-    if (newSignalItems.length > 0) {
-      const bk = state.queueBuckets && state.queueBuckets.new_signal;
-      const countText = bk && bk.total > newSignalItems.length
-        ? newSignalItems.length + ' / ' + bk.total
-        : String(newSignalItems.length);
-      html += '<div class="queue-group bucket-new_signal">';
-      html += '<div class="queue-group-head">';
-      html += '<span class="queue-group-label">' + esc(BUCKET_LABELS.new_signal) + '</span>';
-      html += '<span class="queue-group-count">' + esc(countText) + '</span>';
-      html += '<span class="queue-group-hint">' + esc(BUCKET_HINTS.new_signal) + '</span>';
-      html += '</div>';
-      html += newSignalItems.map(renderSymbolCard).join('');
-      html += '</div>';
-    }
-
-    elList.innerHTML = html;
+    elList.append(sheet);
+    refreshReportPager();
   }
 
   // 档案库：完整列表（显示"最近 N 个档案对象"标签）
@@ -535,7 +427,7 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
       const msg = state.search.trim() ? '没有匹配代码或名称的档案' : '暂无档案';
       elList.innerHTML = '<div class="dossier-empty">' + esc(msg) + '</div>';
     } else {
-      elList.innerHTML = sorted.map(renderSymbolCard).join('');
+      elList.innerHTML = '<div class="record-sheet">' + recordHeader(false) + sorted.map(renderSymbolCard).join('') + '</div>';
     }
     const shown = state.items.length;
     const hasMore = state.archiveMeta && state.archiveMeta.hasMore;
@@ -543,6 +435,7 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
       + (hasMore ? '<button id="archiveLoadMore" class="archive-load-more" type="button">加载更多</button>' : '');
     const more = $('archiveLoadMore');
     if (more) more.addEventListener('click', () => loadAndRender({ appendArchive: true }));
+    refreshReportPager();
   }
 
   function renderList() {
@@ -553,9 +446,17 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
 
   // === 渲染：详情 ===
 
+  function clearSelection() {
+    if (document.body.classList.contains('reading-dossier')) radarNavigation.back();
+    state.selectedSymbol = null;
+    state.detailToken++;
+    document.body.classList.remove('reading-dossier');
+    renderDetailEmpty();
+  }
+
   function renderDetailEmpty(msg) {
     elDetail.className = 'dossier-detail dossier-detail-empty';
-    elDetail.innerHTML = esc(msg || '选择左侧条目查看详情。');
+    elDetail.innerHTML = esc(msg || '选择候选标的查看档案。');
     elDetailHint.textContent = '';
   }
 
@@ -796,6 +697,127 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
     }
   }
 
+  // C8: Render direct trade plan (buy zone, stop-loss, suggested shares) & direct buy-to-holding form.
+  function renderRadarTradePlan(market, symbol, plan) {
+    if (!plan || plan.eligible === false) return '';
+    if (!plan.available) {
+      return '<section class="radar-trade-plan" aria-label="直接交易计划">' +
+        '<div class="rtp-head"><span class="rtp-title">直接交易计划</span>' +
+        '<span class="rtp-badge neutral">待生成价位</span></div>' +
+        '<p class="rtp-note">' + esc(plan.reason || '日线锚点不足，暂无法计算建议买区与止损位。') + '</p>' +
+      '</section>';
+    }
+    const tone = plan.executableNow ? 'positive'
+      : (plan.status === 'out_of_zone' || plan.status === 'regime_wait') ? 'amber' : 'neutral';
+    const refPrice = plan.livePrice != null ? plan.livePrice : plan.entryReference;
+    const defaultShares = plan.recommendedShares > 0 ? plan.recommendedShares : '';
+    const defaultFee = plan.estimatedFee != null ? plan.estimatedFee : 0;
+
+    let h = '<section class="radar-trade-plan" aria-label="直接交易计划">';
+    h += '<div class="rtp-head">';
+    h += '<span class="rtp-title">直接交易计划</span>';
+    h += '<span class="rtp-badge ' + tone + '">' + esc(plan.statusLabel || '预备计划') + '</span>';
+    if (plan.currentShares > 0) {
+      h += '<a class="rtp-holding-link" href="/stock?symbol=' + encodeURIComponent(symbol) + '&market=' + encodeURIComponent(market) + '">已在持仓跟踪（' + esc(plan.currentShares) + ' 股）→</a>';
+    }
+    h += '<button type="button" class="rtp-refresh-btn" id="rtpRefreshQuote" data-market="' + esc(market) + '" data-symbol="' + esc(symbol) + '">刷新报价</button>';
+    h += '</div>';
+
+    h += '<div class="rtp-metrics">';
+    h += '<div class="rtp-metric"><span class="rtp-k">建议买区（' + esc(plan.currency) + '）</span><strong class="rtp-v rtp-zone">' + esc(plan.buyLow) + ' – ' + esc(plan.buyHigh) + '</strong></div>';
+    h += '<div class="rtp-metric"><span class="rtp-k">止损保护位</span><strong class="rtp-v rtp-stop">' + esc(plan.stopLoss) + '</strong></div>';
+    h += '<div class="rtp-metric"><span class="rtp-k">建议股数</span><strong class="rtp-v">' + esc(plan.recommendedShares) + ' 股</strong></div>';
+    h += '<div class="rtp-metric"><span class="rtp-k">' + (plan.livePrice != null ? '实时参考价' : '收盘参考价') + ' / 复核位</span><strong class="rtp-v">' + esc(refPrice) + (plan.reassessment ? ' / ' + esc(plan.reassessment) : '') + '</strong></div>';
+    h += '</div>';
+
+    h += '<p class="rtp-note">' + esc(plan.statusReason || '') + (plan.sharesBasis ? '（' + esc(plan.sharesBasis) + '）' : '') + '</p>';
+
+    h += '<form class="rtp-buy-form" id="rtpBuyForm" data-market="' + esc(market) + '" data-symbol="' + esc(symbol) + '" data-stop="' + esc(plan.stopLoss) + '">';
+    h += '<label class="rtp-field"><span>成交股数</span><input type="number" id="rtpShares" min="1" step="1" required value="' + esc(defaultShares) + '" placeholder="股数"></label>';
+    h += '<label class="rtp-field"><span>成交单价（' + esc(plan.currency) + '）</span><input type="number" id="rtpPrice" min="0.001" step="any" required value="' + esc(refPrice) + '"></label>';
+    h += '<label class="rtp-field"><span>估算费用</span><input type="number" id="rtpFee" min="0" step="any" value="' + esc(defaultFee) + '"></label>';
+    h += '<button type="submit" class="detail-action-btn primary" id="rtpSubmitBuy">记录买入并归入持仓</button>';
+    h += '</form>';
+    h += '<div class="rtp-feedback" id="rtpFeedback" role="status"></div>';
+    h += '</section>';
+    return h;
+  }
+
+  function bindRadarTradePlan(market, symbol, token) {
+    const refreshBtn = document.getElementById('rtpRefreshQuote');
+    if (refreshBtn) {
+      refreshBtn.addEventListener('click', async () => {
+        refreshBtn.disabled = true;
+        refreshBtn.textContent = '刷新中…';
+        try {
+          const resp = await fetch('/radar/trade-plan?market=' + encodeURIComponent(market) + '&symbol=' + encodeURIComponent(symbol), { cache: 'no-store' });
+          const json = await resp.json();
+          if (state.detailToken !== token) return;
+          if (json.ok && json.data) {
+            const slot = document.getElementById('radarTradePlanSlot');
+            if (slot) {
+              slot.innerHTML = renderRadarTradePlan(market, symbol, json.data);
+              bindRadarTradePlan(market, symbol, token);
+            }
+          }
+        } catch {
+          if (state.detailToken === token) {
+            refreshBtn.disabled = false;
+            refreshBtn.textContent = '刷新报价';
+          }
+        }
+      });
+    }
+
+    const form = document.getElementById('rtpBuyForm');
+    if (!form) return;
+    form.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const shares = Number(document.getElementById('rtpShares')?.value);
+      const price = Number(document.getElementById('rtpPrice')?.value);
+      const fee = Number(document.getElementById('rtpFee')?.value || 0);
+      const stopLoss = Number(form.dataset.stop) || null;
+      const submitBtn = document.getElementById('rtpSubmitBuy');
+      const feedback = document.getElementById('rtpFeedback');
+      if (!Number.isInteger(shares) || shares <= 0 || !(price > 0)) {
+        if (feedback) feedback.textContent = '请填写正整数成交股数与有效成交单价。';
+        return;
+      }
+      submitBtn.disabled = true;
+      submitBtn.textContent = '正在归入持仓…';
+      if (feedback) feedback.textContent = '';
+      try {
+        const resp = await fetch('/radar/execute-buy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ market, symbol, shares, price, fee, stopLoss }),
+        });
+        const json = await resp.json();
+        if (!resp.ok || !json.ok) throw new Error(json.error || ('HTTP ' + resp.status));
+        try {
+          if (window.DashboardRecentRead?.clear) window.DashboardRecentRead.clear('radar');
+          sessionStorage.removeItem('dashboard-recent-read:radar');
+        } catch {}
+        if (feedback) {
+          feedback.className = 'rtp-feedback ok';
+          feedback.innerHTML = '已自动加入自选并归入持仓跟踪：当前持仓 <strong>' + esc(json.shares) + ' 股</strong> · 成本 <strong>' +
+            esc(Number(json.cost).toFixed(2)) + '</strong>' +
+            (json.stopLoss ? ' · 止损保护位 <strong>' + esc(json.stopLoss) + '</strong>' : '') +
+            ' · <a href="/stock?symbol=' + encodeURIComponent(symbol) + '&market=' + encodeURIComponent(market) + '">前往股票监控查看持仓 →</a>';
+        }
+        submitBtn.textContent = '已归入持仓';
+        loadAndRender().catch(() => {});
+      } catch (e) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = '记录买入并归入持仓';
+        if (feedback) {
+          feedback.className = 'rtp-feedback err';
+          feedback.textContent = '买入归入失败：' + (e.message || e);
+        }
+      }
+    });
+  }
+
   // "加入股票监控"：添加到自选并跳转到股票监控页
   function bindStockWatch() {
     const btn = document.getElementById('openStock');
@@ -992,6 +1014,8 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
     h += '<span class="overview-price ' + pctCls + '">' + esc(formatPrice(price)) + '</span>';
     if (pctStr) h += '<span class="overview-pct ' + pctCls + '">' + esc(pctStr) + '</span>';
     h += '</div>';
+    const hasProfileText = profile && (profile.summary || profile.business_lines?.length);
+    if (hasProfileText) h += '<details class="profile-reading"><summary>公司简介与业务构成</summary>';
     if (profile && profile.summary) {
       h += '<div class="overview-summary">' + esc(profile.summary) + '</div>';
     }
@@ -1002,6 +1026,7 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
       }
       h += '</div>';
     }
+    if (hasProfileText) h += '</details>';
     h += '</div>';
     return h;
   }
@@ -1308,6 +1333,9 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
     // 层1：决策卡片（候选类型 + 数据时间 + 冲突 + 研究排序，完整算式移入层3折叠）
     h += renderSymbolSummary(summary, data.score_as_of, score_breakdown, queueItem);
 
+    // C8：港美普通股直接交易计划（建议买区、止损位、建议股数、直接买入并自动归入持仓跟踪）
+    h += '<div id="radarTradePlanSlot">' + renderRadarTradePlan(market, symbol, data.trade_plan || (queueItem && queueItem.trade_plan) || null) + '</div>';
+
     // 层2：四问（为什么进入队列/已确认事实/下一步核验/什么会否定它）
     // 候选池条目传入 queue item，Q1 用真正的准入驱动而非最新 dossier
     h += renderFourQuestions(groups, summary, latestFact, queueItem);
@@ -1325,13 +1353,13 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
     h += renderCollapsibleSection('eventTimeline', '关键事件时间线', renderEventTimeline(groups), false);
     h += '</div>';
 
-    // 操作栏：加入股票监控
+    // 操作栏：仅先加入股票监控观察
     h += '<div class="detail-actions">';
-    h += '<button class="detail-action-btn primary" type="button" id="openStock" data-market="' + esc(market) + '" data-symbol="' + esc(symbol) + '">加入股票监控</button>';
+    h += '<button class="detail-action-btn ghost-btn" type="button" id="openStock" data-market="' + esc(market) + '" data-symbol="' + esc(symbol) + '">仅加入自选观察（暂不买入）</button>';
     h += '</div>';
 
-    // 附注：规则条件满足 ≠ 投资机会 ≠ 买入建议
-    h += '<div class="research-disclaimer">本档案为规则条件被满足的研究对象，不等同于已验证的投资机会，更不是买入建议。</div>';
+    // C4, C8：执行纪律说明
+    h += '<div class="research-disclaimer">港美普通股候选直接按波动锚点与账户风险预算测算建议买区、止损位与建议股数；开市下单前请确认实时报价仍在建议买区内，离开买区即放弃，记录买入后将自动加入自选并归入持仓跟踪。</div>';
 
     elDetail.innerHTML = h;
 
@@ -1341,7 +1369,8 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
     // 绑定资产审计按钮（阶段 C）
     bindAssetAudit(token);
 
-    // 绑定"加入股票监控"按钮
+    // 绑定直接交易计划与"加入股票监控"按钮
+    bindRadarTradePlan(market, symbol, token);
     bindStockWatch();
 
     // 异步加载公司简介（防串台：token 不匹配则丢弃）
@@ -1426,36 +1455,31 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
     const body = details.querySelector('.evidence-body');
     if (!body) return;
     if (v2KlineChart) { v2KlineChart.dispose(); v2KlineChart = null; }
-    fetchKline(market, symbol, KLINE_REQUEST_DAYS).then((data) => {
-      if (state.detailToken !== token) return; // 防串台
-      const bars = data && Array.isArray(data.bars) ? data.bars : [];
-      const lastDate = bars.length > 0 ? bars[bars.length - 1].date : '';
-      const asOfText = lastDate ? '（数据截至 ' + lastDate + '）' : '';
-      if (bars.length === 0) {
-        body.innerHTML = '<div class="observation-empty">暂无日 K 数据' + asOfText + '</div>';
-        return;
-      }
-      if (bars.length < KLINE_MIN_BARS) {
-        body.innerHTML = '<div class="observation-empty">历史日线不足 ' + bars.length + '/' + KLINE_REQUEST_DAYS + asOfText + '，无法绘制趋势图</div>';
-        return;
-      }
-      // 数据就绪：details 已展开则立即渲染；否则占位提示，监听 toggle 首次展开时渲染
-      if (details.open) {
-        renderKlineChart(body, bars, token);
-      } else {
-        body.innerHTML = '<div class="observation-empty">日 K 数据已就绪' + asOfText + '，展开查看</div>';
-        const onToggle = () => {
-          if (details.open) {
-            details.removeEventListener('toggle', onToggle);
-            renderKlineChart(body, bars, token);
-          }
-        };
-        details.addEventListener('toggle', onToggle);
-      }
-    }).catch(() => {
-      if (state.detailToken !== token) return; // 防串台
-      body.innerHTML = '<div class="observation-empty">日 K 数据加载失败</div>';
-    });
+    let loading = false;
+    async function showChart() {
+      if (!details.open || loading || state.detailToken !== token) return;
+      loading = true;
+      body.textContent = '正在读取日 K…';
+      try {
+        const data = await fetchKline(market, symbol, KLINE_REQUEST_DAYS);
+        if (state.detailToken !== token) return;
+        const bars = data?.bars || [];
+        if (bars.length < KLINE_MIN_BARS) {
+          body.textContent = bars.length ? '历史日线不足 ' + bars.length + '/' + KLINE_MIN_BARS : '暂无日 K 数据';
+          details.removeEventListener('toggle', showChart);
+          return;
+        }
+        await DashboardCharts.load();
+        if (details.open && state.detailToken === token) {
+          renderKlineChart(body, bars, token);
+          details.removeEventListener('toggle', showChart);
+        }
+      } catch {
+        if (state.detailToken === token) body.textContent = '日 K 加载失败，可重新展开重试';
+      } finally { loading = false; }
+    }
+    details.addEventListener('toggle', showChart);
+    void showChart();
   }
 
   // 完整档案下钻：原地展开/收起
@@ -1489,8 +1513,9 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
     state.detailToken++;
     const token = state.detailToken;
     elList.querySelectorAll('.symbol-card').forEach((card) => {
-      card.classList.toggle('active',
-        card.dataset.market === market && card.dataset.symbol === symbol);
+      const selected = card.dataset.market === market && card.dataset.symbol === symbol;
+      card.classList.toggle('active', selected);
+      card.setAttribute('aria-current', String(selected));
     });
     renderDetailEmpty('加载中...');
     try {
@@ -1503,26 +1528,38 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
     }
   }
 
+  function renderQueue(data) {
+    state.items = data.items || [];
+    state.queueAsOf = data.queue_as_of || null;
+    state.queueTotal = data.total != null ? data.total : state.items.length;
+    state.queueBuckets = data.buckets || null;
+    state.totalArchive = null;
+    $('listStatus').textContent = '';
+    renderList();
+  }
+
   async function loadAndRender({ appendArchive = false } = {}) {
     const reqId = loadGuard.next();
     state.loading = true;
     elStatus.textContent = '加载中...';
-    if (!appendArchive) elList.innerHTML = '<div class="dossier-empty">正在加载...</div>';
+    const queryKey = JSON.stringify(['discovery-v1', state.market, state.search]);
+    const recent = state.tab === 'queue' ? DashboardRecentRead.read('radar', queryKey) : null;
+    cachedQueue = Boolean(recent);
+    if (recent) {
+      renderQueue(recent.data);
+      $('listStatus').textContent = DashboardRecentRead.label(recent) + ' · 正在核对最新候选';
+      elList.querySelectorAll('.dismiss-btn').forEach(button => { button.disabled=true; });
+    } else if (!appendArchive) elList.innerHTML = '<div class="dossier-empty">正在加载...</div>';
     try {
       if (state.tab === 'queue') {
         // 机会候选池：服务端分桶 API（搜索同样走服务端，覆盖整个候选池）
         const data = await fetchResearchQueue(state.market, state.search);
         if (!loadGuard.isLatest(reqId)) return;
-        state.items = data.items || [];
-        state.queueAsOf = data.queue_as_of || null;
-        state.queueTotal = data.total != null ? data.total : state.items.length;
-        state.queueBuckets = data.buckets || null;
-        state.totalArchive = null;
-        $('listStatus').textContent = '';
-        renderList();
-        if (state.selectedSymbol == null && state.items.length > 0) {
-          // 服务端已排好序（risk → cross_confirm → new_signal 市场轮转），直接取首条
-          void selectSymbol(state.items[0].market, state.items[0].symbol);
+        cachedQueue = false;
+        renderQueue(data);
+        DashboardRecentRead.save('radar', queryKey, data);
+        if (!document.body.classList.contains('reading-dossier') && state.selectedSymbol && !state.items.some(x => x.market === state.selectedSymbol.market && x.symbol === state.selectedSymbol.symbol)) {
+          clearSelection();
         }
         const asOfText = formatQueueAsOf(state.queueAsOf);
         // 显示"显示 X / 总 Y"，让用户看到截断与池规模
@@ -1554,17 +1591,12 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
         state.totalArchive = Number(data.meta.total || 0);
         state.archiveMeta = { offset: Number(data.meta.offset || 0), limit: Number(data.meta.limit || 100), hasMore: data.meta.has_more === true };
         renderList();
-        if (!appendArchive && state.selectedSymbol == null && data.items.length > 0) {
-          const sorted = sortSymbols(data.items);
-          if (sorted.length > 0) {
-            void selectSymbol(sorted[0].market, sorted[0].symbol);
-          }
-        }
         elStatus.textContent = '档案库共 ' + state.totalArchive + ' 条' + (state.search.trim() ? ' · 已按搜索词筛选' : '');
       }
     } catch (e) {
       if (!loadGuard.isLatest(reqId)) return;
-      elList.innerHTML = '<div class="dossier-empty">加载失败：' + esc(e.message) + '</div>';
+      if (recent) $('listStatus').textContent = DashboardRecentRead.label(recent) + ' · 最新候选读取失败';
+      else elList.innerHTML = '<div class="dossier-empty">加载失败：' + esc(e.message) + '</div>';
       elStatus.textContent = '加载失败';
     } finally {
       if (loadGuard.isLatest(reqId)) state.loading = false;
@@ -1597,21 +1629,27 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
     return parts.length > 0 ? '数据 ' + parts.join(' · ') : '';
   }
 
-  function switchTab(tab) {
+  function switchTab(tab, search = '') {
     if (state.tab === tab) return;
     state.tab = tab;
-    state.selectedSymbol = null;
-    elSearch.value = '';
-    state.search = '';
-    renderDetailEmpty();
+    const cn = document.querySelector('.market-btn[data-market="CN"]');
+    cn.hidden = tab === 'queue';
+    if (tab === 'queue' && state.market === 'CN') {
+      state.market = '';
+      document.querySelectorAll('.market-btn').forEach(btn => btn.classList.toggle('active', !btn.dataset.market));
+    }
+    clearSelection();
+    elSearch.value = search;
+    state.search = search;
 
     document.querySelectorAll('.radar-tab').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.tab === tab);
+      btn.setAttribute('aria-selected', String(btn.dataset.tab === tab));
     });
 
     if (tab === 'queue') {
       elPanelTitle.textContent = '机会候选池';
-      elPanelHint.textContent = '标的持续保留直到趋势变差或手动排除 · 研究排序分非收益预测';
+      elPanelHint.textContent = '港美股自选外 · 价格信号与公司事件或基本面共同确认';
     } else if (tab === 'dismissed') {
       elPanelTitle.textContent = '已隐藏标的';
       elPanelHint.textContent = '管理已标记"不感兴趣"的标的 · 可恢复到候选池';
@@ -1636,8 +1674,7 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
       document.querySelectorAll('.market-btn').forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
       state.market = btn.dataset.market;
-      state.selectedSymbol = null;
-      renderDetailEmpty();
+      clearSelection();
       loadAndRender();
     });
   });
@@ -1653,6 +1690,35 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
       else loadAndRender();
     }, 250);
   });
+
+  const backToCandidates = $('backToCandidates');
+  let listScroll = 0;
+  function refreshReportPager() {
+    if (!document.body.classList.contains('reading-dossier') || !state.selectedSymbol) return;
+    const {market,symbol} = state.selectedSymbol;
+    DashboardRecordPager(backToCandidates, () => elList.querySelectorAll('.symbol-card'), row => row.dataset.market === market && row.dataset.symbol === symbol);
+  }
+  function openReport(market,symbol) {
+    if (!document.body.classList.contains('reading-dossier')) listScroll = scrollY;
+    radarNavigation.enter(market,symbol);
+    void selectSymbol(market,symbol);
+    preserveSplitRow(elList.querySelector('.symbol-card.active'), () => document.body.classList.add('reading-dossier'));
+    refreshReportPager();
+    const panel = backToCandidates.closest('.dossier-detail-panel');
+    panel.scrollTop = 0;
+    if (!DashboardSplitView.matches || !elList.contains(document.activeElement) || document.activeElement.matches(':focus-visible')) backToCandidates.focus({preventScroll:true});
+    if (!DashboardSplitView.matches) panel.scrollIntoView({block:'start'});
+  }
+  const radarNavigation = DashboardDetailHistory(['reportMarket','reportSymbol'],openReport, () => {
+    if (!document.body.classList.contains('reading-dossier')) return;
+    document.body.classList.remove('reading-dossier');
+    const target = elList.querySelector('.symbol-card.active') || elSearch;
+    target.focus({ preventScroll: true });
+    if (!DashboardSplitView.matches) window.scrollTo(0,listScroll);
+    target.scrollIntoView({block:'nearest'});
+  });
+
+  backToCandidates.addEventListener('click',radarNavigation.back);
 
   // 列表点击（事件委托）
   elList.addEventListener('click', (e) => {
@@ -1672,20 +1738,21 @@ import { describeCompanyProfileFailure } from './radar-company-profile.mjs';
     }
     const symbolCard = e.target.closest('.symbol-card');
     if (symbolCard) {
-      selectSymbol(symbolCard.dataset.market, symbolCard.dataset.symbol);
+      openReport(symbolCard.dataset.market,symbolCard.dataset.symbol);
     }
   });
-  elList.addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter' && e.key !== ' ') return;
-    const symbolCard = e.target.closest('.symbol-card');
-    if (symbolCard) {
-      e.preventDefault();
-      selectSymbol(symbolCard.dataset.market, symbolCard.dataset.symbol);
-    }
-  });
-
   // === 初始化 ===
   elPanelTitle.textContent = '机会候选池';
-  elPanelHint.textContent = '标的持续保留直到趋势变差或手动排除 · 研究排序分非收益预测';
-  loadAndRender();
+  elPanelHint.textContent = '港美股自选外 · 价格信号与公司事件或基本面共同确认';
+  const initial = new URLSearchParams(location.search);
+  if (initial.get('tab') === 'archive') {
+    const market = initial.get('market') || '';
+    const matching = [...document.querySelectorAll('.market-btn')].find(btn => btn.dataset.market === market);
+    if (matching) {
+      state.market = market;
+      document.querySelectorAll('.market-btn').forEach(btn => btn.classList.toggle('active', btn === matching));
+    }
+    switchTab('archive', (initial.get('search') || '').trim());
+  } else loadAndRender();
+  if (initial.get('reportMarket') && initial.get('reportSymbol')) openReport(initial.get('reportMarket'),initial.get('reportSymbol'));
 })();

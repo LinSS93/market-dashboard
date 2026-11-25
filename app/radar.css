@@ -146,7 +146,7 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
   transition: background .12s;
 }
 .radar-workspace .dossier-card:hover { background: var(--ws-surface-soft); }
-.radar-workspace .dossier-card.active { background: var(--ws-blue-soft); border-left: 3px solid var(--ws-blue); padding-left: 11px; }
+.radar-workspace .dossier-card.active { background: var(--ws-blue-soft); padding-left: 11px; }
 
 .radar-workspace .dossier-card-head {
   display: flex;
@@ -250,7 +250,6 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
 .radar-workspace .source-ref {
   display: block;
   padding: var(--ws-space-3);
-  border-left: 3px solid var(--ws-blue);
   background: var(--ws-surface-soft);
   border-radius: 0 var(--ws-radius-sm) var(--ws-radius-sm) 0;
   margin-bottom: var(--ws-space-2);
@@ -466,8 +465,8 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
   border-radius: var(--ws-radius-sm);
   background: var(--ws-surface-soft);
 }
-.radar-workspace .condition-item.confirm { border-left: 3px solid var(--ws-blue); }
-.radar-workspace .condition-item.invalid { border-left: 3px solid var(--ws-red); }
+
+
 .radar-workspace .condition-status {
   flex-shrink: 0;
   font-size: var(--ws-font-xs);
@@ -596,7 +595,6 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
   padding: var(--ws-space-2) var(--ws-space-3);
   margin-bottom: var(--ws-space-3);
   background: var(--ws-surface-tint);
-  border-left: 3px solid var(--ws-line);
   border-radius: var(--ws-radius-sm);
 }
 .radar-workspace .channel-group-head .channel-badge {
@@ -702,12 +700,11 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
   margin-bottom: var(--ws-space-4);
   padding: var(--ws-space-3) var(--ws-space-4);
   border-radius: var(--ws-radius);
-  border-left: 4px solid var(--ws-line);
   background: var(--ws-surface-soft);
 }
-.radar-workspace .symbol-summary.action-positive { border-left-color: var(--ws-green); background: var(--ws-green-soft); }
-.radar-workspace .symbol-summary.action-watch { border-left-color: var(--ws-blue); background: var(--ws-blue-soft); }
-.radar-workspace .symbol-summary.action-risk { border-left-color: var(--ws-red); background: var(--ws-red-soft); }
+.radar-workspace .symbol-summary.action-positive { background: var(--ws-green-soft); }
+.radar-workspace .symbol-summary.action-watch { background: var(--ws-blue-soft); }
+.radar-workspace .symbol-summary.action-risk { background: var(--ws-red-soft); }
 
 .radar-workspace .summary-head {
   display: flex;
@@ -780,9 +777,9 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
 }
 
 /* === 列表卡片：决策看板版 === */
-.radar-workspace .symbol-card.action-positive { border-left: 3px solid var(--ws-green); }
-.radar-workspace .symbol-card.action-watch { border-left: 3px solid var(--ws-blue); }
-.radar-workspace .symbol-card.action-risk { border-left: 3px solid var(--ws-red); }
+
+
+
 
 .radar-workspace .symbol-card-row1 {
   display: flex;
@@ -856,7 +853,6 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
   margin-bottom: var(--ws-space-4);
   padding:14px 16px;
   border:1px solid var(--ws-line);
-  border-left:4px solid var(--ws-blue);
   border-radius:var(--ws-radius-sm);
   background:var(--ws-canvas);
 }
@@ -976,7 +972,6 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
   padding: var(--ws-space-2) var(--ws-space-3);
   background: var(--ws-surface-soft);
   border-radius: var(--ws-radius-sm);
-  border-left: 3px solid var(--ws-line);
   flex-wrap: wrap;
 }
 .radar-workspace .matrix-score {
@@ -1028,7 +1023,6 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
   gap: var(--ws-space-2);
   padding: var(--ws-space-1) var(--ws-space-2);
   font-size: var(--ws-font-sm);
-  border-left: 2px solid var(--ws-line-soft);
 }
 .radar-workspace .event-time {
   font-size: var(--ws-font-xs);
@@ -1104,8 +1098,11 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
   border-radius: var(--ws-radius-sm);
 }
 
+#backToCandidates { display:none; }
 /* === 响应式 === */
 @media (max-width: 900px) {
+  #backToCandidates { display:inline-flex; min-height:40px; margin-left:auto; }
+  .radar-workspace .dossier-detail-panel { scroll-margin-top:calc(var(--ws-header-height) + 8px); }
   body.radar-workspace { height: auto; overflow: auto; }
   .radar-workspace .radar-wrap { flex: none; overflow: visible; }
   .radar-workspace .radar-layout { flex-direction: column; flex: none; overflow: visible; }
@@ -1115,6 +1112,10 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
   .radar-workspace .dossier-detail { flex: none; overflow: visible; max-height: none; }
   .radar-workspace .dossier-search { width: 100%; }
   .radar-workspace .opp-metrics { grid-template-columns: 1fr; }
+  /* 窄屏 panel-head 纵向堆叠：h2 保持自然宽度不换行，长 hint 独占下一行 */
+  .radar-workspace .panel-head { flex-wrap: wrap; row-gap: 2px; }
+  .radar-workspace .panel-head h2 { flex: 0 0 auto; white-space: nowrap; }
+  .radar-workspace .panel-head .hint { flex: 1 1 100%; }
 }
 
 /* === 信息架构重构：今日研究队列 + 精简卡片 + 四问 + 折叠证据区 === */
@@ -1159,13 +1160,13 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
    - cross_confirm：白底 + 绿色左色标（多通道共振）
    - new_signal：白底 + 蓝色左色标（待确认信号）
    - 选中：蓝底覆盖 bucket 背景 */
-.radar-workspace .symbol-card.bucket-risk_review { background: var(--ws-surface); border-left: 3px solid var(--ws-red); }
-.radar-workspace .symbol-card.bucket-cross_confirm { background: var(--ws-surface); border-left: 3px solid var(--ws-green); }
-.radar-workspace .symbol-card.bucket-new_signal { background: var(--ws-surface); border-left: 3px solid var(--ws-blue); }
-.radar-workspace .symbol-card.bucket-audit_pending { background: var(--ws-surface); border-left: 3px solid var(--ws-amber); }
-.radar-workspace .symbol-card.bucket-unscored { background: var(--ws-surface); border-left: 3px solid var(--ws-muted-soft); }
+.radar-workspace .symbol-card.bucket-risk_review { background: var(--ws-surface); }
+.radar-workspace .symbol-card.bucket-cross_confirm { background: var(--ws-surface); }
+.radar-workspace .symbol-card.bucket-new_signal { background: var(--ws-surface); }
+.radar-workspace .symbol-card.bucket-audit_pending { background: var(--ws-surface); }
+.radar-workspace .symbol-card.bucket-unscored { background: var(--ws-surface); }
 /* 选中卡片：蓝底覆盖 bucket 背景，突出当前选中项 */
-.radar-workspace .symbol-card.active { background: var(--ws-blue-soft) !important; border-left: 3px solid var(--ws-blue) !important; }
+.radar-workspace .record-row.symbol-card.active { background: var(--ws-blue-soft); }
 
 /* 资产待审计标签（卡片 meta 行，提示数据可信度） */
 .radar-workspace .audit-pending-tag {
@@ -1215,7 +1216,6 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
   padding: 6px 12px;
   margin: 4px 0 8px;
   background: var(--ws-amber-soft, #fff8e1);
-  border-left: 3px solid var(--ws-amber, #f5a623);
   border-radius: var(--ws-radius-sm, 4px);
 }
 .radar-workspace .audit-bar-label {
@@ -1399,6 +1399,135 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
   border-top: 1px solid var(--ws-line-soft);
 }
 
+/* C8: 机会雷达直接交易计划模块（遵循单阅读面板与中性边框规范，无边缘强调色条） */
+.radar-workspace .radar-trade-plan {
+  margin: var(--ws-space-3) 0 var(--ws-space-4);
+  padding: 14px 16px;
+  background: var(--ws-surface-soft);
+  border: 1px solid var(--ws-line);
+  border-radius: var(--ws-radius);
+}
+.radar-workspace .rtp-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.radar-workspace .rtp-title {
+  font-size: var(--ws-font-md);
+  font-weight: 700;
+  color: var(--ws-ink);
+}
+.radar-workspace .rtp-badge {
+  font-size: var(--ws-font-xs);
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--ws-radius-sm);
+}
+.radar-workspace .rtp-badge.positive { color: var(--ws-green); background: var(--ws-green-soft); }
+.radar-workspace .rtp-badge.amber { color: var(--ws-amber); background: var(--ws-amber-soft); }
+.radar-workspace .rtp-badge.neutral { color: var(--ws-muted); background: var(--ws-surface-tint); }
+.radar-workspace .rtp-holding-link {
+  font-size: var(--ws-font-xs);
+  font-weight: 600;
+  color: var(--ws-blue);
+  text-decoration: none;
+}
+.radar-workspace .rtp-holding-link:hover { text-decoration: underline; }
+.radar-workspace .rtp-refresh-btn {
+  margin-left: auto;
+  padding: 4px 10px;
+  border: 1px solid var(--ws-line-strong);
+  border-radius: var(--ws-radius-sm);
+  background: var(--ws-surface);
+  color: var(--ws-ink-soft);
+  font-size: var(--ws-font-xs);
+  cursor: pointer;
+}
+.radar-workspace .rtp-refresh-btn:hover:not(:disabled) {
+  background: var(--ws-blue-soft);
+  color: var(--ws-blue);
+  border-color: var(--ws-blue);
+}
+.radar-workspace .rtp-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+  gap: 10px;
+  padding: 10px 0;
+  border-top: 1px solid var(--ws-line-soft);
+  border-bottom: 1px solid var(--ws-line-soft);
+}
+.radar-workspace .rtp-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.radar-workspace .rtp-k {
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+}
+.radar-workspace .rtp-v {
+  font-size: var(--ws-font-lg);
+  font-weight: 700;
+  color: var(--ws-ink);
+  font-variant-numeric: tabular-nums;
+}
+.radar-workspace .rtp-v.rtp-zone { color: var(--ws-green); }
+.radar-workspace .rtp-v.rtp-stop { color: var(--ws-red); }
+.radar-workspace .rtp-note {
+  margin: 10px 0 12px;
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+  line-height: 1.55;
+}
+.radar-workspace .rtp-buy-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.radar-workspace .rtp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--ws-font-xs);
+  color: var(--ws-muted);
+}
+.radar-workspace .rtp-field input {
+  width: 112px;
+  height: 34px;
+  padding: 4px 8px;
+  border: 1px solid var(--ws-line-strong);
+  border-radius: var(--ws-radius-sm);
+  background: var(--ws-surface);
+  color: var(--ws-ink);
+  font-size: var(--ws-font-sm);
+  font-variant-numeric: tabular-nums;
+}
+.radar-workspace .rtp-field input:focus {
+  outline: none;
+  border-color: var(--ws-blue);
+}
+.radar-workspace .detail-action-btn.ghost-btn {
+  background: var(--ws-surface);
+  color: var(--ws-ink-soft);
+  border-color: var(--ws-line-strong);
+}
+.radar-workspace .detail-action-btn.ghost-btn:hover:not(:disabled) {
+  background: var(--ws-blue-soft);
+  color: var(--ws-blue);
+  border-color: var(--ws-blue);
+}
+.radar-workspace .rtp-feedback {
+  margin-top: 8px;
+  font-size: var(--ws-font-sm);
+  line-height: 1.5;
+}
+.radar-workspace .rtp-feedback.ok { color: var(--ws-green); }
+.radar-workspace .rtp-feedback.err { color: var(--ws-red); }
+.radar-workspace .rtp-feedback a { color: var(--ws-blue); font-weight: 600; }
+
 /* 详情页操作栏：加入股票监控 */
 .radar-workspace .detail-actions {
   display: flex;
@@ -1433,7 +1562,6 @@ body.radar-workspace { background:var(--ws-canvas); color:var(--ws-ink); font-si
   line-height: 1.6;
   background: var(--ws-surface-soft);
   border-radius: var(--ws-radius-sm);
-  border-left: 3px solid var(--ws-orange, #ea580c);
 }
 
 /* 移除旧 sparkline 相关样式 */

@@ -3,22 +3,17 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script defer src="/assets/workspace-nav.js"></script>
 <title>实验室 · Market Dashboard</title>
 <link rel="stylesheet" href="shared.css">
 <link rel="stylesheet" href="workspace-theme.css">
 <link rel="stylesheet" href="scenario-research.css">
+<script src="dashboard-shared.js" defer></script>
 <script src="scenario-research.js" defer></script>
 </head>
 <body class="workspace-app scenario-research-app">
-<header>
-  <h1><a href="/">Market Dashboard</a></h1>
-  <nav>
-    <a href="/stock">股票监控</a>
-    <a href="/tracker">杠杆 ETF 追踪</a>
-    <a href="/radar">机会雷达</a>
-    <a href="/lab" class="ac">实验室</a>
-    <a href="/control">控制中心</a>
-  </nav>
+<header class="workspace-header">
+  <h1><a href="/" aria-label="Market Dashboard 首页">Market Dashboard</a></h1>
   <div class="header-status-area workspace-header-status">
     <span class="conn-indicator" id="researchConn" title="实验数据连接状态"></span>
     <span class="hint" id="researchStatus">加载实验室账本…</span>
@@ -28,28 +23,32 @@
 <main class="research-wrap">
   <section class="research-hero">
     <div>
-      <span class="research-kicker">Laboratory · V1d</span>
       <h2>实验室账本</h2>
       <p>记录盘后冻结的条件、后续路径与模型效果评估。成熟前不显示胜率；所有统计仅用于实验与复盘，不改变正式交易动作。</p>
     </div>
     <button id="researchRefresh" class="btn" type="button">刷新数据</button>
   </section>
 
+  <div class="board-segment research-views" role="group" aria-label="研究内容">
+    <button type="button" data-research-view="ledger" aria-pressed="true">样本账本</button>
+    <button type="button" data-research-view="models" aria-pressed="false">模型评估</button>
+  </div>
   <section class="research-filters card" aria-label="实验室筛选">
     <label>市场
       <select id="researchMarket"><option value="">全部市场</option><option value="US">美股</option><option value="HK">港股</option><option value="CN">A 股</option><option value="KR">韩股</option></select>
     </label>
     <label>情景类型
-      <select id="researchKind"><option value="">全部情景</option><option value="waiting_confirmation">等待确认</option><option value="active_long">持有/进场</option><option value="risk_rebuild">风险重建</option></select>
+      <select id="researchKind"><option value="">全部情景</option><option value="waiting_confirmation">等待确认</option><option value="active_long">持有/进场</option><option value="risk_rebuild">风险重建</option><option value="insufficient">数据不足</option></select>
     </label>
     <label>机会阶段
       <select id="researchState"><option value="">全部阶段</option><option value="DATA_UNAVAILABLE">数据不足</option><option value="NO_SETUP">等待机会</option><option value="FORMING">机会形成中</option><option value="AWAIT_CONFIRMATION">等待确认</option><option value="BLOCKED">看多受阻</option><option value="READY">可以执行</option><option value="RISK_OFF">风险回避</option></select>
     </label>
+    <button type="button" class="btn ghost" id="resetResearchFilters" hidden>清除筛选</button>
     <span id="researchFilterMeta" class="muted"></span>
   </section>
 
   <section class="research-section-head" aria-labelledby="onlineSampleTitle">
-    <div><span class="research-kicker">Live Validation</span><h3 id="onlineSampleTitle">线上实验样本</h3></div>
+    <div><h3 id="onlineSampleTitle">线上实验样本</h3></div>
     <p>冻结、结算和覆盖数据只用于验证信号与策略，不构成概率或交易指令。</p>
   </section>
   <section class="research-summary" aria-label="线上实验样本摘要">
@@ -57,55 +56,55 @@
     <article class="research-stat"><span>已成熟</span><strong id="rsMature">—</strong><small>可复盘，仍非预测概率</small></article>
     <article class="research-stat"><span>待结算</span><strong id="rsPending">—</strong><small>后续日 K 尚不足</small></article>
     <article class="research-stat"><span>采集健康</span><strong id="rsCoverage">—</strong><small id="rsCoverageNote">按市场/交易日检查</small></article>
-    <article class="research-stat"><span>模型评估</span><strong id="rsDrift">—</strong><small id="rsDriftNote">基于真实冻结样本</small></article>
+    <article class="research-stat" data-model-stat hidden><span>模型评估</span><strong id="rsDrift">—</strong><small id="rsDriftNote">基于真实冻结样本</small></article>
   </section>
 
-  <section class="research-grid">
+  <section class="research-grid" id="ledgerGrid">
     <article class="research-panel card research-panel-wide">
-      <div class="research-panel-head"><div><span class="research-kicker">Collection Health</span><h3>实验采集覆盖</h3></div><span id="coverageMeta" class="muted"></span></div>
-      <div id="coverageRows" class="research-empty">读取采集运行记录…</div>
-    </article>
-
-    <article id="researchDriftPanel" class="research-panel card research-panel-wide">
-      <div class="research-panel-head"><div><span class="research-kicker">Model Evaluation</span><h3>信号效果与漂移</h3></div><span id="driftMeta" class="muted">读取冻结样本评估…</span></div>
-      <div id="driftRows" class="research-empty">读取模型评估…</div>
-      <p class="research-note">正式漂移只比较当前引擎的真实冻结样本。冷启动观察和历史重放参考均不构成有效性结论，不会自动调参、改写正式信号或改变仓位。</p>
-    </article>
-
-    <article id="researchRankingPanel" class="research-panel card research-panel-wide">
-      <div class="research-panel-head"><div><span class="research-kicker">Research Diagnostics</span><h3>研究因子诊断</h3></div><span id="rankingMeta" class="muted">读取当前观察池…</span></div>
-      <div id="rankingRows" class="research-empty">读取技术强度、可靠度与执行质量分布…</div>
-      <p class="research-note">这里展示当前观察池的横截面中位数和四分位区间，用于检查研究口径是否压缩或漂移；不显示综合百分制，不参与动作或仓位。</p>
-    </article>
-
-    <article class="research-panel card research-panel-wide">
-      <div class="research-panel-head"><div><span class="research-kicker">Signal Profiles</span><h3>三人格完整策略验证</h3></div><span id="profileMeta" class="muted">读取独立影子样本…</span></div>
-      <div id="profileRows" class="research-empty">读取人格样本与结算…</div>
-      <p class="research-note">三套人格分别冻结最终动作、仓位比例、关键价位和后续路径。均衡决策仍是唯一正式动作来源；另外两套只做完整策略影子验证。样本达到门槛后仅显示描述性统计，不构成预测或投资建议。</p>
-    </article>
-
-    <article class="research-panel card research-panel-wide">
-      <div class="research-panel-head"><div><span class="research-kicker">Cohorts</span><h3>成熟路径分组</h3></div><span class="muted">不按小样本排名</span></div>
+      <div class="research-panel-head"><div><h3>成熟路径分组</h3></div><span class="muted">不按小样本排名</span></div>
       <div class="research-scroll"><table class="research-table"><thead><tr><th>市场</th><th>情景</th><th>状态</th><th>观察</th><th>成熟 / 待结算</th><th>已记录结局</th><th>最近交易日</th></tr></thead><tbody id="cohortRows"></tbody></table></div>
       <p class="research-note">统计显示的是已冻结条件之后的事实；相邻交易日与同一股票的记录可能高度相关，因此不能把行数当成独立预测次数。</p>
     </article>
 
     <article class="research-panel card">
-      <div class="research-panel-head"><div><span class="research-kicker">Timeline</span><h3>每日积累</h3></div></div>
+      <div class="research-panel-head"><div><h3>每日积累</h3></div></div>
       <div id="dailyRows" class="timeline-list"></div>
     </article>
 
     <article class="research-panel card">
-      <div class="research-panel-head"><div><span class="research-kicker">Recent</span><h3>最近冻结</h3></div></div>
+      <div class="research-panel-head"><div><h3 id="recentSamples" tabindex="-1">最近冻结</h3></div></div>
       <div class="research-scroll"><table class="research-table compact"><thead><tr><th>日期</th><th>标的</th><th>情景</th><th>当前结算</th></tr></thead><tbody id="recentRows"></tbody></table></div>
     </article>
+    <details class="research-panel card research-panel-wide">
+      <summary><strong>实验采集覆盖</strong> <span id="coverageMeta" class="muted"></span></summary>
+      <div id="coverageRows" class="research-empty">读取采集运行记录…</div>
+    </details>
   </section>
 
-  <section class="research-method card">
-    <span class="research-kicker">Method Boundary</span>
-    <h3>实验边界</h3>
-    <ul id="methodRows"><li>读取方法说明中…</li></ul>
+  <section class="research-grid" id="modelsGrid" hidden>
+    <article id="researchDriftPanel" class="research-panel card research-panel-wide">
+      <div class="research-panel-head"><div><h3>信号效果与漂移</h3></div><span id="driftMeta" class="muted">读取冻结样本评估…</span></div>
+      <div id="driftRows" class="research-empty">读取模型评估…</div>
+      <p class="research-note">正式漂移只比较当前引擎的真实冻结样本。冷启动观察和历史重放参考均不构成有效性结论，不会自动调参、改写正式信号或改变仓位。</p>
+    </article>
+
+    <details id="researchRankingPanel" class="research-panel card research-panel-wide">
+      <summary><strong>研究因子诊断</strong> <span id="rankingMeta" class="muted">展开查看当前观察池</span></summary>
+      <div id="rankingRows" class="research-empty">读取技术强度、可靠度与执行质量分布…</div>
+      <p class="research-note">这里展示当前观察池的横截面中位数和四分位区间，用于检查研究口径是否压缩或漂移；不显示综合百分制，不参与动作或仓位。</p>
+    </details>
+
+    <article class="research-panel card research-panel-wide">
+      <div class="research-panel-head"><div><h3>三人格完整策略验证</h3></div><span id="profileMeta" class="muted">读取独立影子样本…</span></div>
+      <div id="profileRows" class="research-empty">读取人格样本与结算…</div>
+      <p class="research-note">三套人格分别冻结最终动作、仓位比例、关键价位和后续路径。均衡决策仍是唯一正式动作来源；另外两套只做完整策略影子验证。样本达到门槛后仅显示描述性统计，不构成预测或投资建议。</p>
+    </article>
+
   </section>
+  <details class="research-method card">
+    <summary>实验边界</summary>
+    <ul id="methodRows"><li>读取方法说明中…</li></ul>
+  </details>
 </main>
 </body>
 </html>

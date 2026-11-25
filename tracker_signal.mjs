@@ -195,7 +195,9 @@ export function evaluateTrackerSignal(input={}) {
   // 日期对齐校验：即使调用方传入 navQuality='cross_market_exact'/'cross_market_approx'，
   // 若 ETF 与正股实时报价日期不一致，仍强制降级为 date_mismatch。
   // 这是一道独立防线，与 computeNav 内部的校验互补，确保 evaluateTrackerSignal 独立调用时也安全。
-  const navQuality = !datesAligned ? 'date_mismatch' : (input.navQuality || 'aligned');
+  // 例外：navQuality='official' 的 NAV 与溢价均来自港交所披露的收盘数据，不依赖正股实时报价日期；
+  // 正股报价陈旧由 underlyingStale / cross_market_gap_risk 单独提示，不因此丢弃官方口径。
+  const navQuality = (!datesAligned && input.navQuality !== 'official') ? 'date_mismatch' : (input.navQuality || 'aligned');
   const underlying = resolveUnderlyingDecision(input.underlyingAnalysis, input.underlyingMarket);
   const action = underlying.action;
   const bullish = ['OPEN','ADD','BUY','STRONG_BUY'].includes(action);
@@ -256,7 +258,8 @@ export function evaluateTrackerSignal(input={}) {
   // drawdownKill 去掉 avoid||exit 前提：ETF 单边暴跌时即便底层仍 bullish 也要止损
   const drawdownKill = leveraged && hasPosition && Number.isFinite(positionDrawdown) && positionDrawdown <= -drawdownKillThreshold;
   const drawdownKillIsTrim = drawdownKill && bullish && !avoid && !exit;
-  const navEntrySafe = ['aligned','cross_market_exact'].includes(navQuality);
+  // official：NAV/溢价为交易所披露的收盘官方值，可信度不低于 aligned，允许作为入场依据
+  const navEntrySafe = ['aligned','cross_market_exact','official'].includes(navQuality);
   const liquidityStatus = String(input.liquidityStatus || 'unknown');
   const lowLiquidity = liquidityStatus === 'low';
 

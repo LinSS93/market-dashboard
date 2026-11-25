@@ -19,10 +19,16 @@ const stockHtml = read('app/stock.html');
 const stockCss = read('app/stock.css');
 const server = read('server.mjs');
 const stockEngine = read('stock_engine.mjs');
+const entryAlpha = read('stock_entry_alpha.mjs');
+const entryStatistics = read('stock_entry_alpha_statistics.mjs');
+const entryCli = read('scripts/audit-stock-entry-alpha.mjs');
+const entryCost = read('stock_execution_cost.mjs');
 const stockDecisionArbiter = read('stock_decision_arbiter.mjs');
 const stockDecisionPresentation = read('stock_decision_presentation.mjs');
 const stockStagePricePlan = read('stock_stage_price_plan.mjs');
 const stockSignalProfiles = read('stock_signal_profiles.mjs');
+const profileReviewCli = read('scripts/report-stock-profile-review.mjs');
+const radarIcCli = read('scripts/report-radar-cross-section-ic.mjs');
 const stockSignalContract = read('stock_signal_contract.mjs');
 const signalScoring = read('signal_scoring.mjs');
 const trackerSignal = read('tracker_signal.mjs');
@@ -31,6 +37,29 @@ const trackerClient = read('app/tracker.js');
 const boundaryDoc = read('docs/architecture-boundaries.md');
 const decisionSystemDoc = read('docs/decision-system.md');
 const signalLifecycleStart = stockEngine.indexOf('if (url.pathname === "/stock/signal-lifecycle")');
+
+assert(stockEngine.includes('freezeEntryObservations(results, now)') &&
+  stockEngine.includes("STOCK_ENTRY_ALPHA_CAPTURE_ENABLED !== '0'"),
+  'entry-alpha capture is an optional research sidecar after formal signal logging');
+const entryCapture=stockEngine.slice(stockEngine.indexOf('function freezeEntryObservations('),
+  stockEngine.indexOf('const lastExitedEntryFollowup'));
+assert(entryCapture.includes('executionAction:decision?.executionAction') &&
+  !entryCapture.includes('executionAction:log?.execution_action'),
+  'daily observation passes the current decision action separately from the preserved first log');
+assert(!entryAlpha.includes("from './stock_engine.mjs'") &&
+  !entryStatistics.includes('stock_engine.mjs') && !entryCli.includes("from '../stock_engine.mjs'") &&
+  !entryCost.includes('stock_engine.mjs') && !entryCost.includes('better-sqlite3'),
+  'read-only entry-alpha evaluation and shared costs do not import the production engine');
+assert(!server.includes("p === '/stock/entry-alpha'") &&
+  boundaryDoc.includes('## 3.9 股票监控同股时机评估边界'),
+  'entry-alpha remains offline research without a trading API');
+assert(!profileReviewCli.includes("from '../stock_engine.mjs'") && !profileReviewCli.includes('better-sqlite3')
+  && profileReviewCli.includes('/stock/scenario-research/dashboard'),
+  'profile-review CLI consumes the laboratory panel over read-only HTTP without importing the engine or opening a database');
+assert(radarIcCli.includes("{ readonly: true, fileMustExist: true }")
+  && !radarIcCli.includes("from '../stock_engine.mjs'") && !radarIcCli.includes('radar_scanner.mjs')
+  && !radarIcCli.includes('radar_query_api.mjs'),
+  'radar IC CLI opens the database read-only and never imports the production radar pipeline');
 const signalLifecycleEnd = stockEngine.indexOf('if (url.pathname === "/stock/signal-transition")', signalLifecycleStart);
 const signalLifecycleRoute = stockEngine.slice(signalLifecycleStart, signalLifecycleEnd > signalLifecycleStart ? signalLifecycleEnd : undefined);
 const currentDecisionStart = stockEngine.indexOf('function attachCurrentDecision(');
@@ -52,8 +81,12 @@ assert(!controlHtml.includes('driftPanel') && !controlClient.includes('renderDri
 assert(labHtml.includes('信号效果与漂移') && labHtml.includes('id="researchDriftPanel"') && labClient.includes('renderDrift') && stockEngine.includes('dashboard.signalDrift'), 'laboratory owns the read-only signal-drift evaluation');
 assert(!stockJs.includes('/stock/signal-drift-report') && !stockJs.includes('_signalDrift'), 'stock decision page does not fetch or present laboratory drift diagnostics');
 assert(labHtml.includes('线上实验样本') && labHtml.includes('id="researchRankingPanel"') && labClient.includes('renderResearchRanking') && stockEngine.includes('dashboard.researchRanking'), 'laboratory owns online samples and research-factor diagnostics');
-const navigationPages = ['app/land.html', 'app/stock.html', 'app/tracker.html', 'app/radar.html', 'app/control.html', 'app/scenario-research.html'];
-assert(navigationPages.every(page => { const html = read(page); return html.indexOf('href="/radar"') < html.indexOf('href="/lab"') && html.indexOf('href="/lab"') < html.indexOf('href="/control"'); }), 'every primary page places laboratory between Radar and Control Center');
+const navigationPages = ['land', 'stock', 'tracker', 'assets/rsi6', 'radar', 'macro', 'scenario-research', 'control'];
+assert(navigationPages.every(page => read(`app/${page}.html`).includes('src="/assets/workspace-nav.js"')), 'all workspaces load the shared navigation');
+const navigation = read('app/assets/workspace-nav.js');
+const boardRoutes = ['/stock', '/tracker', '/assets/rsi6.html', '/radar', '/macro', '/lab', '/control'];
+const routePositions = boardRoutes.map(route => navigation.indexOf(`['${route}',`));
+assert(routePositions.every((pos, i) => pos >= 0 && (!i || pos > routePositions[i - 1])), 'the shared navigation includes every board in workspace order');
 // 2026-09 radar v2 → radar 改名后，V2 模块占用了 V1 的部分文件名（radar_feedback /
 // radar_outcomes / radar_query_api / radar_schema / radar_scoring），V2 的反馈实验
 // 路由族 /radar/feedback/* 也与 V1 同名。V1 防回归改为特征断言：V1 独有的
@@ -73,7 +106,7 @@ assert(boundaryDoc.includes('stock_stage_price_plan.mjs') && boundaryDoc.include
 assert(server.includes("'/radar/") && server.includes('listRadarResearchQueue'), 'server exposes Radar V2 research queue endpoints instead of legacy radar page routes');
 assert(decisionSystemDoc.includes('它们不是第二套技术评分') && decisionSystemDoc.includes('不得弱化 `REDUCE/CLOSE`'), 'decision-system handover records conservative industry-risk boundaries');
 assert(labHtml.includes('机会阶段') && labHtml.includes('value="READY"') && labHtml.includes('value="RISK_OFF"') && !labHtml.includes('历史旧口径') && !labClient.includes("PROBE:'历史·试仓'"), 'laboratory exposes only the current opportunity-stage contract');
-assert(stockEngine.includes('stock-signal-v2026.09.08-position-protection-v1') && decisionSystemDoc.includes('opportunityStage') && decisionSystemDoc.includes('executionAction'), 'runtime and decision contract use the direction-timing-risk engine identity');
+assert(stockEngine.includes('stock-signal-v2026.11.23-low-frequency-v1') && decisionSystemDoc.includes('opportunityStage') && decisionSystemDoc.includes('executionAction'), 'runtime and decision contract use the direction-timing-risk engine identity');
 assert(stockSignalProfiles.includes("role:'timing'") && stockSignalProfiles.includes('const directionVotes = votes.filter') && stockDecisionArbiter.includes('directionAssessment') && stockDecisionArbiter.includes('timingAssessment') && stockDecisionArbiter.includes('riskAssessment'), 'one personality pipeline separates direction, timing and final risk without a second score');
 assert(stockSignalContract.includes('top-level score/signal/tradePlan fields are deliberately not accepted'), 'one stock signal contract owns personality selection and rejects retired top-level fields');
 assert(!stockDecisionArbiter.includes('analysis?.tradePlan') && !signalScoring.includes('analysis?.tradePlan') && !stockJs.includes('effectivePlan('), 'current decision, scoring and UI paths have no retired plan fallback');
@@ -108,8 +141,7 @@ assert(stockJs.includes('decisionAssessmentsHtml') && stockJs.includes("['方向
 assert(!stockHtml.includes('fold-history') && !stockHtml.includes('d_decision_snapshot') && stockHtml.includes('data-tab="signals"'), 'stock decision page removes duplicate history while the dedicated signal tab remains');
 assert(stockJs.includes('当日收盘') && stockJs.includes('次交易日') && stockJs.includes('formatCloseFollowup') && !stockJs.includes('formatOutcome(') && !stockJs.includes('sig-rel'), 'stock signal history shows close-to-close follow-up and removes the retired reliability/execution-return presentation');
 assert(signalLifecycleRoute.includes('buildSignalCloseFollowup') && !signalLifecycleRoute.includes('stock_signal_outcomes') && !signalLifecycleRoute.includes('reliabilityScore'), 'stock signal-history API no longer queries or exposes the retired reliability/execution-return contract');
-assert(
-  stockDecisionPresentation.includes("BLOCKED: Object.freeze({ key:'blocked', label:'看多受阻', colorToken:'amber'")
+assert(stockDecisionPresentation.includes("BLOCKED: Object.freeze({ key:'blocked', label:'看多受阻', colorToken:'amber'")
     && stockDecisionPresentation.includes("if (stage === 'BLOCKED') return STOCK_DISPLAY_STATES.BLOCKED;")
     && stockJs.includes('displayState')
     && stockJs.includes('b-state-')
@@ -117,6 +149,9 @@ assert(
     && stockCss.includes('.badge.b-state-blocked'),
   'backend owns the canonical BLOCKED presentation and stock views consume the shared display state',
 );
+assert(stockHtml.includes('signals-positioning') && stockHtml.includes('冻结买区')
+  && stockHtml.includes('30 天复盘') && decisionSystemDoc.includes('当前低频信号'),
+  'the signal tab and decision contract expose the frozen range and forward review');
 assert(stockJs.includes('价格结构参考') && stockJs.includes('潜在支撑参考') && stockJs.includes('潜在阻力参考') && stockJs.includes('系统失效条件仍以阶段价位为准'), 'stock decision page keeps structure levels as clearly bounded price context');
 assert(!stockJs.includes('确认后目标') && stockStagePricePlan.includes("level('reassessment', '复核位'") && !stockStagePricePlan.includes('takeProfit'), 'stage price contract labels upside levels as reassessment rather than a promised target');
 assert(stockHtml.includes('id="toggleAddBtn"') && stockHtml.includes('aria-controls="addForm"') && stockHtml.includes('id="addForm" class="card" hidden'), 'stock add form owns an explicit hidden state and accessible trigger contract');

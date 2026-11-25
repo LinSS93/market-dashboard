@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
+<script defer src="/assets/workspace-nav.js"></script>
 <title>控制中心</title>
 <link rel="stylesheet" href="shared.css">
 <link rel="stylesheet" href="workspace-theme.css">
@@ -70,65 +71,72 @@
 </style>
 </head>
 <body class="workspace-app control-workspace">
-<header>
-  <h1><a href="/">Market Dashboard</a></h1>
-  <nav>
-    <a href="/stock">股票监控</a>
-    <a href="/tracker">杠杆 ETF 追踪</a>
-    <a href="/radar">机会雷达</a>
-    <a href="/lab">实验室</a>
-    <a href="/control" class="ac">控制中心</a>
-  </nav>
+<header class="workspace-header">
+  <h1><a href="/" aria-label="Market Dashboard 首页">Market Dashboard</a></h1>
   <span id="headerStatus" class="hint workspace-header-status">连接中...</span>
 </header>
 <main class="control-wrap">
   <section class="control-hero" aria-labelledby="controlTitle">
     <div>
-      <div class="control-kicker">Settings</div>
       <h2 id="controlTitle">控制中心</h2>
-      <p>集中配置提醒、数据接入和后台维护。运行指标与审计记录收在下方，避免干扰日常设置。</p>
+      <p>管理通知渠道、服务接入和运行记录。</p>
     </div>
     <span id="settingsTime" class="hint"></span>
   </section>
 
-  <section id="summary" class="control-summary" aria-label="当前设置摘要"></section>
 
+
+  <div class="settings-layout">
+    <nav class="settings-index" aria-label="设置目录">
+      <a href="#notification-settings">通知与推送</a>
+      <a href="#service-settings">服务与备份</a>
+      <a href="#mcp-settings">MCP 接入</a>
+      <a href="#operationsDrawer">运行与审计</a>
+    </nav>
+    <div class="settings-content">
   <section id="notification-settings" class="settings-section" aria-labelledby="notificationSettingsTitle">
     <div class="section-head">
       <div><h2 id="notificationSettingsTitle">通知与推送</h2><p>先确定是否提醒，再决定每个模块要接收哪些信号。</p></div>
     </div>
+  <section id="summary" class="control-summary" aria-label="当前设置摘要"></section>
     <section class="control-panel">
       <div class="panel-body">
-        <div class="setting-row"><div><div class="setting-title">系统提醒</div><div class="setting-note">统一控制三个模块的浏览器与 Webhook 提醒。</div></div><div class="setting-note">关闭后仍保留计算、页面显示和审计记录。</div><label class="switch"><input id="masterEnabled" type="checkbox"><span></span></label></div>
-        <div class="setting-row"><div><div class="setting-title">浏览器桌面通知</div><div class="setting-note">仅当前浏览器与当前访问地址生效。</div></div><div id="browserState" class="setting-note">读取权限中...</div><label class="switch"><input id="browserEnabled" type="checkbox"><span></span></label></div>
+        <div class="setting-row"><div><div class="setting-title">系统提醒</div><div class="setting-note">统一控制三个模块的浏览器与 Webhook 提醒。</div></div><div class="setting-note">关闭后仍保留计算、页面显示和审计记录。</div><label class="switch"><input id="masterEnabled" aria-label="系统提醒" type="checkbox"><span></span></label></div>
+        <div class="setting-row"><div><div class="setting-title">浏览器桌面通知</div><div class="setting-note">仅当前浏览器与当前访问地址生效。</div></div><div id="browserState" class="setting-note">读取权限中...</div><label class="switch"><input id="browserEnabled" aria-label="浏览器桌面通知" type="checkbox"><span></span></label></div>
         <div class="module-block">
-          <div class="module-head"><div><div class="module-title">Webhook 推送</div><div class="setting-note">由后台服务发送，无需保持网页打开。</div></div><label class="switch module-state"><input id="webhookEnabled" type="checkbox"><span></span></label></div>
+          <div class="module-head"><div><div class="module-title">Webhook 推送</div><div class="setting-note">由后台服务发送，无需保持网页打开。</div></div><label class="switch module-state"><input id="webhookEnabled" aria-label="Webhook 推送" type="checkbox"><span></span></label></div>
           <div id="webhookState" class="setting-note" style="margin-top:6px">读取配置中...</div>
           <div class="webhook-row" style="margin-top:8px"><input id="webhookInput" type="password" autocomplete="new-password" placeholder="https://..." aria-label="Webhook 地址"><button id="saveWebhook" class="btn" type="button">保存</button></div>
           <div id="webhookMeta" class="webhook-meta"></div>
           <div class="webhook-actions"><button id="testWebhook" class="btn ghost" type="button">发送测试</button><button id="clearWebhook" class="btn ghost" type="button">清除配置</button></div>
         </div>
         <div class="module-block">
-          <div class="module-head"><div><div class="module-title">股票监控</div><div class="setting-note">浏览器和 Webhook 共用以下动作档位。</div></div><label class="switch module-state"><input id="stockEnabled" type="checkbox"><span></span></label></div>
+          <div class="module-head"><div><div class="module-title">股票监控</div><div class="setting-note">浏览器和 Webhook 共用以下动作档位。</div></div><label class="switch module-state"><input id="stockEnabled" aria-label="股票提醒" type="checkbox"><span></span></label></div>
+          <details class="module-options"><summary>动作档位与文案</summary>
           <div id="stockTiers" class="checks"></div>
           <details class="template-advanced"><summary>自定义通知文案</summary><div class="template-content"><div class="template-field"><label for="notifyTemplateStock">通知文案</label><textarea id="notifyTemplateStock" rows="4" placeholder="【看板信号提醒 · {title}】&#10;标的：{name}（{symbol}）&#10;动作：{action}&#10;{detail}时间：{time}"></textarea></div><div class="setting-note" style="margin-top:4px">占位符：<code>{title}</code> 看板名 · <code>{name}</code> 标的名称 · <code>{symbol}</code> 标的代码 · <code>{action}</code> 动作 · <code>{detail}</code> 详情 · <code>{time}</code> 时间。留空使用默认预设。</div></div></details>
+          </details>
         </div>
         <div class="module-block">
-          <div class="module-head"><div><div class="module-title">杠杆 ETF 决策</div><div class="setting-note">仍受 ETF 自身交易时段和风险覆盖规则约束。</div></div><label class="switch module-state"><input id="etfEnabled" type="checkbox"><span></span></label></div>
+          <div class="module-head"><div><div class="module-title">杠杆 ETF 决策</div><div class="setting-note">仍受 ETF 自身交易时段和风险覆盖规则约束。</div></div><label class="switch module-state"><input id="etfEnabled" aria-label="ETF 提醒" type="checkbox"><span></span></label></div>
+          <details class="module-options"><summary>动作档位与文案</summary>
           <div id="etfTiers" class="checks"></div>
           <details class="template-advanced"><summary>自定义通知文案</summary><div class="template-content"><div class="template-field"><label for="notifyTemplateEtf">通知文案</label><textarea id="notifyTemplateEtf" rows="4" placeholder="【看板信号提醒 · {title}】&#10;标的：{symbol}&#10;动作：{action}&#10;{detail}时间：{time}"></textarea></div></div></details>
+          </details>
         </div>
         <div class="module-block">
-          <div class="module-head"><div><div class="module-title">机会雷达</div><div class="setting-note">盘后扫描聚合推送，提示重点关注哪些股票。</div></div><label class="switch module-state"><input id="radarEnabled" type="checkbox"><span></span></label></div>
+          <div class="module-head"><div><div class="module-title">机会雷达</div><div class="setting-note">盘后扫描聚合推送，提示重点关注哪些股票。</div></div><label class="switch module-state"><input id="radarEnabled" aria-label="机会雷达提醒" type="checkbox"><span></span></label></div>
+          <details class="module-options"><summary>动作档位</summary>
           <div id="radarTiers" class="checks"></div>
+          </details>
         </div>
         <div class="save-bar"><span id="saveState" class="save-state"></span><button id="saveSettings" class="btn" type="button">保存通知设置</button></div>
       </div>
     </section>
   </section>
 
-  <section class="settings-section" aria-labelledby="serviceSettingsTitle">
-    <div class="section-head"><div><h2 id="serviceSettingsTitle">接入与维护</h2><p>密钥、数据源和备份是后台设置；恢复生产数据前仍需进行明确确认。</p></div></div>
+  <section id="service-settings" class="settings-section" aria-labelledby="serviceSettingsTitle">
+    <div class="section-head"><div><h2 id="serviceSettingsTitle">服务与备份</h2><p>密钥、数据源和备份是后台设置；恢复生产数据前仍需进行明确确认。</p></div></div>
     <div class="settings-grid">
       <section class="control-panel">
         <div class="panel-head"><h2>API Key 管理</h2><span class="hint">LLM 与第三方数据源</span></div>
@@ -136,12 +144,12 @@
       </section>
       <section class="control-panel">
         <div class="panel-head"><h2>数据备份与恢复</h2><span class="hint">高风险操作</span></div>
-        <div class="panel-body"><div class="setting-title" style="margin-top:12px">生产数据保护</div><div class="setting-note">数据源健康与后台任务明细在下方“运行与审计”中查看。实际恢复会替换生产 DB 并重启服务，需要输入备份文件名确认。</div><div class="webhook-actions"><button id="verifyBackup" class="btn ghost" type="button">校验备份</button><button id="restoreDryRun" class="btn ghost" type="button" title="对最新备份做 schema 校验，不替换生产 DB">恢复演练</button><button id="restoreActual" class="btn ghost" type="button" title="用最新备份替换生产 DB 并重启进程（高危）">实际恢复</button></div></div>
+        <div class="panel-body"><div class="setting-title" style="margin-top:12px">生产数据保护</div><div class="setting-note">数据源健康与后台任务明细在“运行与审计”中查看。实际恢复会替换生产 DB 并重启服务，需要输入备份文件名确认。</div><div class="webhook-actions"><button id="verifyBackup" class="btn ghost" type="button">校验备份</button><button id="restoreDryRun" class="btn ghost" type="button" title="对最新备份做 schema 校验，不替换生产 DB">恢复演练</button><button id="restoreActual" class="btn ghost" type="button" title="用最新备份替换生产 DB 并重启进程（高危）">实际恢复</button></div></div>
       </section>
     </div>
   </section>
 
-  <section class="settings-section" aria-labelledby="mcpSettingsTitle">
+  <section id="mcp-settings" class="settings-section" aria-labelledby="mcpSettingsTitle">
     <div class="section-head"><div><h2 id="mcpSettingsTitle">MCP 接入</h2><p>让 AI agent（Trae / Claude / Cursor 等）通过 MCP 协议只读访问看板数据，实现自然语言查询。</p></div></div>
     <section class="control-panel">
       <div class="panel-head"><h2>端点与工具</h2><span class="hint">只读 · JSON-RPC 2.0 · Streamable HTTP</span></div>
@@ -149,7 +157,7 @@
         <div class="mcp-endpoint-row">
           <div class="setting-title">MCP 端点</div>
           <div class="mcp-endpoint-url"><code id="mcpEndpoint">加载中...</code><button id="copyEndpoint" class="btn ghost" type="button">复制</button></div>
-          <div class="setting-note">无需网页登录或 Cookie；通过 Caddy HTTPS 反代访问，仅接受 POST 请求，Content-Type 必须为 application/json。</div>
+          <div class="setting-note">无需网页登录或 Cookie；通过 Caddy HTTP 反代访问，仅接受 POST 请求，Content-Type 必须为 application/json。</div>
         </div>
         <div class="mcp-tools">
           <div class="setting-title">可用工具（13 个，全部只读）</div>
@@ -192,7 +200,7 @@
           <ul>
             <li>所有工具均为只读，不会修改看板数据。</li>
             <li>不使用网页账号、会话或令牌；MCP 客户端可直接发起连接。</li>
-            <li>网络边界：Node 只监听本机 loopback；跨机器访问必须经过 Caddy HTTPS 反代。带 Origin 的客户端需在服务器配置 <code>MCP_ALLOWED_ORIGINS</code>。</li>
+            <li>网络边界：Node 只监听本机 loopback；跨机器访问必须经过 Caddy HTTP 反代（2026-09-13 由自签 HTTPS 降级）。带 Origin 的客户端需在服务器配置 <code>MCP_ALLOWED_ORIGINS</code>。</li>
             <li>交互顺序：<code>initialize</code> → <code>notifications/initialized</code> → <code>tools/list</code> → <code>tools/call</code>。</li>
           </ul>
         </div>
@@ -225,8 +233,10 @@
       </section>
     </div>
   </details>
+    </div>
+  </div>
 </main>
-<script src="vendor/echarts.min.js"></script>
+<script defer src="dashboard-shared.js"></script>
 <script>
 // MCP 接入面板：动态填充端点 URL、tab 切换、复制功能
 (function() {
@@ -318,6 +328,6 @@
   document.getElementById('copyConfig').addEventListener('click', function() { copyText(codeEl.textContent); });
 })();
 </script>
-<script src="control.js"></script>
+<script defer src="control.js"></script>
 </body>
 </html>

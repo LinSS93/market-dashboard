@@ -17,8 +17,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setRadarDbForTest, clearRadarDbForTest, releaseLeaseOwned } from '../radar_schema.mjs';
 import { setNowFnForTest, resetNowFnForTest } from '../radar_market.mjs';
-import { runScan, reconcileStaleScanJobs, reconcileNonTradingDayScanJobs, resetThrottleForTest } from '../radar_scanner.mjs';
-import { isTradingDate } from '../market_calendar.mjs';
+import { runScan, getScanRuntimeStatus, reconcileStaleScanJobs, reconcileNonTradingDayScanJobs, resetThrottleForTest } from '../radar_scanner.mjs';
+import { isTradingDate, lastCompletedTradingDate } from '../market_calendar.mjs';
 import {
   findNextDailyMarketForTest,
   resetSchedulerStateForTest,
@@ -208,7 +208,19 @@ insertDossier('US', 'NOTIN', 'event', 'active', NOW);   // 不在 universe → �
 insertDossier('US', 'NVDA', 'event', 'archived', NOW);  // archived → 不算活跃
 resetThrottleForTest();
 
-const snapResult = await runScan({ market: 'US', trigger: 'scheduled_intraday_light', scanMode: 'intraday_light' });
+const snapPromise = runScan({ market: 'US', trigger: 'scheduled_intraday_light', scanMode: 'intraday_light' });
+const savedPrepare = db.prepare;
+try {
+  db.prepare = () => { throw new Error('Runtime status must never access SQLite'); };
+  const running = getScanRuntimeStatus();
+  assert(running.inFlightMarkets.includes('US'), 'runtime status reads running market with database access disabled');
+} finally { db.prepare = savedPrepare; }
+const snapResult = await snapPromise;
+const completeStatus = getScanRuntimeStatus();
+assert(!completeStatus.inFlightMarkets.includes('US'), 'runtime status clears completed market');
+assert(completeStatus.lastRuns.US?.status==='complete', 'runtime status retains completed run');
+completeStatus.lastRuns.US.status='mutated by caller';
+assert(getScanRuntimeStatus().lastRuns.US.status==='complete', 'runtime status is detached from caller mutation');
 assert(snapResult.ok === true, '快照扫描返回 ok=true' + (snapResult.ok ? '' : ' error: ' + snapResult.error));
 assert(snapResult.status === 'complete', '快照一轮完成 status=complete，实际: ' + snapResult.status);
 assert(snapResult.snapshotTargets === 2, '快照目标只有 2 只（AAPL/MSFT，排除 archived 与非 universe），实际: ' + snapResult.snapshotTargets);
@@ -404,6 +416,13 @@ assert(oldRelease.changes === 0, '旧 worker 不能释放新 worker 的 lease');
 assert(getJob(leaseJobId).lease_owner === 'new-worker', '新 worker lease 保持不变');
 const newRelease = releaseLeaseOwned.run({ id: leaseJobId, lease_owner: 'new-worker', updated_at: NOW + 2 });
 assert(newRelease.changes === 1 && getJob(leaseJobId).lease_owner == null, '当前 owner 可以正常释放 lease');
+
+const wrongCatchup = await runScan({ market: 'US', trigger: 'scheduled_daily', scanMode: 'official',
+  tradeDate: '2000-01-01', limit: 1 });
+assert(wrongCatchup.error === 'invalid_catchup_trade_date', '补扫拒绝任意历史日期，避免回看偏差');
+const wrongTrigger = await runScan({ market: 'US', trigger: 'manual', scanMode: 'official',
+  tradeDate: lastCompletedTradingDate('US'), limit: 1 });
+assert(wrongTrigger.error === 'invalid_catchup_trade_date', '补扫日期仅允许正式日扫使用');
 
 // ============================================================
 // 清理

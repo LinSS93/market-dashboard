@@ -23,13 +23,45 @@ import {
 } from './stock_engine.mjs';
 import { resolveRegisteredTrackerProduct } from './tracker_product_registry.mjs';
 
+// PRAGMA table_info + ALTER TABLE 之间存在 TOCTOU：两个进程同时加载模块时，
+// 各自都看到"列不存在"，后执行的 ALTER 会抛 duplicate column name 并让模块加载崩溃。
+// 这里捕获该错误并视为成功（列已由另一进程补上），其余错误照常抛出。
+function ensureTableColumn(table, column, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all().map(row => row.name);
+  if (columns.includes(column)) return;
+  try {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  } catch (e) {
+    if (!/duplicate column name/i.test(String(e?.message || ''))) throw e;
+  }
+}
 function ensureTrackerAuditColumn(column, definition) {
-  const columns = db.prepare('PRAGMA table_info(tracker_signal_audit)').all().map(row => row.name);
-  if (!columns.includes(column)) db.exec(`ALTER TABLE tracker_signal_audit ADD COLUMN ${column} ${definition}`);
+  ensureTableColumn('tracker_signal_audit', column, definition);
 }
 ensureTrackerAuditColumn('earnings_event_type', 'TEXT');
 ensureTrackerAuditColumn('earnings_source_confidence', 'TEXT');
 ensureTrackerAuditColumn('earnings_policy_json', 'TEXT');
+
+// tracker_premium_daily 口径溯源列（P0-3）：
+//   新库由 stock_engine 的 CREATE TABLE 直接包含同名列；旧库升级路径为 ALTER TABLE ADD COLUMN。
+//   两条路径都幂等：PRAGMA 检查后再决定是否 ALTER，重复执行不报错。
+function ensureTrackerPremiumColumn(column, definition) {
+  ensureTableColumn('tracker_premium_daily', column, definition);
+}
+ensureTrackerPremiumColumn('nav_method', 'TEXT');
+ensureTrackerPremiumColumn('anchor_date', 'TEXT');
+ensureTrackerPremiumColumn('anchor_nav', 'REAL');
+ensureTrackerPremiumColumn('anchor_premium', 'REAL');
+ensureTrackerPremiumColumn('underlying_price', 'REAL');
+ensureTrackerPremiumColumn('etf_provider_time', 'TEXT');
+ensureTrackerPremiumColumn('underlying_provider_time', 'TEXT');
+ensureTrackerPremiumColumn('premium_source', 'TEXT');
+// 日度残差：官方收盘值覆盖当日模型估算行时，把被覆盖的模型值留在 model_premium，
+// 便于事后评估"盘中估算 vs 官方收盘"的真实误差带（只增字段，不参与阈值计算）。
+ensureTrackerPremiumColumn('model_premium', 'REAL');
+// 历史行补齐 market_state：旧版封口只在 ETF 市场 closed 时写入（见 server.mjs refreshTracker），
+// 因而所有 finalized_at 非空的行事实上都产生于 closed 状态。语句幂等，补齐后无 NULL 残留。
+db.prepare("UPDATE tracker_premium_daily SET market_state='closed' WHERE finalized_at IS NOT NULL AND market_state IS NULL").run();
 
 const PRODUCT_DIRECTIONS = new Set(['long', 'inverse']);
 
@@ -154,31 +186,24 @@ function getTrackerSignalAudit(pairId, limit=200) {
   return db.prepare("SELECT * FROM tracker_signal_audit ORDER BY ts DESC LIMIT ?").all(n);
 }
 
-// 溢价率分布只使用已收盘封口的独立日样本。盘中每分钟审计记录可用于回看，
-// 但不能伪装成几十个独立交易日，更不能驱动买卖阈值。
-function getPremiumDistribution(pairId, opts={}) {
-  const pid = Number(pairId);
-  if (!(pid > 0)) return { error: 'invalid pair_id' };
-  const days = Math.max(30, Number(opts.days) || 90);
-  const buckets = Number(opts.buckets) || 20; // 直方图桶数
-  const rows = db.prepare(`SELECT premium, date, finalized_at FROM tracker_premium_daily
-    WHERE pair_id=? AND finalized_at IS NOT NULL AND premium IS NOT NULL
-      AND date >= date('now', ?)
-    ORDER BY date ASC`).all(pid, `-${days - 1} days`);
-  if (rows.length < 30) {
-    return { pair_id: pid, samples: rows.length, basis: 'finalized_daily', status: 'insufficient', message: `收盘样本不足（${rows.length}/30 个交易日），暂不展示分位判断` };
-  }
-  const samples = rows.map(r => Number(r.premium)).filter(v => Number.isFinite(v));
-  if (samples.length < 30) {
-    return { pair_id: pid, samples: rows.length, status: 'insufficient', message: `有效样本不足（${samples.length}/30）` };
-  }
-  const sorted = [...samples].sort((a, b) => a - b);
+// 溢价分位口径（P0-4）：
+//   1) 官方收盘优先：tracker_official_nav（港交所披露易日度 NAV 反推的 premium）为主，
+//      并入 tracker_premium_daily 中 premium_source='official' 的已封口行；同日期以官方表为准。
+//   2) 官方可用样本不足 30 个交易日时回退模型估算样本（premium_source 非 official 的已封口行，
+//      并排除已被官方样本覆盖的日期），返回值标 basis='model_estimate'。
+//   3) |premium| > 8% 的 suspect 样本（停牌复牌畸变、官方表错行、盘中锚点漂移）一律剔除并单独计数。
+// 返回的 as_of 是样本最后一个交易日，表示"该日收盘分位"，不是盘中实时分位；
+// 实时溢价请读 /tracker 的 live premium 字段，两者时点不同，不可混读。
+const PREMIUM_SUSPECT_ABS = 8;
+const PREMIUM_MIN_SAMPLES = 30;
+
+function buildPremiumDistributionStats(sampleValues, buckets) {
+  const sorted = [...sampleValues].sort((a, b) => a - b);
   const n = sorted.length;
   const quantile = (q) => sorted[Math.min(n - 1, Math.max(0, Math.floor(q * n)))];
-  const mean = samples.reduce((a, b) => a + b, 0) / n;
-  const variance = samples.reduce((a, b) => a + (b - mean) ** 2, 0) / n;
+  const mean = sampleValues.reduce((a, b) => a + b, 0) / n;
+  const variance = sampleValues.reduce((a, b) => a + (b - mean) ** 2, 0) / n;
   const std = Math.sqrt(variance);
-  // 直方图：从 min 到 max 等距分桶
   const min = sorted[0], max = sorted[n - 1];
   const range = max - min;
   const bucketWidth = range > 0 ? range / buckets : 1;
@@ -187,18 +212,17 @@ function getPremiumDistribution(pairId, opts={}) {
     hi: +(min + (i + 1) * bucketWidth).toFixed(2),
     count: 0,
   }));
-  for (const v of samples) {
+  for (const v of sampleValues) {
     let idx = range > 0 ? Math.floor((v - min) / bucketWidth) : 0;
     if (idx >= buckets) idx = buckets - 1;
     if (idx < 0) idx = 0;
     histogram[idx].count++;
   }
-  // 取最新 premium 作为"当前值"
-  const current = samples[samples.length - 1];
-  // 当前值分位：小于等于 current 的样本占比
+  // 当前值 = 样本里最后一个交易日（调用方按 date ASC 传入）的收盘溢价
+  const current = sampleValues[sampleValues.length - 1];
   let currentRank = 0;
   for (const v of sorted) { if (v <= current) currentRank++; else break; }
-  const currentPercentile = +(currentRank / n * 100).toFixed(1);
+  const currentPercentile = +(currentRank / n * 100).toFixed(2);
   // 极端性只描述历史位置；不把统计位置翻译成买卖建议。
   let verdict, verdictColor;
   if (currentPercentile <= 5) { verdict = '历史低位折价'; verdictColor = '#1a9d5a'; }
@@ -207,9 +231,7 @@ function getPremiumDistribution(pairId, opts={}) {
   else if (currentPercentile >= 80) { verdict = '偏高溢价'; verdictColor = '#e0483a'; }
   else { verdict = '正常区间'; verdictColor = '#8a9099'; }
   return {
-    pair_id: pid,
-    samples: n,
-    days,
+    n,
     current_premium: +current.toFixed(2),
     current_percentile: currentPercentile,
     verdict, verdict_color: verdictColor,
@@ -224,9 +246,132 @@ function getPremiumDistribution(pairId, opts={}) {
       p90: +quantile(0.90).toFixed(2),
       p95: +quantile(0.95).toFixed(2),
     },
-    histogram, basis: 'finalized_daily',
-    first_date: rows[0].date,
-    last_date: rows[rows.length - 1].date,
+    histogram,
+  };
+}
+
+// 溢价率分布只使用已收盘封口的独立日样本。盘中每分钟审计记录可用于回看，
+// 但不能伪装成几十个独立交易日，更不能驱动买卖阈值。
+//
+// collectPremiumSamples 是"官方优先 / 不足回退模型"的唯一口径实现：
+//   分位、阈值带、NAV 审计三处必须同源，否则会出现"用溢价变化量的分布去卡溢价水平"的量纲错配。
+function collectPremiumSamples(pairId, days) {
+  const pid = Number(pairId);
+  const windowDays = Math.max(30, Number(days) || 90);
+  const since = `-${windowDays - 1} days`;
+
+  // 官方收盘样本：优先官方 NAV 表；再并入日表里 premium_source='official' 的封口行（同日期官方表优先）
+  const officialByDate = new Map();
+  const hasOfficialTable = !!db.prepare(
+    "SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='tracker_official_nav'"
+  ).get();
+  if (hasOfficialTable) {
+    const offRows = db.prepare(`SELECT date, premium FROM tracker_official_nav
+      WHERE pair_id=? AND premium IS NOT NULL AND date >= date('now', ?)
+      ORDER BY date ASC`).all(pid, since);
+    for (const r of offRows) {
+      const v = Number(r.premium);
+      if (Number.isFinite(v)) officialByDate.set(String(r.date), v);
+    }
+  }
+  const finalizedRows = db.prepare(`SELECT premium, date, premium_source FROM tracker_premium_daily
+    WHERE pair_id=? AND finalized_at IS NOT NULL AND premium IS NOT NULL
+      AND date >= date('now', ?)
+    ORDER BY date ASC`).all(pid, since);
+  const modelRows = [];
+  for (const r of finalizedRows) {
+    const v = Number(r.premium);
+    if (!Number.isFinite(v)) continue;
+    const date = String(r.date);
+    if (String(r.premium_source || '').toLowerCase() === 'official') {
+      if (!officialByDate.has(date)) officialByDate.set(date, v);
+    } else if (!officialByDate.has(date)) {
+      // 官方已覆盖的日期不再进入模型样本，避免回退口径重复计权
+      modelRows.push({ date, premium: v });
+    }
+  }
+  const officialRows = [...officialByDate.entries()]
+    .map(([date, premium]) => ({ date, premium }))
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+  const splitSuspect = (rows) => {
+    const kept = [], dropped = [];
+    for (const r of rows) (Math.abs(r.premium) > PREMIUM_SUSPECT_ABS ? dropped : kept).push(r);
+    return { kept, dropped };
+  };
+  const official = splitSuspect(officialRows);
+  const model = splitSuspect(modelRows);
+  const officialSamples = official.kept.length;
+  const modelSamples = model.kept.length;
+  const useOfficial = officialSamples >= PREMIUM_MIN_SAMPLES;
+  return {
+    pid,
+    days: windowDays,
+    official,
+    model,
+    officialSamples,
+    modelSamples,
+    useOfficial,
+    basis: useOfficial ? 'official_close' : 'model_estimate',
+    sample_source: useOfficial ? 'tracker_official_nav' : 'tracker_premium_daily',
+    picked: useOfficial ? official : model,
+    hasOfficialTable,
+  };
+}
+
+function getPremiumDistribution(pairId, opts={}) {
+  const pid = Number(pairId);
+  if (!(pid > 0)) return { error: 'invalid pair_id' };
+  const days = Math.max(30, Number(opts.days) || 90);
+  const buckets = Number(opts.buckets) || 20; // 直方图桶数
+
+  const s = collectPremiumSamples(pid, days);
+  const { official, model, officialSamples, modelSamples, basis, picked } = s;
+  const excludedSuspect = picked.dropped.length;
+
+  const tag = {
+    pair_id: pid,
+    days,
+    basis,
+    sample_source: s.sample_source,
+    official_samples: officialSamples,
+    model_samples: modelSamples,
+    excluded_suspect: excludedSuspect,
+    excluded_suspect_official: official.dropped.length,
+    excluded_suspect_model: model.dropped.length,
+    suspect_threshold_abs: PREMIUM_SUSPECT_ABS,
+    min_samples: PREMIUM_MIN_SAMPLES,
+  };
+
+  if (picked.kept.length < PREMIUM_MIN_SAMPLES) {
+    return {
+      ...tag,
+      samples: picked.kept.length,
+      n: picked.kept.length,
+      status: 'insufficient',
+      as_of: picked.kept.length ? picked.kept[picked.kept.length - 1].date : null,
+      max_date: picked.kept.length ? picked.kept[picked.kept.length - 1].date : null,
+      first_date: picked.kept.length ? picked.kept[0].date : null,
+      last_date: picked.kept.length ? picked.kept[picked.kept.length - 1].date : null,
+      message: `收盘样本不足（官方 ${officialSamples} / 模型 ${modelSamples}，需 ${PREMIUM_MIN_SAMPLES} 个交易日），暂不展示分位判断`,
+    };
+  }
+
+  const values = picked.kept.map(r => r.premium);
+  const stats = buildPremiumDistributionStats(values, buckets);
+  const lastDate = picked.kept[picked.kept.length - 1].date;
+  return {
+    ...tag,
+    ...stats,
+    samples: stats.n,
+    current_premium: stats.current_premium,
+    current_percentile: stats.current_percentile,
+    // 收盘口径的时点标记：这是"上一交易日收盘分位"，不是实时分位
+    as_of: lastDate,
+    max_date: lastDate,
+    first_date: picked.kept[0].date,
+    last_date: lastDate,
+    // 旧字段保留（值域由 finalized_daily 收敛为 official_close / model_estimate）
   };
 }
 
@@ -236,6 +381,69 @@ function recordTrackerFxDaily(fxPair,date,close,source='live'){
   if(!fxPair||!/^\d{4}-\d{2}-\d{2}$/.test(String(date))||!(Number(close)>0))return;
   db.prepare("INSERT INTO tracker_fx_daily(fx_pair,date,close,source,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(fx_pair,date) DO UPDATE SET close=excluded.close,source=excluded.source,updated_at=excluded.updated_at")
     .run(String(fxPair),String(date),Number(close),source,Date.now());
+}
+
+// ── 官方 NAV 锚点（固定时段基准重置）────────────────────────────────────────
+// 盘中估算以官方 NAV 为基准：
+//   nav_t = anchor_nav × (1 + lev × (und_t / anchor_und − 1)) × (fx_t / anchor_fx)
+//   anchor_nav 是交易所披露的收盘净值（不含市价溢价），anchor_und / anchor_fx 取同一锚定日的收盘值。
+// 旧模型以 etf.prev（含昨日溢价的市价）为锚，等价于"溢价变化量"，盘中会随 ETF 波动剧烈跳动；
+// 换成官方 NAV 锚后输出的是溢价"水平值"。
+// 写入纪律：三项（nav/und/fx）齐备才落库，缺任一值直接跳过，绝不写半成品锚点；
+// 主键 (pair_id, anchor_date) 保证同一天多次运行只产生一条锚点、不会互相叠加。
+db.exec(`
+  CREATE TABLE IF NOT EXISTS tracker_nav_anchor (
+    pair_id INTEGER NOT NULL,
+    anchor_date TEXT NOT NULL,
+    anchor_nav REAL NOT NULL,
+    anchor_und REAL NOT NULL,
+    anchor_fx REAL,
+    anchor_etf_close REAL,
+    source TEXT,
+    updated_at INTEGER,
+    PRIMARY KEY (pair_id, anchor_date)
+  );
+`);
+const upsertNavAnchorStmt = db.prepare(`INSERT INTO tracker_nav_anchor(pair_id,anchor_date,anchor_nav,anchor_und,anchor_fx,anchor_etf_close,source,updated_at)
+  VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(pair_id,anchor_date) DO UPDATE SET
+    anchor_nav=excluded.anchor_nav,anchor_und=excluded.anchor_und,anchor_fx=excluded.anchor_fx,
+    anchor_etf_close=excluded.anchor_etf_close,source=excluded.source,updated_at=excluded.updated_at`);
+
+function upsertTrackerNavAnchor(row={}) {
+  const pid=Number(row.pair_id), date=String(row.anchor_date||'');
+  const nav=Number(row.anchor_nav), und=Number(row.anchor_und), fx=Number(row.anchor_fx);
+  if(!(pid>0)||!/^\d{4}-\d{2}-\d{2}$/.test(date)||!(nav>0)||!(und>0)||!(fx>0)) {
+    return {ok:false,reason:'anchor_inputs_incomplete'};
+  }
+  const etfClose=Number(row.anchor_etf_close);
+  upsertNavAnchorStmt.run(pid,date,nav,und,fx,etfClose>0?etfClose:null,String(row.source||'official_nav'),Date.now());
+  return {ok:true,pair_id:pid,anchor_date:date};
+}
+
+// beforeDate：只取严格早于该交易日的锚点（盘中估算不能用"当日收盘 NAV"当锚，否则就是未来函数）。
+function getTrackerNavAnchor(pairId, beforeDate=null) {
+  const pid=Number(pairId);
+  if(!(pid>0))return null;
+  if(/^\d{4}-\d{2}-\d{2}$/.test(String(beforeDate||''))) {
+    return db.prepare('SELECT * FROM tracker_nav_anchor WHERE pair_id=? AND anchor_date<? ORDER BY anchor_date DESC LIMIT 1')
+      .get(pid,String(beforeDate))||null;
+  }
+  return db.prepare('SELECT * FROM tracker_nav_anchor WHERE pair_id=? ORDER BY anchor_date DESC LIMIT 1').get(pid)||null;
+}
+
+function getTrackerCloseOnDate(symbol,date) {
+  const sym=String(symbol||'').toUpperCase();
+  if(!sym||!/^\d{4}-\d{2}-\d{2}$/.test(String(date||'')))return null;
+  const row=db.prepare('SELECT close FROM stock_kline WHERE symbol=? AND date=? LIMIT 1').get(sym,String(date));
+  const close=Number(row?.close);
+  return close>0?close:null;
+}
+
+function getTrackerFxCloseOnDate(fxPair,date) {
+  if(!fxPair||!/^\d{4}-\d{2}-\d{2}$/.test(String(date||'')))return null;
+  const row=db.prepare('SELECT close FROM tracker_fx_daily WHERE fx_pair=? AND date=? LIMIT 1').get(String(fxPair),String(date));
+  const close=Number(row?.close);
+  return close>0?close:null;
 }
 
 function getTrackerDailyContext(etf, underlying, fxPair, etfQuoteDate, underlyingPrice, currentFx, underlyingQuoteDate = null) {
@@ -376,20 +584,49 @@ function reorderTrackerPairs(ids=[]) {
 
 function recordTrackerPremiumDaily(pairId,date,premium,navQuality,liquidityStatus,etfPrice=null,nav=null,options={}) {
   if(!(Number(pairId)>0)||!/^\d{4}-\d{2}-\d{2}$/.test(String(date))||!Number.isFinite(Number(premium)))return;
-  if(!['aligned','cross_market_exact'].includes(String(navQuality))||String(liquidityStatus)!=='normal')return;
+  const quality=String(navQuality);
+  // 只接受可信口径：official 为交易所披露的收盘 NAV/溢价，aligned / cross_market_exact 为同日模型推算。
+  // date_mismatch / cross_market_approx / unavailable 一律不进入阈值与分位样本。
+  if(!['aligned','cross_market_exact','official'].includes(quality)||String(liquidityStatus)!=='normal')return;
+  // 正股报价陈旧（跨市场休市/停牌）时溢价不可信，即使 navQuality 已是 official 也不落库。
+  if(options.underlyingStale===true)return{recorded:false,reason:'stale_underlying'};
   // A legacy intraday row for today may already exist when this schema ships:
   // replace only that unfinalized row.  Once a formal close has been written,
   // later refreshes must not overwrite it with a different quote.
   if (options.finalize !== true) return { recorded:false, reason:'not_market_close' };
   const now=Number(options.finalizedAt)||Date.now();
-  const info=db.prepare(`INSERT INTO tracker_premium_daily(pair_id,date,premium,nav_quality,liquidity_status,updated_at,etf_price,nav,captured_at,finalized_at,market_state)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(pair_id,date) DO UPDATE SET
+  const numOrNull=(v)=>(v==null||!Number.isFinite(Number(v)))?null:Number(v);
+  const strOrNull=(v)=>(v==null||String(v)==='')?null:String(v);
+  const premiumSource=options.premiumSource!=null?String(options.premiumSource):(quality==='official'?'official':'model');
+  // 覆盖规则（P0-3 修正）：
+  //   - 未封口行（finalized_at IS NULL）可被任意后续收盘值覆盖，保持原有行为。
+  //   - 官方行（premium_source='official'）可覆盖已封口的模型行。官方 NAV 21:30 才披露，
+  //     而模型行 16:00 就封口了；旧的 "WHERE finalized_at IS NULL" 会让官方值永远写不进去，
+  //     premium_source='official' 实际不可达。
+  //   - 官方行之间不可互相覆盖（避免同一交易日的官方值被不同次抓取反复改写）。
+  //   同时把被官方覆盖的模型值存入 model_premium，作为日度残差样本（只记录，不参与阈值）。
+  const info=db.prepare(`INSERT INTO tracker_premium_daily(pair_id,date,premium,nav_quality,liquidity_status,updated_at,etf_price,nav,captured_at,finalized_at,market_state,nav_method,anchor_date,anchor_nav,anchor_premium,underlying_price,etf_provider_time,underlying_provider_time,premium_source,model_premium)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(pair_id,date) DO UPDATE SET
       premium=excluded.premium,nav_quality=excluded.nav_quality,liquidity_status=excluded.liquidity_status,
       updated_at=excluded.updated_at,etf_price=excluded.etf_price,nav=excluded.nav,captured_at=excluded.captured_at,
-      finalized_at=excluded.finalized_at,market_state=excluded.market_state
-    WHERE tracker_premium_daily.finalized_at IS NULL`)
-    .run(Number(pairId),String(date),Number(premium),String(navQuality),String(liquidityStatus),now,Number(etfPrice)||null,Number(nav)||null,now,now,String(options.marketState||'official_close'));
-  return { recorded:info.changes===1, reason:info.changes===1?'finalized':'already_finalized' };
+      finalized_at=excluded.finalized_at,market_state=excluded.market_state,
+      nav_method=excluded.nav_method,anchor_date=excluded.anchor_date,anchor_nav=excluded.anchor_nav,
+      anchor_premium=excluded.anchor_premium,underlying_price=excluded.underlying_price,
+      etf_provider_time=excluded.etf_provider_time,underlying_provider_time=excluded.underlying_provider_time,
+      premium_source=excluded.premium_source,
+      model_premium=CASE
+        WHEN excluded.premium_source='official' AND tracker_premium_daily.premium_source<>'official'
+          THEN tracker_premium_daily.premium
+        ELSE tracker_premium_daily.model_premium END
+    WHERE tracker_premium_daily.finalized_at IS NULL
+       OR (excluded.premium_source='official' AND tracker_premium_daily.premium_source<>'official')`)
+    .run(Number(pairId),String(date),Number(premium),quality,String(liquidityStatus),now,Number(etfPrice)||null,Number(nav)||null,now,now,String(options.marketState||'official_close'),
+      strOrNull(options.navMethod),strOrNull(options.anchorDate),numOrNull(options.anchorNav),numOrNull(options.anchorPremium),
+      numOrNull(options.underlyingPrice),strOrNull(options.etfProviderTime),strOrNull(options.underlyingProviderTime),premiumSource,
+      premiumSource==='official'?null:Number(premium));
+  if (info.changes !== 1) return { recorded:false, reason:'already_finalized' };
+  return { recorded:true, reason:'finalized', premium_source:premiumSource };
 }
 
 function percentile(sorted,p){
@@ -397,16 +634,24 @@ function percentile(sorted,p){
   return sorted[lo]*(1-w)+sorted[hi]*w;
 }
 
+// 阈值带与分位同源：官方收盘优先，官方不足 30 样本时回退模型估算并标注 basis。
+// 窗口沿用"约 250 个交易日"（≈400 自然日），与改造前 LIMIT 250 的量级一致，
+// 避免阈值随窗口切换跳变；变化的是口径来源，不是样本长度。
 function getTrackerPremiumBands(pairId) {
-  const values=db.prepare("SELECT premium FROM tracker_premium_daily WHERE pair_id=? AND finalized_at IS NOT NULL ORDER BY date DESC LIMIT 250").all(Number(pairId)).map(x=>Number(x.premium)).filter(Number.isFinite).sort((a,b)=>a-b);
-  const count=values.length,defaults={strong_buy:-6,buy:-3,reduce:4,sell:8};
-  if(count<30)return {status:'insufficient',sample_count:count,thresholds:defaults};
+  const pid=Number(pairId),defaults={strong_buy:-6,buy:-3,reduce:4,sell:8};
+  if(!(pid>0))return {status:'insufficient',sample_count:0,thresholds:defaults,basis:'model_estimate'};
+  const s=collectPremiumSamples(pid,400);
+  const values=s.picked.kept.map(x=>Number(x.premium)).filter(Number.isFinite).sort((a,b)=>a-b);
+  const count=values.length;
+  const meta={basis:s.basis,sample_source:s.sample_source,official_samples:s.officialSamples,
+    model_samples:s.modelSamples,excluded_suspect:s.picked.dropped.length,suspect_threshold_abs:PREMIUM_SUSPECT_ABS};
+  if(count<30)return {status:'insufficient',sample_count:count,thresholds:defaults,...meta};
   const stats={median:percentile(values,.5),p10:percentile(values,.1),p25:percentile(values,.25),p75:percentile(values,.75),p90:percentile(values,.9)};
-  if(count<60)return {status:'reference',sample_count:count,thresholds:defaults,stats};
+  if(count<60)return {status:'reference',sample_count:count,thresholds:defaults,stats,...meta};
   return {status:'active',sample_count:count,thresholds:{
     strong_buy:Math.min(defaults.strong_buy,stats.p10),buy:Math.min(defaults.buy,stats.p25),
     reduce:Math.max(defaults.reduce,stats.p75),sell:Math.max(defaults.sell,stats.p90),
-  },stats};
+  },stats,...meta};
 }
 
 function importTrackerFxRows(fxPair,rows=[],source='historical') {
@@ -418,7 +663,30 @@ function importTrackerFxRows(fxPair,rows=[],source='historical') {
 function getTrackerFxCoverage(){return db.prepare("SELECT fx_pair,COUNT(*) count,MIN(date) first_date,MAX(date) last_date,MAX(updated_at) updated_at FROM tracker_fx_daily GROUP BY fx_pair ORDER BY fx_pair").all();}
 
 function getTrackerNavAudit(pairId){
-  const rows=db.prepare("SELECT date,premium,etf_price,nav FROM tracker_premium_daily WHERE pair_id=? AND finalized_at IS NOT NULL ORDER BY date DESC LIMIT 250").all(Number(pairId)).reverse();
+  const pid=Number(pairId);
+  if(!(pid>0))return {pair_id:pid,status:'insufficient',sample_count:0,rows:[]};
+  // 与分位/阈值带同源：官方收盘优先，不足回退模型估算（basis 会一并返回，前端可标注口径）
+  const s=collectPremiumSamples(pid,400);
+  const picked=s.picked.kept; // 按 date ASC
+  const dates=picked.map(r=>r.date);
+  const detail=new Map();
+  if(dates.length){
+    const ph=dates.map(()=>'?').join(',');
+    for(const r of db.prepare(`SELECT date,etf_price,nav,model_premium FROM tracker_premium_daily WHERE pair_id=? AND date IN (${ph})`).all(pid,...dates)){
+      detail.set(String(r.date),r);
+    }
+    if(s.hasOfficialTable){
+      for(const r of db.prepare(`SELECT date,nav FROM tracker_official_nav WHERE pair_id=? AND date IN (${ph})`).all(pid,...dates)){
+        const prev=detail.get(String(r.date))||{};
+        detail.set(String(r.date),{...prev,nav:Number(r.nav)});
+      }
+    }
+  }
+  const rows=picked.map(r=>{
+    const d=detail.get(r.date)||{};
+    const nav=Number(d.nav);
+    return {date:r.date,premium:r.premium,etf_price:d.etf_price??null,nav:Number.isFinite(nav)&&d.nav!=null?nav:null,model_premium:d.model_premium??null};
+  });
   const abs=rows.map(x=>Math.abs(Number(x.premium))).filter(Number.isFinite);
   // 收敛率升级：符号一致且 |premium| 收缩 ≥ 50% 才算"有效修复"
   // 旧定义只比 |premium_{t+1}| < |premium_t|，未考虑方向和幅度
@@ -433,11 +701,27 @@ function getTrackerNavAudit(pairId){
     strongRepairs.push(sameSign && shrinkRatio<=0.5);
   }
   const sorted=rows.map(x=>Number(x.premium)).filter(Number.isFinite).sort((a,b)=>a-b),median=percentile(sorted,.5);
-  return {pair_id:Number(pairId),status:rows.length>=20?'reference':'insufficient',sample_count:rows.length,
+  // 日度残差：官方行覆盖模型行时保留了被覆盖的模型值，这里量化"盘中/收盘模型估算 vs 官方实际"的偏差
+  const residualAbs=rows.filter(r=>r.model_premium!=null&&Number.isFinite(Number(r.model_premium)))
+    .map(r=>Math.abs(Number(r.premium)-Number(r.model_premium)))
+    .sort((a,b)=>a-b);
+  // coverage = 有效残差样本 / 审计样本总数：让使用者一眼看出残差基于多少样本，
+  // 避免把"官方值直接回填、没有前置模型行"造成的样本退化误判成计算错误。
+  const residual=residualAbs.length?{
+    n:residualAbs.length,
+    coverage:rows.length?+(residualAbs.length/rows.length).toFixed(3):null,
+    mean_abs:+(residualAbs.reduce((a,b)=>a+b,0)/residualAbs.length).toFixed(3),
+    min_abs:+residualAbs[0].toFixed(3),
+    median_abs:+percentile(residualAbs,.5).toFixed(3),
+    p90_abs:+percentile(residualAbs,.9).toFixed(3),
+    max_abs:+residualAbs[residualAbs.length-1].toFixed(3),
+  }:null;
+  return {pair_id:pid,status:rows.length>=20?'reference':'insufficient',sample_count:rows.length,
+    basis:s.basis,sample_source:s.sample_source,official_samples:s.officialSamples,model_samples:s.modelSamples,
     mean_abs_premium:abs.length?abs.reduce((a,b)=>a+b,0)/abs.length:null,median_premium:median,
     next_day_repair_rate:repairs.length?repairs.filter(Boolean).length/repairs.length*100:null,
     strong_repair_rate:strongRepairs.length?strongRepairs.filter(Boolean).length/strongRepairs.length*100:null,
-    large_deviation_days:abs.filter(x=>x>=3).length,rows:rows.slice(-30)};
+    large_deviation_days:abs.filter(x=>x>=3).length,residual,rows:rows.slice(-30)};
 }
 
 function recordTrackerIntradayHistory(rec, marketState='closed') {
@@ -500,6 +784,10 @@ export {
   getPremiumDistribution,
   // fx / daily / premium
   recordTrackerFxDaily,
+  upsertTrackerNavAnchor,
+  getTrackerNavAnchor,
+  getTrackerCloseOnDate,
+  getTrackerFxCloseOnDate,
   getTrackerDailyContext,
   recordTrackerPremiumDaily,
   getTrackerPremiumBands,

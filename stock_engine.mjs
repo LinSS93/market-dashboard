@@ -8,6 +8,15 @@ import { dirname, join } from "node:path";
 import { httpGet, fetchQuote } from "./quote.mjs";
 import { getMarketStatus, lastCompletedTradingDate, nextMarketOpenAt } from "./market_calendar.mjs";
 import { getMarketProfile, marketKlineParams, benchmarkFor as adapterBenchmarkFor } from "./market_adapter.mjs";
+import {
+  broadMarket,
+  entryBlock,
+  isCommonEquityCandidate,
+  leaderReader,
+  selectTopDailyBuySymbols,
+  strengthReader,
+} from './low_frequency_signals.mjs';
+import { createForwardReview } from './low_frequency_review.mjs';
 import { getNextEarnings, summarizeEarningsProximity } from "./earnings_calendar.mjs";
 import { DEFAULT_EARNINGS_POLICY, isEligibleEarningsEvent } from "./earnings_policy.mjs";
 import { estimateTradeFee } from "./personal_calibration.mjs";
@@ -28,7 +37,7 @@ import {
 } from "./stock_runtime_schedule.mjs";
 import { describeSignalTransition, snapshotFromAnalysis, snapshotFromStoredPayload } from "./stock_signal_transition.mjs";
 import { buildSignalCloseFollowup } from "./stock_signal_followup.mjs";
-import { OUTCOME_CONTRACT_VERSION, calculateForwardOutcomes } from "./outcome_contract.mjs";
+import { OUTCOME_CONTRACT_VERSION, calculateForwardOutcomes, resolveBarExit } from "./outcome_contract.mjs";
 import { computeStructureLevels } from "./structure_levels.mjs";
 import {
   computeSignalProfileBundle,
@@ -75,7 +84,7 @@ import {
 // 循环依赖安全：stock_audit 顶层只有函数定义，不立即调用 db。
 import {
   recordStockSignalAudit, getStockSignalAudit, recordAlertAudit, updateAlertAudit, getAlertAudit,
-  recordRuntimeMetric, getRuntimeMetrics, getSystemSetting, setSystemSetting,
+  recordRuntimeMetric, getRuntimeMetrics, startRuntimeMetricsMaintenance, getSystemSetting, setSystemSetting,
   transitionsOnly, getStockPositions, backupFiles, verifyDatabaseBackup, getBackupStatus, createDatabaseBackup, restoreDatabaseBackup,
 } from "./stock_audit.mjs";
 // C3 解耦：原 stock_engine → tracker_engine 的 import 已删除。
@@ -86,7 +95,7 @@ import {
 // 循环依赖安全：stock_kline 顶层只有函数定义与 lazyStmt 包装的 prepared statement（Proxy 在
 // 首次访问时才 prepare），不立即调用 db。
 import {
-  insertKline, getKline, countKline, deleteKline,
+  insertKline, getKline, countKline,
   insertQuoteTick, getPreviousMinuteVolume, getMinuteBar, insertMinuteBar, updateMinuteBar,
   badKline,
   validateKline, auditStoredKline, upsertTodayKline, insertKlineRows,
@@ -94,6 +103,9 @@ import {
   fetchKlineArray, fetchKlineSinaCN, fetchKlineNaver, fetchKlineYahoo,
   loadSeedKline, backfillDailyK, backfillAllDailyK,
 } from "./stock_kline.mjs";
+import { initializeWatchlistHistory, reconcileCurrentWatchlist, addWatchlistMember, removeWatchlistMember } from './stock_watchlist_history.mjs';
+import { initializeEntryObservationSchema, freezeEntryObservation, captureEntryPrices, recordObservationFailure, stableHash } from './stock_entry_observation.mjs';
+import { calculatePositionCapacity, capacityForEntryObservation } from './stock_position_capacity.mjs';
 // P2-6c：股票回测 / 可靠性评估 / 样本外验证拆到 stock_backtest.mjs。
 // 反向依赖：stock_backtest 需要 db / SIGNAL_ENGINE_VERSION / analyzeRowsForBacktest / benchmarkFor，
 // 通过 ESM live binding 解算。循环依赖安全：stock_backtest 顶层只有函数定义与两个缓存 Map
@@ -103,6 +115,7 @@ import {
   backtestSymbol, policyBacktestDashboard, backtestDashboardSummary, buildSignalFamilyAudit,
   walkForwardSymbol, evaluateActionReliability, getCachedActionReliability,
   simulatePolicySymbol, buildBacktestSeries, buildBacktestSeriesWithV21,
+  computeV21StateForPosition,
   auditConditionedMarketPool, marketPoolThresholdAudit,
   scoreThresholdAudit, rollingWalkForwardAudit,
   summarizeReturns, summarizePathStats, simulateTradePath,
@@ -143,6 +156,7 @@ const STOCK_MARKETS = Object.freeze(['US','HK','KR','CN']);
 const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
 db.pragma("busy_timeout = 5000");
+export const forwardReview = createForwardReview(db, estimateTradeFee);
 
 // Migrate legacy semi_* tables -> stock_* (one-time, idempotent)
 for (const [from, to] of [['semi_watchlist','stock_watchlist'],['semi_positions','stock_positions'],['semi_snapshots','stock_snapshots']]) {
@@ -302,6 +316,8 @@ db.exec(`
     pair_id INTEGER NOT NULL,date TEXT NOT NULL,premium REAL NOT NULL,nav_quality TEXT NOT NULL,
     liquidity_status TEXT NOT NULL,updated_at INTEGER NOT NULL,etf_price REAL,nav REAL,
     captured_at INTEGER,finalized_at INTEGER,market_state TEXT,
+    nav_method TEXT,anchor_date TEXT,anchor_nav REAL,anchor_premium REAL,
+    underlying_price REAL,etf_provider_time TEXT,underlying_provider_time TEXT,premium_source TEXT,
     PRIMARY KEY(pair_id,date)
   );
   CREATE INDEX IF NOT EXISTS idx_tracker_premium_pair_date ON tracker_premium_daily(pair_id,date);
@@ -503,6 +519,7 @@ db.exec(`
     status_code INTEGER,
     detail TEXT
   );
+  CREATE INDEX IF NOT EXISTS idx_runtime_metrics_time ON runtime_metrics(ts DESC);
   CREATE INDEX IF NOT EXISTS idx_runtime_metrics_endpoint_time ON runtime_metrics(endpoint, ts DESC);
   CREATE TABLE IF NOT EXISTS signal_execution_journal (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -811,8 +828,10 @@ migrateScenarioShadowLedger(db);
 // ledger. They must never share formal signal/outcome or drift tables.
 initializeMeanReversionLedger(db);
 initializeFeatureSnapshotLedger(db);
-// Seed defaults on a fresh DB (idempotent).
-db.prepare(`INSERT OR IGNORE INTO stock_watchlist(symbol,market,added_at) VALUES ('MU','US',0),('SNDK','US',0),('MRVL','US',0),('AMAT','US',0),('INTC','US',0),('LITE','US',0)`).run();
+
+initializeWatchlistHistory(db);
+reconcileCurrentWatchlist(db);
+initializeEntryObservationSchema(db);
 if (db.prepare("SELECT COUNT(*) c FROM tracker_pairs").get().c === 0) {
   db.prepare("INSERT INTO tracker_pairs(etf,etf_market,underlying,underlying_market,fx_pair,leverage,label,active,created_at) VALUES(?,?,?,?,?,?,?,?,?)")
     .run("07709","HK","000660","KR","fx_skrwhkd",2,"南方两倍做多海力士 / SK海力士",1,Date.now());
@@ -1096,11 +1115,7 @@ async function refreshExtCache() {
 // last cached value from latestStock instead of hitting the network.
 // Pass openMarkets=null to force a full fetch (used on first-run init when !latestStock).
 async function fetchStockAll(openMarkets) {
-  const wl = db.prepare("SELECT symbol, market FROM stock_watchlist ORDER BY added_at").all();
-  const rows = wl.length > 0 ? wl : [
-    { symbol: "MU", market: "US" }, { symbol: "SNDK", market: "US" }, { symbol: "MRVL", market: "US" },
-    { symbol: "AMAT", market: "US" }, { symbol: "INTC", market: "US" }, { symbol: "LITE", market: "US" }
-  ];
+  const rows = db.prepare("SELECT symbol, market FROM stock_watchlist ORDER BY added_at").all();
   const results = {};
   let cursor = 0;
   async function worker() {
@@ -1152,6 +1167,9 @@ let lastPollAnyMarketOpen = false;
 
 function commitLatestAnalysis(value) {
   latestAnalysis = value;
+  try {
+    forwardReview.observe(value, Date.now(), market => convertAccountSizeFromCny(getRiskConfig().accountSize, market));
+  } catch (e) { console.error('[low-frequency] signals', e.message); }
   latestAnalysisJson = JSON.stringify(value || {});
   latestAnalysisRevision = Math.max(Date.now(), latestAnalysisRevision + 1);
 }
@@ -1211,6 +1229,7 @@ async function poll() {
     if (needStock) {
       latestStock = await fetchStockAll(needFull ? null : openMarkets);
       const ts = Date.now();
+      try { forwardReview.settle(latestStock, ts); } catch (e) { console.error('[low-frequency] quotes', e.message); }
       // Write semi snapshots + refresh today's K-line bar intraday (Fix B)
       const st = db.prepare("INSERT OR REPLACE INTO stock_snapshots(ts,symbol,price,change_pct,volume) VALUES(?,?,?,?,?)");
       const wlRows = db.prepare("SELECT symbol, market FROM stock_watchlist").all();
@@ -1218,6 +1237,12 @@ async function poll() {
         const sym = r.symbol, mktU = (r.market || "US").toUpperCase();
         const d = latestStock[sym];
         if (d && d.price != null) st.run(ts, sym, d.price, d.changePct, d.volume);
+        const liveDecision = latestAnalysis?.[sym]?.swingDecision;
+        if (liveDecision?.lowFrequency && ['OPEN','ADD'].includes(liveDecision.executionAction) &&
+            entryBlock(liveDecision,d,mktU)) {
+          latestAnalysis[sym] = attachCurrentDecision(latestAnalysis[sym],sym,mktU);
+          touchLatestAnalysis();
+        }
         if (openMarkets.has(mktU)) {
           try { recordMinuteQuote(sym, mktU, d, ts); } catch (e) { console.error("[minute]", sym, e.message); }
         }
@@ -1307,12 +1332,16 @@ function tradingTimeFraction(market) {
 // Historical validation is assembled only by laboratory research endpoints.
 // Current data, setup/price confirmation and explicit risk overlays are the
 // only paths that may block or downgrade an executable technical action.
-const SIGNAL_ENGINE_VERSION = "stock-signal-v2026.09.08-position-protection-v1";
+const SIGNAL_ENGINE_VERSION = "stock-signal-v2026.11.23-low-frequency-v1";
 const COMPATIBLE_SIGNAL_ENGINE_VERSIONS = Object.freeze([SIGNAL_ENGINE_VERSION]);
 const LEGACY_OUTCOME_CONTRACT_VERSION = "legacy-next-close-unversioned-v1";
 const HISTORICAL_REPLAY_ORIGIN = "historical_replay";
 const LIVE_FROZEN_ORIGIN = "live_frozen";
 const HISTORICAL_REPLAY_MODE = "daily-next-session-open-v1";
+// 2026-09-27 重放器升级为持仓感知逐日落库：模拟持仓贯穿全程，空仓日的 OPEN/FORMING 与
+// 持仓日的 REDUCE/CLOSE/ADD 全部落库（此前空仓视角只能产出 OPEN，防守端无法回测验证）。
+// 决策仍 100% 走生产仲裁器（computeV21StateForPosition），只改记录口径，不改算法语义。
+const HISTORICAL_REPLAY_MODE_POSITION = "position-aware-daily-v1";
 const SIGNAL_REPLAY_STATUS_KEY = "stock_signal_replay_status_v1";
 let signalReplayTaskRunner = null;
 
@@ -1996,7 +2025,7 @@ function computeRecommendedShares(executionAction, ctx) {
   if (executionAction === "OPEN" || executionAction === "ADD") {
     if (targetShares > 0 && tranchePct > 0) {
       // 旧逻辑：用户填了计划总股数（仍保留，优先级最高）
-      recommendedShares = Math.max(0, Math.min(targetShares - shares, Math.round(targetShares * tranchePct / 100)));
+      recommendedShares = Math.max(0, Math.min(calculatePositionCapacity({targetShares,shares}), Math.round(targetShares * tranchePct / 100)));
       sharesBasis = "计划仓位 " + tranchePct + "%";
     } else {
       // V2 新逻辑：基于单笔风险金额 × tranchePct，并应用流动性 + 累计风险约束
@@ -2027,10 +2056,9 @@ function computeRecommendedShares(executionAction, ctx) {
         // 累计风险约束：已持仓 + 新建议 ≤ maxPositionRiskPct
         const maxRiskPct = cfg.maxPositionRiskPct;
         const currentRiskAmount = shares * perShareRisk;
-        const maxAllowedRisk = accountSize * maxRiskPct / 100;
-        const additionalRiskCapacity = Math.max(0, maxAllowedRisk - currentRiskAmount);
-        const maxSharesByCumulativeRisk = Math.floor(additionalRiskCapacity / perShareRisk);
-        if (fullShares > maxSharesByCumulativeRisk) {
+        const maxSharesByCumulativeRisk = calculatePositionCapacity({shares,
+          entryReference:entryRef,invalidation,accountSize,maxPositionRiskPct:maxRiskPct});
+        if (maxSharesByCumulativeRisk != null && fullShares > maxSharesByCumulativeRisk) {
           fullShares = maxSharesByCumulativeRisk;
           const usedPct = (currentRiskAmount / accountSize * 100).toFixed(2);
           basisParts.push("累计风险约束（单标的最大 " + maxRiskPct + "%，已用 " + usedPct + "%）");
@@ -2276,6 +2304,148 @@ function buildPersonaDecision({ analysis, profileId, position, market, liveQuote
   decision.sharesBasis = sharesBasis ? `${sharesBasis} | ${decision.summary}` : decision.summary;
   decision = applyCriticalDataGate(decision, { result:analysis, quote:liveQuote, market });
   decision = applyEventExecutionOverlay(decision, { earnings, groupRisk });
+  // C1, C3, C4, C7: Enforce common-stock scope, market regime shield, smooth-leader pullback timing, and frozen daily buy zone.
+  const symUpper = String(analysis?.symbol || '').toUpperCase();
+  const isLeveragedPair = Boolean(symUpper && _getActiveEtfPairMap()[symUpper]);
+  const commonEquityOk = isCommonEquityCandidate({
+    symbol: symUpper,
+    market,
+    name: liveQuote?.name || analysis?.name || '',
+    isLeveragedPair,
+  });
+  const leaderSnapshot = broadMarket[market] && commonEquityOk
+    ? leaderReader(db, market, 'stock')(analysis.symbol)
+    : null;
+
+  if ((position?.shares > 0) && commonEquityOk && !['REDUCE', 'CLOSE'].includes(decision.executionAction)) {
+    const hardBear = leaderSnapshot?.regime?.verified && leaderSnapshot.regime.hardBear;
+    const brokenTrend = leaderSnapshot?.metrics?.ready && leaderSnapshot.metrics.hasFullHistory && leaderSnapshot.metrics.isBrokenTrend;
+    if (hardBear || brokenTrend) {
+      const reduceMeta = STOCK_EXECUTION_ACTION_META.REDUCE;
+      const protectReason = hardBear
+        ? `大盘（${broadMarket[market]}）跌破中长期保护线，优先减仓控制回撤。`
+        : '股价跌破百日趋势保护线，优先减仓保护本金。';
+      const reduceShares = computeRecommendedShares('REDUCE', {
+        tranchePct: tranchePolicy.REDUCE,
+        targetShares: Math.max(0, Number(position?.target_shares || 0)),
+        shares: Math.max(0, Number(position?.shares || 0)),
+        market,
+      });
+      decision = {
+        ...decision,
+        opportunityStage: 'RISK_OFF',
+        executionAction: 'REDUCE',
+        actionable: true,
+        tranchePct: tranchePolicy.REDUCE,
+        trancheBasis: '当前持仓',
+        recommendedShares: reduceShares.recommendedShares,
+        sharesBasis: reduceShares.sharesBasis ? `${reduceShares.sharesBasis} | ${protectReason}` : protectReason,
+        label: reduceMeta.label,
+        tone: reduceMeta.tone,
+        urgency: reduceMeta.urgency,
+        summary: protectReason,
+        decisionCode: 'LOW_FREQUENCY_REGIME_PROTECT',
+        stateSource: 'low_frequency_protection',
+        riskAssessment: { status: 'exit', label: '减仓护本', tone: 'bear', reason: protectReason },
+      };
+    }
+  }
+
+  if (['OPEN', 'ADD'].includes(decision.executionAction)) {
+    const strength = broadMarket[market] ? strengthReader(db, market, 'stock')(analysis.symbol) : null;
+    const nonCommonReason = commonEquityOk
+      ? null
+      : isLeveragedPair
+        ? '2 倍杠杆 ETF 请在 ETF 追踪页单独查看与执行'
+        : '低频买点仅面向港股、美股普通股';
+    const regimeReason = leaderSnapshot?.regime?.verified && !leaderSnapshot.regime.allowEntry
+      ? leaderSnapshot.regime.reason
+      : null;
+    const leaderReason = (!nonCommonReason && !regimeReason && leaderSnapshot?.metrics?.ready
+      && leaderSnapshot.metrics.hasFullHistory && !leaderSnapshot.metrics.qualifiesEntry)
+      ? leaderSnapshot.metrics.waitReason
+      : null;
+
+    const day = marketLocalToday(market);
+    const key = [market, analysis.symbol, profileId, day, decision.executionAction];
+    const frozen = forwardReview.entryRange(...key);
+    if (frozen) {
+      decision.zones = {
+        ...decision.zones,
+        buyLow: frozen.low,
+        buyHigh: frozen.high,
+        inBuyZone: liveQuote?.price >= frozen.low && liveQuote?.price <= frozen.high,
+      };
+    } else if (leaderSnapshot?.metrics?.pricePlan) {
+      const lp = leaderSnapshot.metrics.pricePlan;
+      decision.zones = {
+        ...decision.zones,
+        entryReference: lp.entryReference,
+        buyLow: lp.buyLow,
+        buyHigh: lp.buyHigh,
+        invalidation: Math.max(Number(decision.zones?.invalidation) || 0, lp.stopLoss),
+        reassessment: lp.reassessment ?? decision.zones?.reassessment,
+        inBuyZone: liveQuote?.price >= lp.buyLow && liveQuote?.price <= lp.buyHigh,
+      };
+      const resized = computeRecommendedShares(decision.executionAction, {
+        tranchePct: decision.tranchePct,
+        targetShares: Math.max(0, Number(position?.target_shares || 0)),
+        shares: Math.max(0, Number(position?.shares || 0)),
+        entryReference: decision.zones.entryReference,
+        invalidation: decision.zones.invalidation,
+        avgDollarVolume20d: analysis?.avgDollarVolume20d || leaderSnapshot.metrics.avgDollarVol20 || null,
+        market,
+      });
+      decision.recommendedShares = resized.recommendedShares;
+      decision.sharesBasis = resized.sharesBasis ? `${resized.sharesBasis} | ${decision.summary}` : decision.summary;
+    }
+
+    const reason = entryBlock(decision, liveQuote, market, Date.now(), {
+      nonCommonReason,
+      regimeReason,
+      leaderReason,
+    });
+    if (!reason) {
+      if (!frozen) forwardReview.freezeRange(...key, decision.zones.buyLow, decision.zones.buyHigh);
+      decision.summary += `。本次买区 ${decision.zones.buyLow}–${decision.zones.buyHigh}，出区即放弃。`;
+      if (Number.isFinite(leaderSnapshot?.metrics?.excess126Pct)) {
+        decision.summary += ` 中线较 ${broadMarket[market]} 超额 ${leaderSnapshot.metrics.excess126Pct.toFixed(1)} 个百分点。`;
+      } else if (Number.isFinite(strength)) {
+        decision.summary += ` 近 20 日较 ${broadMarket[market]} ${strength.toFixed(2)} 个百分点。`;
+      }
+    }
+    decision.lowFrequency = {
+      benchmark: broadMarket[market] || null,
+      excess20Pct: strength,
+      excess126Pct: leaderSnapshot?.metrics?.excess126Pct ?? null,
+      slope90: leaderSnapshot?.metrics?.slope90 ?? null,
+      rsi5: leaderSnapshot?.metrics?.rsi5 ?? null,
+      leaderScore: leaderSnapshot?.metrics?.leaderScore ?? null,
+      regime: leaderSnapshot?.regime?.regime || null,
+      reason,
+    };
+    if (reason) {
+      const held = position?.shares > 0;
+      const meta = held ? STOCK_EXECUTION_ACTION_META.HOLD : STOCK_OPPORTUNITY_STAGE_META.BLOCKED;
+      decision = {
+        ...decision,
+        executionAction: held ? 'HOLD' : 'NONE',
+        opportunityStage: 'BLOCKED',
+        actionable: false,
+        notifyEligible: false,
+        recommendedShares: 0,
+        tranchePct: 0,
+        label: meta.label,
+        tone: meta.tone,
+        urgency: meta.urgency,
+        sharesBasis: null,
+        decisionCode: 'LOW_FREQUENCY_WAIT',
+        stateSource: 'low_frequency_entry',
+        summary: reason,
+        executionReadiness: { status: 'blocked', label: '等待买点', reason, tone: 'amber' },
+      };
+    }
+  }
   decision.stagePlan = buildStockStagePricePlan({
     decision,
     strategy: analysis?.signalProfiles?.profiles?.[profileId]?.strategy || null,
@@ -2283,6 +2453,160 @@ function buildPersonaDecision({ analysis, profileId, position, market, liveQuote
   decision.executionBlockers = buildExecutionBlockers(decision);
   decision.explanation = buildStockDecisionExplanation(decision);
   return attachStockDecisionPresentation(decision);
+}
+
+// C2: Surface at most top 1–2 highest-conviction actionable buy opportunities per day; sells are never throttled.
+function enforceDailyLowFrequencyBuyQuota(results, maxBuysPerDay = 2) {
+  if (!results || typeof results !== 'object') return results;
+  const entries = Object.entries(results).map(([symbol, row]) => ({
+    symbol,
+    actionable: row?.swingDecision?.actionable === true,
+    executionAction: row?.swingDecision?.executionAction,
+    leaderScore: row?.swingDecision?.lowFrequency?.leaderScore ?? null,
+    excess126Pct: row?.swingDecision?.lowFrequency?.excess126Pct ?? row?.swingDecision?.lowFrequency?.excess20Pct ?? null,
+  }));
+  const allowed = selectTopDailyBuySymbols(entries, maxBuysPerDay);
+  for (const [symbol, row] of Object.entries(results)) {
+    const sw = row?.swingDecision;
+    if (!sw || !sw.actionable || !['OPEN', 'ADD'].includes(sw.executionAction)) continue;
+    if (allowed.has(symbol)) continue;
+    const held = sw.position?.hasPosition === true;
+    const meta = held ? STOCK_EXECUTION_ACTION_META.HOLD : STOCK_OPPORTUNITY_STAGE_META.BLOCKED;
+    const reason = '当日已有更高把握买点，维持每日 1～2 笔低频节奏';
+    const downgraded = {
+      ...sw,
+      executionAction: held ? 'HOLD' : 'NONE',
+      opportunityStage: 'BLOCKED',
+      actionable: false,
+      notifyEligible: false,
+      recommendedShares: 0,
+      tranchePct: 0,
+      label: meta.label,
+      tone: meta.tone,
+      urgency: meta.urgency,
+      sharesBasis: null,
+      decisionCode: 'LOW_FREQUENCY_PACING_CAP',
+      stateSource: 'low_frequency_pacing',
+      summary: reason,
+      lowFrequency: { ...(sw.lowFrequency || {}), reason },
+      executionReadiness: { status: 'blocked', label: '低频配额等待', reason, tone: 'amber' },
+    };
+    downgraded.stagePlan = buildStockStagePricePlan({
+      decision: downgraded,
+      strategy: row?.signalProfiles?.profiles?.[row?.signalProfiles?.effectiveProfileId]?.strategy || null,
+    });
+    downgraded.executionBlockers = buildExecutionBlockers(downgraded);
+    downgraded.explanation = buildStockDecisionExplanation(downgraded);
+    row.swingDecision = attachStockDecisionPresentation(downgraded);
+  }
+  return results;
+}
+
+// C1, C8: Execute a Radar common-stock buy directly and auto-enroll into watchlist + position tracking with stop protection.
+export function executeRadarDirectBuy({
+  market,
+  symbol,
+  shares,
+  price,
+  fee = null,
+  date = null,
+  note = null,
+  stopLoss = null,
+} = {}) {
+  const mkt = String(market || '').toUpperCase();
+  const sym = String(symbol || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!broadMarket[mkt]) throw new Error('仅支持港股、美股普通股直接下单归入持仓');
+  if (!sym) throw new Error('无效股票代码');
+  const isLeveragedPair = Boolean(_getActiveEtfPairMap()[sym]);
+  if (!isCommonEquityCandidate({ symbol: sym, market: mkt, isLeveragedPair })) {
+    throw new Error('2 倍杠杆 ETF 与非普通股不支持在机会雷达直接建仓');
+  }
+  const qty = Number(shares);
+  const px = Number(price);
+  if (!Number.isSafeInteger(qty) || qty <= 0) throw new Error('买入股数须为正整数');
+  if (!Number.isFinite(px) || px <= 0) throw new Error('成交单价须为正数');
+
+  const existing = db.prepare('SELECT market FROM stock_watchlist WHERE symbol=?').get(sym);
+  if (existing && String(existing.market).toUpperCase() !== mkt) {
+    throw new Error(`代码 ${sym} 已作为 ${existing.market} 市场标的存在`);
+  }
+
+  const tradeDate = validateTradeDate(date || marketLocalToday(mkt));
+  const actualFee = fee != null && fee !== ''
+    ? Number(fee)
+    : estimateTradeFee(mkt, px, qty, 'buy').totalFee;
+  if (!Number.isFinite(actualFee) || actualFee < 0) throw new Error('交易费用须为非负数');
+  const cleanNote = String(note || '机会雷达直接建仓').trim().slice(0, 100);
+  const createdAt = Date.now();
+  const validStop = Number.isFinite(Number(stopLoss)) && Number(stopLoss) > 0 && Number(stopLoss) < px
+    ? Number(stopLoss)
+    : null;
+
+  const outcome = db.transaction(() => {
+    const wasInWatchlist = Boolean(existing);
+    addWatchlistMember(db, {
+      symbol: sym,
+      market: mkt,
+      addedAt: createdAt,
+      groupKey: null,
+      source: 'radar:direct-buy',
+    });
+
+    // C8: Seed stock_kline from radar_v2_bars immediately so newly bought Radar stock has daily history for tracking.
+    try {
+      const hasV2 = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='radar_v2_bars'").get();
+      if (hasV2 && countKline.get(sym).c < 160) {
+        const radarRows = db.prepare(`
+          SELECT date, open, high, low, close, volume
+          FROM radar_v2_bars
+          WHERE market=? AND symbol=? AND data_suspect=0
+          ORDER BY date ASC
+        `).all(mkt, sym);
+        for (const r of radarRows) {
+          insertKline.run(sym, mkt, r.date, r.open, r.high, r.low, r.close, r.volume || 0, createdAt);
+        }
+      }
+    } catch {}
+
+    const positionBefore = computePositionFromEvents(sym);
+    db.prepare(`
+      INSERT INTO stock_trade_events(symbol,market,event_type,shares,price,date,note,created_at,total_fee)
+      VALUES(?,?,?,?,?,?,?,?,?)
+    `).run(sym, mkt, 'buy', qty, px, tradeDate, cleanNote, createdAt, actualFee);
+
+    const pos = computePositionFromEventRows(getTradeEventStream(sym));
+    const bindingSource = positionBefore.shares <= 0 ? 'first_buy' : 'trade_event';
+    const profileBinding = stockProfileState.reconcileBinding(sym, mkt, pos, { source: bindingSource });
+    if (validStop != null && profileBinding?.profile_id) {
+      stockProfileState.retainInvalidation(sym, {
+        profileId: profileBinding.profile_id,
+        invalidation: validStop,
+        asOfDate: tradeDate,
+      });
+    }
+    return {
+      wasInWatchlist,
+      pos,
+      profileBinding: stockProfileState.getActiveBinding(sym),
+    };
+  })();
+
+  warmWatchlistSymbol(sym, mkt)
+    .then(() => analyzeAll())
+    .catch(err => console.error('[radar-direct-buy] warmup/analyze error:', err.message));
+
+  return {
+    ok: true,
+    symbol: sym,
+    market: mkt,
+    watchlistAdded: !outcome.wasInWatchlist,
+    shares: outcome.pos.shares,
+    cost: outcome.pos.cost,
+    fee: Number(actualFee.toFixed(2)),
+    date: tradeDate,
+    stopLoss: outcome.profileBinding?.invalidation_price ?? validStop,
+    profileBinding: outcome.profileBinding,
+  };
 }
 
 function attachCurrentDecision(result, sym, mkt) {
@@ -2343,17 +2667,25 @@ function attachCurrentDecision(result, sym, mkt) {
 }
 
 // 后验可靠度只在实验室按需装配，不进入 /stock-analysis 或正式动作链。
-function buildResearchRankingSnapshot() {
-  return Object.fromEntries(Object.entries(latestAnalysis || {}).map(([symbol, analysis]) => {
-    if (!analysis || analysis.error || !hasCurrentStockSignalContract(analysis)) return [symbol, analysis];
+async function buildResearchRankingSnapshot(selectedMarket, response) {
+  const snapshot = {};
+  for (const [symbol, analysis] of Object.entries(latestAnalysis || {})) {
+    if (selectedMarket && String(analysis?.market || '').toUpperCase() !== selectedMarket) continue;
+    snapshot[symbol] = analysis;
+    if (!analysis || analysis.error || !hasCurrentStockSignalContract(analysis)) continue;
+    // Cold reliability estimates replay history. Let other HTTP requests run
+    // between symbols, and stop if the reader has left the report.
+    await new Promise(resolve => setImmediate(resolve));
+    if (response.destroyed) break;
     const market = String(analysis.market || 'US').toUpperCase();
     const reliability = getCachedActionReliability(symbol, market, analysis);
     const scoreResult = computeCompositeScore({ analysis, reliability, executionRisk:analysis.executionRisk || null });
-    return [symbol, {
+    snapshot[symbol] = {
       ...analysis,
       swingDecision:{ ...(analysis.swingDecision || {}), scoreFactors:scoreResult.factors },
-    }];
-  }));
+    };
+  }
+  return snapshot;
 }
 // D7: 执行风险分 R 计算 —— 综合多维度风险信号输出 0-100 分。
 // v2.0 去重（2026-07-28）：移除与质量乘数因子重复计分的维度，仅保留独立执行风险。
@@ -2580,6 +2912,14 @@ function logSignalSnapshot(results) {
     }
   });
   tx(Object.entries(results || {}));
+  if (process.env.STOCK_ENTRY_ALPHA_CAPTURE_ENABLED !== '0') {
+    try { freezeEntryObservations(results, now); }
+    catch (error) {
+      console.error('[entry-alpha] observation capture', error.message);
+      try { recordObservationFailure(db,{reason:error.message,source:'entry_observation_batch'}); } catch {}
+    }
+    followUpExitedEntryPrices().catch(error => console.error('[entry-alpha] exited price follow-up', error.message));
+  }
   try {
     const shadow = recordScenarioShadowSnapshots({
       db,
@@ -2606,6 +2946,103 @@ function logSignalSnapshot(results) {
   scheduleFeatureSnapshotOutcomeAccrual();
   scheduleScenarioShadowAccrual();
   scheduleProfileShadowAccrual();
+}
+
+// Research-only capture after the formal log transaction. Its failure cannot
+// roll back or alter formal actions. No historical day is reconstructed here.
+function freezeEntryObservations(results, observedAt) {
+  const watched=db.prepare('SELECT market,symbol,group_key FROM stock_watchlist').all();
+  const logFor=db.prepare(`SELECT * FROM stock_signal_log WHERE market=? AND symbol=? AND date=?
+    AND sample_origin='live_frozen' AND engine_version=?`);
+  const barFor=db.prepare('SELECT date,open,high,low,close,volume FROM stock_kline WHERE symbol=? AND date=?');
+  const barsFrom=db.prepare('SELECT date,open,high,low,close,volume FROM stock_kline WHERE symbol=? AND date>=? AND date<=? ORDER BY date');
+  const firstObservation=db.prepare('SELECT MIN(as_of_date) first_date FROM stock_entry_observations WHERE market=? AND symbol=?');
+  const riskConfig=getRiskConfig();
+  for (const row of watched) {
+    const market=String(row.market || 'US').toUpperCase(), symbol=row.symbol;
+    const expectedDate=lastCompletedTradingDate(market,observedAt);
+    if (!expectedDate) continue;
+    const nextOpenAt=nextMarketOpenAt(market,Date.parse(`${expectedDate}T23:59:59Z`));
+    const analysis=results?.[symbol] || null;
+    // Give the normal post-close K-line backfill time to complete. Once the
+    // next open has passed, preserve the missing-bar exclusion instead.
+    if (analysis?.asOfDate !== expectedDate && nextOpenAt && observedAt < nextOpenAt) continue;
+    try {
+      const decision=analysis?.swingDecision || null;
+      const profile=analysis && hasCurrentStockSignalContract(analysis) ? selectedStockProfile(analysis) : null;
+      const strategy=analysis && hasCurrentStockSignalContract(analysis) ? selectedStockStrategy(analysis) : null;
+      const position=computePositionFromEvents(symbol);
+      const shares=Number(position?.shares);
+      const target=Number(position?.target_shares || 0);
+      const account=convertAccountSizeFromCny(riskConfig.accountSize,market);
+      const capacity=capacityForEntryObservation({decision,position,
+        accountSize:account,maxPositionRiskPct:riskConfig.maxPositionRiskPct});
+      const bar=barFor.get(symbol,expectedDate);
+      const log=logFor.get(market,symbol,expectedDate,SIGNAL_ENGINE_VERSION);
+      const configHash=stableHash({ engine:SIGNAL_ENGINE_VERSION,
+        profileId:profile?.profileId,profileVersion:profile?.profileVersion,
+        strategyVersion:strategy?.strategyVersion,riskConfig,earningsPolicy:getEarningsPolicy() });
+      freezeEntryObservation(db, {
+        market,symbol,asOfDate:expectedDate,analysisAsOfDate:analysis?.asOfDate || null,
+        observedAt,nextOpenAt,calendarVerified:getMarketStateFor(market).verified===true,
+        dataQualified:!!analysis && !analysis.error && hasCurrentStockSignalContract(analysis)
+          && analysis.daily !== false && decision?.signalAvailable !== false
+          && decision?.dataGate?.status === 'pass' && position?.ledgerStatus !== 'invalid'
+          && Number(bar?.close)>0,
+        dataReason:analysis?.error ? 'analysis_error' : position?.ledgerStatus === 'invalid'
+          ? 'position_ledger_invalid' : decision?.dataGate?.status || 'data_unavailable',
+        dataQuality:strategy?.dataQuality?.level || null,
+        marketState:analysis?.marketRegime?.available===true ? analysis.marketRegime.key : null,
+        engineVersion:SIGNAL_ENGINE_VERSION,profileId:profile?.profileId,
+        profileVersion:profile?.profileVersion,strategyVersion:strategy?.strategyVersion,
+        decisionConfigHash:configHash,groupKey:row.group_key || '',
+        executionAction:decision?.executionAction,
+        opportunityStage:decision?.opportunityStage || null,
+        dataGateStatus:decision?.dataGate?.status || null,
+        signalLog:log,firstLogCompleted:!!log &&
+          lastCompletedTradingDate(market,Number(log.first_signal_ts))===expectedDate,
+        positionShares:shares,targetShares:target,capacityRemaining:capacity,
+        // The live arbiter has no independent ADD cooldown gate; the v21
+        // historical simulator's cooldown is not a live eligibility rule.
+        cooldownState:'clear',priceClose:bar?.close,priceVolume:bar?.volume,
+        priceSource:bar ? 'stock_kline_first_seen' : null,source:'live_completed_daily',
+      });
+      const first=firstObservation.get(market,symbol)?.first_date;
+      if (first) captureEntryPrices(db,{market,symbol,bars:barsFrom.all(symbol,first,expectedDate),observedAt});
+    } catch (error) {
+      console.error(`[entry-alpha] ${market}:${symbol} ${error.message}`);
+      try { recordObservationFailure(db,{market,symbol,asOfDate:expectedDate,reason:error.message}); } catch {}
+    }
+  }
+}
+
+const lastExitedEntryFollowup=new Map();
+let exitedEntryFollowupInFlight=false;
+async function followUpExitedEntryPrices() {
+  if (exitedEntryFollowupInFlight) return;
+  const pending=db.prepare(`SELECT o.market,o.symbol,MIN(o.as_of_date) first_date
+    FROM stock_entry_observations o
+    LEFT JOIN stock_watchlist w ON w.symbol=o.symbol
+    WHERE w.symbol IS NULL AND o.as_of_date>=date('now','-90 days')
+    GROUP BY o.market,o.symbol`).all();
+  if (!pending.length) return;
+  exitedEntryFollowupInFlight=true;
+  try {
+    const bars=db.prepare(`SELECT date,open,high,low,close,volume FROM stock_kline
+      WHERE symbol=? AND date>=? AND date<=? ORDER BY date`);
+    for (const row of pending) {
+      const completed=lastCompletedTradingDate(row.market);
+      if (!completed || lastExitedEntryFollowup.get(`${row.market}:${row.symbol}`)===completed) continue;
+      try {
+        await backfillDailyK(row.symbol,row.market);
+        captureEntryPrices(db,{market:row.market,symbol:row.symbol,
+          bars:bars.all(row.symbol,row.first_date,completed),source:'exited_symbol_followup'});
+        lastExitedEntryFollowup.set(`${row.market}:${row.symbol}`,completed);
+      } catch (error) { recordObservationFailure(db,{market:row.market,symbol:row.symbol,
+        asOfDate:completed,reason:error.message,source:'exited_price_followup'}); }
+      await yieldToEventLoop();
+    }
+  } finally { exitedEntryFollowupInFlight=false; }
 }
 
 // Profile shadows are frozen only once the result's daily bar is the market's
@@ -3048,6 +3485,38 @@ function roundNumber(value, digits = 3) {
   return Number.isFinite(Number(value)) ? +Number(value).toFixed(digits) : null;
 }
 
+// 描述性均值可以被单个标的主导。协议要求检查单票贡献占比，因此把同一份
+// 去重叠事件按标的分摊，暴露最大贡献占比与前几名贡献者，而不是只给一个均值。
+function summarizeProfileConcentration(rows) {
+  const bySymbol = new Map();
+  for (const row of rows) {
+    const key = `${row.market}|${row.symbol}`;
+    if (!bySymbol.has(key)) bySymbol.set(key, { market: row.market, symbol: row.symbol, count: 0, sum: 0, wins: 0 });
+    const bucket = bySymbol.get(key);
+    bucket.count += 1;
+    bucket.sum += Number(row.directionalReturn);
+    if (Number(row.directionalReturn) > 0) bucket.wins += 1;
+  }
+  const contributions = [...bySymbol.values()].map(bucket => ({
+    market: bucket.market,
+    symbol: bucket.symbol,
+    count: bucket.count,
+    wins: bucket.wins,
+    averageDirectionalReturnPct: roundNumber(bucket.sum / bucket.count, 3),
+  }));
+  const absoluteTotal = contributions.reduce((sum, item) => sum + Math.abs(item.averageDirectionalReturnPct * item.count), 0);
+  const ranked = [...contributions].sort((left, right) => (
+    Math.abs(right.averageDirectionalReturnPct * right.count) - Math.abs(left.averageDirectionalReturnPct * left.count)
+    || left.symbol.localeCompare(right.symbol)
+  ));
+  return {
+    symbols: contributions.length,
+    topSymbolSharePct: absoluteTotal > 0 && ranked.length
+      ? +(Math.abs(ranked[0].averageDirectionalReturnPct * ranked[0].count) / absoluteTotal * 100).toFixed(1) : null,
+    topContributors: ranked.slice(0, 3),
+  };
+}
+
 export function getSignalProfileResearchDashboard({ market = null } = {}) {
   const normalizedMarket = market ? String(market).toUpperCase() : null;
   const marketClause = normalizedMarket ? ' AND s.market=?' : '';
@@ -3098,6 +3567,13 @@ export function getSignalProfileResearchDashboard({ market = null } = {}) {
   const assetEligibleShadows = rawShadows.filter(eligibleAsset);
   const shadows = assetEligibleShadows.filter(currentProfileCohort);
   const historicalShadows = assetEligibleShadows.filter(row => !currentProfileCohort(row));
+  // 面板按研究纪律剔除杠杆 ETF 与已知非普通股。落在被剔除标的上的防守策略动作并不会因此消失，
+  // 只是不再进入统计；单独计数并列出标的，避免"完整策略防守桶为空"被误读成账本缺数据。
+  const excludedDefensiveShadows = rawShadows.filter(row => !eligibleAsset(row)
+    && currentProfileCohort(row)
+    && row.strategy_version === STOCK_PROFILE_STRATEGY_VERSION
+    && eventKindForShadow(row).strategyChanged === true
+    && ['REDUCE', 'CLOSE'].includes(String(row.execution_action || '').toUpperCase()));
   const rawOutcomes = db.prepare(`SELECT s.id,s.profile_id,s.profile_version,s.profile_role,s.engine_version,
       s.symbol,s.market,s.as_of_date,s.direction,s.confirmed,s.payload,s.strategy_version,s.opportunity_stage,s.execution_action,s.decision_direction,
       o.horizon,o.entry_date,o.exit_date,o.directional_return_pct,o.excess_return_pct,o.mfe_pct,o.mae_pct,
@@ -3168,6 +3644,11 @@ export function getSignalProfileResearchDashboard({ market = null } = {}) {
         ...summary,
         long: summarizeProfileOutcomeRows(events.filter(event => event.direction > 0)),
         defensive: summarizeProfileOutcomeRows(events.filter(event => event.direction < 0)),
+        concentration: {
+          all: summarizeProfileConcentration(events),
+          long: summarizeProfileConcentration(events.filter(event => event.direction > 0)),
+          defensive: summarizeProfileConcentration(events.filter(event => event.direction < 0)),
+        },
       }];
     }));
     const strategyHorizons = Object.fromEntries([5, 20].map(horizon => {
@@ -3287,6 +3768,8 @@ export function getSignalProfileResearchDashboard({ market = null } = {}) {
       strategyOutcomes:strategyEvents.length,
       acceptedNonOverlappingStrategyOutcomes:nonOverlappingStrategy.accepted.length,
       purgedOverlappingStrategyOutcomes:nonOverlappingStrategy.skippedOverlap,
+      excludedDefensiveObservations: excludedDefensiveShadows.length,
+      excludedDefensiveSymbols: [...new Set(excludedDefensiveShadows.map(row => `${row.market}:${row.symbol}`))].sort(),
       excludedSymbols: [...excludedSymbols].sort(),
     },
     pairedWithBalanced,
@@ -3295,7 +3778,8 @@ export function getSignalProfileResearchDashboard({ market = null } = {}) {
     method: [
       '三套人格共享同一事实与安全边界，并分别记录最终动作、仓位比例、关键价位及后续路径；均衡决策仍是唯一正式动作来源。',
       '仅在已完成日线首次建立基线，或技术状态/完整策略发生迁移时记录；盘中、历史重放和持续同状态不会写入。',
-      '默认排除杠杆 ETF 与已知非普通股；同一标的、人格和期限的重叠持有区间只保留第一条。',
+      '默认排除杠杆 ETF 与已知非普通股；落在被排除标的上的防守策略动作单独计数展示，不进入收益统计。',
+      '同一标的、人格和期限的重叠持有区间只保留第一条，并按标的给出最大贡献占比，避免单一标的绑架均值。',
       '稳健确认仅在连续确认完成后进入收益结算；等待确认状态不会混入表现统计。',
       '人格计算口径以 profile_version 分代；正式引擎的执行门控升级不会清空技术人格基线，旧口径单独保留且不与当前口径混算。',
       '完整策略统计按 strategy_version 分代；止损与目标同日触发且无法判断先后时标记为歧义，不计入策略收益。',
@@ -3450,7 +3934,7 @@ function replayStatusSnapshot() {
     markets: rows,
     totalSignals: total,
     lastRun: lastRun || null,
-    rule: '所有市场均以信号日后的下一有效交易日开盘作为入场价（开盘缺失才明确降级为该日收盘），并以 1/3/5/10/20 日统一结算；历史重放只可降级入场，不会升级为买入。',
+    rule: '持仓感知逐日重放：模拟持仓贯穿全程，空仓日落库 OPEN/ADD/机会形成中、持仓日落库 REDUCE/CLOSE/ADD；所有动作以信号日后的下一有效交易日开盘结算（1/3/5/10/20 日）；决策只走生产仲裁器，历史重放只可降级入场，不会升级为买入。',
   };
 }
 
@@ -3488,7 +3972,7 @@ async function rebuildHistoricalSignalReplay({ days = 320, markets = ['US', 'HK'
         entry.date, entry.ts, entry.symbol, entry.market, entry.price, entry.rawSignal,
         entry.executionAction, entry.label, entry.opportunityStage, entry.executionAction,
         entry.regime, entry.setup, entry.risk, entry.score, null,
-        entry.quality, entry.payload, HISTORICAL_REPLAY_ORIGIN, SIGNAL_ENGINE_VERSION, HISTORICAL_REPLAY_MODE,
+        entry.quality, entry.payload, HISTORICAL_REPLAY_ORIGIN, SIGNAL_ENGINE_VERSION, HISTORICAL_REPLAY_MODE_POSITION,
         replayProfile?.id || FORMAL_SIGNAL_PROFILE_ID,
         replayProfile?.version || 'legacy_unknown',
         STOCK_PROFILE_STRATEGY_VERSION,
@@ -3498,6 +3982,12 @@ async function rebuildHistoricalSignalReplay({ days = 320, markets = ['US', 'HK'
     }
   });
 
+  // 持仓感知逐日重放（2026-09-27）：模拟持仓贯穿全程，语义与 simulatePolicySymbol 的
+  // useV21Action 分支一致（pending 次日开盘成交、stop/target 盘中保护、ADD 冷却 + 仓位上限）。
+  // 落库规则：空仓日 OPEN/ADD 与 机会形成中(FORMING)；持仓日 REDUCE/CLOSE/ADD。
+  // 决策 100% 走生产仲裁器（computeV21StateForPosition），只改记录口径、不改算法语义；
+  // 防守动作因此可回测验证（此前空仓视角重放只能产出 OPEN）。
+  const SIM_INITIAL_CAPITAL = 100000;
   for (const row of watchlist) {
     const market = String(row.market || 'US').toUpperCase();
     const marketStats = perMarket[market];
@@ -3507,39 +3997,110 @@ async function rebuildHistoricalSignalReplay({ days = 320, markets = ['US', 'HK'
       marketStats.errors.push({ symbol:row.symbol, reason:series.error, bars:series.bars || 0 });
       continue;
     }
+    const rows = series.rows;
+    const eventByIndex = new Map(series.events.map(ev => [ev.barIndex, ev]));
+    const lot = market === 'HK' ? 100 : 1;
+    let shares = 0, avgCost = 0, stop = null, target = null;
+    let pending = null, lastEntryIndex = -Infinity;
     const entries = [];
-    for (const event of series.events) {
-      const opportunityStage = event.v21?.opportunityStage || null;
-      const executionAction = event.v21?.executionAction || null;
-      if (!signalDirection(executionAction)) continue;
-      candidates++;
-      const date = String(event.date);
-      entries.push({
-        date, ts:Date.parse(date + 'T12:00:00Z'), symbol:row.symbol, market, price:event.close,
-        rawSignal:event.rawSignal || null, opportunityStage, executionAction,
-        label:event.v21?.label || executionAction,
-        regime:event.regime || null, setup:event.setup || null, risk:event.risk || null,
-        score:event.score ?? null, quality:event.quality || null,
-        payload:JSON.stringify({
-          engineVersion:SIGNAL_ENGINE_VERSION,
-          forwardProtocolVersion:OUTCOME_CONTRACT_VERSION,
-          sampleOrigin:HISTORICAL_REPLAY_ORIGIN,
-          replayMode:HISTORICAL_REPLAY_MODE,
-          noLookahead:true,
-          historicalReplay:{ sourceSignalDate:date, sourceClose:event.close, barIndex:event.barIndex, stopLoss:event.stopLoss, takeProfit:event.takeProfit }
-        }),
-        marketStats,
-      });
+
+    for (let i = 60; i < rows.length; i++) {
+      const bar = rows[i];
+      // 1) 执行信号日的 pending（次日有效开盘成交；开盘缺失时结算契约另有降级规则）
+      if (pending) {
+        const px = bar.open > 0 ? bar.open : bar.close;
+        if (pending.action === 'OPEN' || pending.action === 'ADD') {
+          const fraction = Number(pending.tranchePct) > 1 ? Number(pending.tranchePct) / 100 : Number(pending.tranchePct || 0.25);
+          const qty = Math.max(lot, Math.floor((SIM_INITIAL_CAPITAL * fraction) / px / lot) * lot);
+          if (px > 0 && qty > 0) {
+            avgCost = (avgCost * shares + px * qty) / (shares + qty);
+            shares += qty;
+            lastEntryIndex = i;
+          }
+          if (shares > 0 && pending.stop != null) stop = Math.max(stop ?? 0, pending.stop);
+          if (pending.target != null) target = pending.target;
+        } else if (pending.action === 'REDUCE') {
+          const trimFraction = Number(pending.tranchePct) > 1 ? Number(pending.tranchePct) / 100 : Number(pending.tranchePct ?? 0.25);
+          shares -= Math.min(shares, Math.max(lot, Math.floor(shares * trimFraction / lot) * lot));
+          if (!shares) { avgCost = 0; stop = null; target = null; }
+        } else if (pending.action === 'CLOSE') {
+          shares = 0; avgCost = 0; stop = null; target = null;
+        }
+        pending = null;
+      }
+      // 2) 盘中 stop/target 保护性成交（与 simulatePolicySymbol 相同语义）
+      if (shares > 0) {
+        const fill = resolveBarExit(bar, { stop, target, direction:1 });
+        if (fill?.reason === 'stop') { shares = 0; avgCost = 0; stop = null; target = null; }
+        else if (fill?.reason === 'target') {
+          shares -= Math.min(shares, Math.max(lot, Math.floor(shares * 0.25 / lot) * lot));
+          target = null;
+          if (!shares) { avgCost = 0; stop = null; }
+        }
+      }
+      // 3) 当日收盘状态 → 生产仲裁器（持仓感知）
+      const ev = eventByIndex.get(i);
+      if (!ev || !ev._analysis || i >= rows.length - 1) continue;
+      const position = shares > 0 ? { shares, cost: avgCost, target_shares: 0,
+        protection: { profileId: ev._analysis?.signalProfiles?.effectiveProfileId || null, invalidation: stop } } : null;
+      let v21;
+      try { v21 = computeV21StateForPosition(ev._analysis, position); }
+      catch (e) {
+        // 仲裁器调用失败不能静默吞掉（2026-09-27 教训：静默 catch 曾把整批重放变成 0 样本）
+        if (!globalThis.__replayArbiterErrLogged) {
+          globalThis.__replayArbiterErrLogged = true;
+          console.error('[signal-replay] 仲裁器调用异常（仅告警一次）:', e?.message || e);
+        }
+        continue;
+      }
+      if (!v21) continue;
+      const executionAction = v21.executionAction || null;
+      const opportunityStage = v21.opportunityStage || null;
+      if (signalDirection(executionAction) || opportunityStage === 'FORMING') {
+        candidates++;
+        const date = String(ev.date);
+        entries.push({
+          date, ts:Date.parse(date + 'T12:00:00Z'), symbol:row.symbol, market, price:ev.close,
+          rawSignal:ev.rawSignal || null, opportunityStage, executionAction,
+          label:v21.label || executionAction,
+          regime:ev.regime || null, setup:ev.setup || null, risk:ev.risk || null,
+          score:ev.score ?? null, quality:ev.quality || null,
+          payload:JSON.stringify({
+            engineVersion:SIGNAL_ENGINE_VERSION,
+            forwardProtocolVersion:OUTCOME_CONTRACT_VERSION,
+            sampleOrigin:HISTORICAL_REPLAY_ORIGIN,
+            replayMode:HISTORICAL_REPLAY_MODE_POSITION,
+            noLookahead:true,
+            historicalReplay:{ sourceSignalDate:date, sourceClose:ev.close, barIndex:ev.barIndex,
+              stopLoss:v21.stopLoss ?? null, takeProfit:v21.takeProfit ?? null, reason:v21.reason || null,
+              simulatedPosition: shares > 0 ? { shares, avgCost:+avgCost.toFixed(4), pnlPct:v21.pnlPct ?? null, stop, target } : null }
+          }),
+          marketStats,
+        });
+      }
+      // 4) 决策 → 明日 pending（动作映射与 simulatePolicySymbol useV21Action 分支一致）
+      if (shares > 0 && v21.stopLoss > 0) stop = Math.max(stop ?? 0, v21.stopLoss);
+      if (shares <= 0) {
+        if (executionAction === 'OPEN') pending = { action:'OPEN', stop:v21.stopLoss, target:v21.takeProfit, tranchePct:v21.tranchePct };
+      } else {
+        if (executionAction === 'CLOSE') pending = { action:'CLOSE', signalDate:ev.date };
+        else if (executionAction === 'REDUCE') pending = { action:'REDUCE', signalDate:ev.date, tranchePct:v21.tranchePct };
+        else if (executionAction === 'ADD' && i - lastEntryIndex >= 3 && shares * bar.close < SIM_INITIAL_CAPITAL * 0.95) {
+          pending = { action:'ADD', stop:v21.stopLoss, target:v21.takeProfit, signalDate:ev.date, tranchePct:v21.tranchePct };
+        }
+        // HOLD/NONE 时无操作。
+      }
     }
     insert(entries);
     await new Promise(resolve => setImmediate(resolve));
   }
   await evaluateSignalOutcomes();
+
   const result = {
     status:'ready', startedAt, completedAt:Date.now(), durationMs:Date.now() - startedAt,
-    engineVersion:SIGNAL_ENGINE_VERSION, origin:HISTORICAL_REPLAY_ORIGIN, replayMode:HISTORICAL_REPLAY_MODE,
+    engineVersion:SIGNAL_ENGINE_VERSION, origin:HISTORICAL_REPLAY_ORIGIN, replayMode:HISTORICAL_REPLAY_MODE_POSITION,
     days:boundedDays, markets:selectedMarkets, symbols:watchlist.length, candidates, replacedSignals:oldIds.length,
-    perMarket, noLookahead:'信号仅使用当日及此前日K；入场一律取下一有效交易日开盘（开盘缺失才降级到该日收盘）；持有期统一为 1/3/5/10/20 日。',
+    perMarket, noLookahead:'信号仅使用当日及此前日K；执行一律取下一有效交易日开盘；持仓感知逐日落库（空仓日 OPEN/ADD/FORMING、持仓日 REDUCE/CLOSE/ADD），持有期统一为 1/3/5/10/20 日。',
   };
   db.prepare(`INSERT INTO app_meta(key,value,updated_at) VALUES(?,?,?)
     ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`)
@@ -4156,6 +4717,27 @@ function analyzeIntraday(sym) {
 }
 
 // ── HTTP Server ──
+async function serveScenarioDashboard(url, res) {
+  const market = (url.searchParams.get('market') || '').toUpperCase().replace(/[^A-Z]/g, '') || null;
+  const kind = (url.searchParams.get('kind') || '').replace(/[^a-z_]/gi, '') || null;
+  const state = (url.searchParams.get('state') || '').toUpperCase().replace(/[^A-Z]/g, '') || null;
+  const limit = Math.min(2000, Math.max(1, parseInt(url.searchParams.get('limit') || '1000', 10) || 1000));
+  const view = url.searchParams.get('view');
+  const dashboard = ['models','model-summary','ranking'].includes(view) ? {} : getScenarioResearchDashboard(db, { market, kind, state, limit });
+  if (view !== 'ledger' && view !== 'ranking') {
+    const latestDrift = getLatestSignalDriftReport();
+    dashboard.signalDrift = isCurrentSignalDriftReport(latestDrift) ? latestDrift : buildSignalDriftReport();
+    dashboard.signalProfiles = getSignalProfileResearchDashboard({ market });
+  }
+  if (view !== 'ledger' && view !== 'model-summary') {
+    const snapshot = await buildResearchRankingSnapshot(market, res);
+    if (res.destroyed) return;
+    dashboard.researchRanking = summarizeResearchRankingFactors(snapshot, { market });
+  }
+  res.writeHead(200, { 'Content-Type':'application/json' });
+  res.end(JSON.stringify(dashboard));
+}
+
 export function stockHandler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS, POST");
@@ -4173,6 +4755,14 @@ export function stockHandler(req, res) {
   const url = new URL(req.url, "http://localhost");
 
 
+  if (url.pathname === '/stock/low-frequency-review' && req.method === 'GET') {
+    const market = url.searchParams.get('market') || 'US';
+    if (!Object.hasOwn(broadMarket, market)) { res.writeHead(400); res.end('unknown market'); return; }
+    const report = forwardReview.report(market, Number(url.searchParams.get('period')) || null, Date.now());
+    res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
+    res.end(JSON.stringify(report));
+    return;
+  }
   if (url.pathname === "/stock-snapshot") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(latestStock || {}));
@@ -4258,11 +4848,7 @@ export function stockHandler(req, res) {
     // 若缓存为空（首次启动尚未完成首次 analyzeAll），才同步计算一次。
     let results = latestAnalysis;
     if (!results) {
-      const wlRows = db.prepare("SELECT symbol, market FROM stock_watchlist ORDER BY added_at").all();
-      const SYMS = wlRows.length > 0 ? wlRows : [
-        { symbol: "MU", market: "US" }, { symbol: "SNDK", market: "US" }, { symbol: "MRVL", market: "US" },
-        { symbol: "AMAT", market: "US" }, { symbol: "INTC", market: "US" }, { symbol: "LITE", market: "US" }
-      ];
+      const SYMS = db.prepare("SELECT symbol, market FROM stock_watchlist ORDER BY added_at").all();
       const rawResults = {};
       for (const row of SYMS) {
         const mkt = (row.market || "US").toUpperCase();
@@ -4288,6 +4874,7 @@ export function stockHandler(req, res) {
           completedDateForMarket: lastCompletedTradingDate,
         });
       } catch (e) { console.error('[feature-snapshots] initial capture', e.message); }
+      enforceDailyLowFrequencyBuyQuota(results);
       commitLatestAnalysis(results);
       try { logSignalSnapshot(results); } catch (e) { console.error("[signal-log]", e.message); }
     }
@@ -4452,20 +5039,11 @@ export function stockHandler(req, res) {
   }
 
   if (url.pathname === "/stock/scenario-research/dashboard") {
-    const market = (url.searchParams.get("market") || "").toUpperCase().replace(/[^A-Z]/g, "") || null;
-    const kind = (url.searchParams.get("kind") || "").replace(/[^a-z_]/gi, "") || null;
-    const state = (url.searchParams.get("state") || "").toUpperCase().replace(/[^A-Z]/g, "") || null;
-    const limit = Math.min(2000, Math.max(1, parseInt(url.searchParams.get("limit") || "1000", 10) || 1000));
-    const dashboard = getScenarioResearchDashboard(db, { market, kind, state, limit });
-    const latestDrift = getLatestSignalDriftReport();
-    // 实验室只读展示已有的模型效果评估；没有落盘周报时才基于已冻结结果即时汇总，
-    // 不触发 outcome 回填、参数调优或任何正式决策变更。
-    dashboard.signalDrift = isCurrentSignalDriftReport(latestDrift) ? latestDrift : buildSignalDriftReport();
-    dashboard.signalProfiles = getSignalProfileResearchDashboard({ market });
-    dashboard.researchRanking = summarizeResearchRankingFactors(buildResearchRankingSnapshot(), { market });
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(dashboard));
-    return;
+    return serveScenarioDashboard(url, res).catch(() => {
+      if (res.destroyed) return;
+      res.writeHead(500, { "Content-Type":"application/json" });
+      res.end(JSON.stringify({ error:'scenario_dashboard_unavailable' }));
+    });
   }
 
   if (url.pathname === "/stock/scenario-research/summary") {
@@ -4774,10 +5352,7 @@ export function stockHandler(req, res) {
             // Do not use INSERT OR REPLACE here: REPLACE would erase an
             // already configured group when a radar item is handed off into
             // the stock watchlist a second time.
-            db.prepare(`INSERT INTO stock_watchlist(symbol,market,added_at,group_key) VALUES(?,?,?,?)
-              ON CONFLICT(symbol) DO UPDATE SET market=excluded.market,added_at=excluded.added_at,
-              group_key=CASE WHEN ? IS NULL THEN stock_watchlist.group_key ELSE excluded.group_key END`)
-              .run(symbol,market,Date.now(),requestedGroup || '',requestedGroup);
+            addWatchlistMember(db, { symbol,market,addedAt:Date.now(),groupKey:requestedGroup,source:'stock-watchlist:add' });
             const warmup=await warmWatchlistSymbol(symbol,market);
             res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ ok: true, warmup }));
           } else if (t.action === 'set-group') {
@@ -4871,14 +5446,13 @@ export function stockHandler(req, res) {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok:true, removed: updated, groupKey: delKey }));
           } else if (t.action === "remove") {
-            const info = db.prepare("DELETE FROM stock_watchlist WHERE symbol = ?").run(t.symbol);
-            deleteKline.run(t.symbol);
-            if (info.changes === 0) {
+            const info = removeWatchlistMember(db, { symbol:t.symbol,source:'stock-watchlist:remove' });
+            if (info.removed === 0) {
               res.writeHead(404, { "Content-Type": "application/json" });
               res.end(JSON.stringify({ ok: false, error: "未找到自选股：" + (t.symbol || "(空)") }));
             } else {
               analyzeAll().catch(error => console.error('[stock-engine] watchlist-remove analysis', error.message));
-              res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ ok: true, removed: info.changes }));
+              res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ ok: true, removed: info.removed }));
             }
           } else if (t.action === "reorder") {
             const symbols = Array.isArray(t.symbols) ? t.symbols.map(x => String(x).toUpperCase().replace(/[^A-Z0-9]/g, "")) : [];
@@ -5065,14 +5639,10 @@ export async function analyzeAll() {
   analysisInFlight = true;
   try {
     // 预刷新盘后数据缓存，确保当前决策能读到最新 extPrice
-    // 30s TTL，通常 0-1 次网络请求；超时 5s 不会阻塞 analyzeAll 主流程
+    // 30s TTL，通常 0-1 次网络请求；最多等待 5s 后继续 analyzeAll；异步等待不阻塞事件循环
     try { await refreshExtCache(); } catch {}
 
-    const wlRows = db.prepare("SELECT symbol, market FROM stock_watchlist ORDER BY added_at").all();
-    const SYMS = wlRows.length > 0 ? wlRows : [
-      { symbol: "MU", market: "US" }, { symbol: "SNDK", market: "US" }, { symbol: "MRVL", market: "US" },
-      { symbol: "AMAT", market: "US" }, { symbol: "INTC", market: "US" }, { symbol: "LITE", market: "US" }
-    ];
+    const SYMS = db.prepare("SELECT symbol, market FROM stock_watchlist ORDER BY added_at").all();
     // 不把半成品 rawResults 赋值给 latestAnalysis，避免前端在决策装配完成前
     // 读到缺少 swingDecision 的中间状态。
     const rawResults = {};
@@ -5127,6 +5697,7 @@ export async function analyzeAll() {
       });
       if (featureSnapshots.inserted > 0) console.log(`[feature-snapshots] frozen ${featureSnapshots.inserted} completed-daily source snapshots`);
     } catch (e) { console.error('[feature-snapshots] capture', e.message); }
+    enforceDailyLowFrequencyBuyQuota(results);
     commitLatestAnalysis(results);
     try { logSignalSnapshot(results); } catch (e) { console.error("[signal-log]", e.message); }
   } catch (e) { console.error("[stock-engine] analyzeAll", e.message); }
@@ -5201,8 +5772,9 @@ function importLegacyWatchlist() {
       if (!existsSync(f)) continue;
       const arr = JSON.parse(readFileSync(f, "utf-8"));
       if (!Array.isArray(arr) || !arr.length) continue;
-      const ins = db.prepare("INSERT OR REPLACE INTO stock_watchlist(symbol,market,added_at) VALUES(?,?,?)");
-      db.transaction((rows) => { for (const r of rows) ins.run(r.symbol, r.market || "US", r.added_at || Date.now()); })(arr);
+      db.transaction((rows) => {
+        for (const r of rows) addWatchlistMember(db, { symbol:r.symbol,market:r.market || 'US',addedAt:Date.now(),source:'legacy_json_import' });
+      })(arr);
       console.log("[stock-engine] imported legacy watchlist from " + f + " (" + arr.length + ")");
       return;
     }
@@ -5213,6 +5785,7 @@ function importLegacyWatchlist() {
 // poll loop and best-effort backfill of daily k-line so the signal engine has history.
 export async function initStockEngine({ runBackgroundTask = null } = {}) {
   console.log("[stock-engine] init (DB=" + DB_PATH + ")");
+  startRuntimeMetricsMaintenance();
   signalReplayTaskRunner = runBackgroundTask;
   importLegacyWatchlist();
   try { await poll(); } catch (e) { console.error("[stock-engine] poll error", e.message); }

@@ -7,8 +7,8 @@ The public release starts without a watchlist, database, or collected market dat
 
 ## Does a high research score mean buy? / 高研究分是否意味着可以买？
 
-No. Radar ranks what may deserve research attention. It does not predict returns, set price targets, place orders, or override risk exits.
-不是。机会雷达只排序哪些对象可能值得研究；它不预测收益、不设目标价、不下单，也不会覆盖风险退出条件。
+A research score sets review priority. For eligible Hong Kong and U.S. common stocks, the trade plan separately evaluates the entry range, stop and position size.
+研究分决定复核顺序。对符合条件的港美普通股，详情页会另行计算建议买区、止损保护位和建议股数。
 
 ## Why is a symbol in Risk review? / 为什么标的出现在“风险待核验”？
 

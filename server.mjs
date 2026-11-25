@@ -1,3 +1,4 @@
+import { serveMacro } from './macro_board.mjs';
 // 稳定前端服务器：从磁盘提供看板页面 + echarts。
 // 职责：
 //  1) 股票监控看板：完整本地化，所有 /stock* 请求交由 ./stock_engine.mjs 处理
@@ -5,9 +6,13 @@
 //  2) 大额期权异动：服务端用 curl 子进程抓取 CBOE 免费延迟期权链（node 直连外网被沙箱拦截，
 //     故走 curl 子进程），计算 vol/OI 突增 + 大额名义金额，提供给看板。
 import http from 'http';
+import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { fileURLToPath } from 'node:url';
+import { RadarQueryProcess } from './radar_query_process.mjs';
+import { getRadarDb as initializeRadarDb } from './radar_schema.mjs';
 import { exec, execSync } from 'child_process';
 import { Worker } from 'node:worker_threads';
 import { createRequire } from 'module';
@@ -20,8 +25,9 @@ function execAsync(cmd, opts = {}) {
     exec(cmd, opts, (err, stdout) => { if (err) reject(err); else resolve(stdout); });
   });
 }
-import { stockHandler, initStockEngine, getWatchlist, getLatestAnalysis, getStockPositions, getStockSignalAudit, getAlertAudit, recordRuntimeMetric, getRuntimeMetrics, getSystemSetting, setSystemSetting, transitionsOnly, createDatabaseBackup, getBackupStatus, verifyDatabaseBackup, restoreDatabaseBackup, getMarketStateFor, getHistoricalAnalysisForDate, getEarningsPolicy, refreshSignalDriftReport, SIGNAL_ENGINE_VERSION } from './stock_engine.mjs';
-import { getTrackerPositions, recordTrackerSignalAudit, getTrackerSignalAudit, recordTrackerFxDaily, getTrackerDailyContext, recordTrackerPremiumDaily, getTrackerPremiumBands, recordTrackerIntradayHistory, getTrackerIntradayHistory, pruneTrackerIntradayHistory, importLegacyTrackerHistory, importTrackerFxRows, getTrackerFxCoverage, getTrackerNavAudit, getPremiumDistribution, importTrackerPairs, migrateLegacyTrackerPairs, getTrackerPairs, addTrackerPair, updateTrackerPairCost, autoVerifyTrackerProducts, getProductEntryStatus, deleteTrackerPair, reorderTrackerPairs } from './tracker_engine.mjs';
+import { stockHandler, initStockEngine, getWatchlist, getLatestAnalysis, getStockPositions, getStockSignalAudit, getAlertAudit, recordRuntimeMetric, getRuntimeMetrics, getSystemSetting, setSystemSetting, transitionsOnly, createDatabaseBackup, getBackupStatus, verifyDatabaseBackup, restoreDatabaseBackup, getMarketStateFor, getHistoricalAnalysisForDate, getEarningsPolicy, refreshSignalDriftReport, executeRadarDirectBuy, SIGNAL_ENGINE_VERSION } from './stock_engine.mjs';
+import { buildRadarTradePlan } from './radar_trade_plan.mjs';
+import { getTrackerPositions, recordTrackerSignalAudit, getTrackerSignalAudit, recordTrackerFxDaily, getTrackerDailyContext, recordTrackerPremiumDaily, getTrackerPremiumBands, recordTrackerIntradayHistory, getTrackerIntradayHistory, pruneTrackerIntradayHistory, importLegacyTrackerHistory, importTrackerFxRows, getTrackerFxCoverage, getTrackerNavAudit, getPremiumDistribution, importTrackerPairs, migrateLegacyTrackerPairs, getTrackerPairs, addTrackerPair, updateTrackerPairCost, autoVerifyTrackerProducts, getProductEntryStatus, deleteTrackerPair, reorderTrackerPairs, getTrackerNavAnchor, getTrackerCloseOnDate, getTrackerFxCloseOnDate } from './tracker_engine.mjs';
 import { getPersonalTrades, getPersonalReview, getPersonalCalibration, getPersonalOverview, rebuildPersonalData, minimumEconomicShares, setKrwPerUsd } from './personal_calibration.mjs';
 import { fetchQuote, fetchFxPair, probeQuote } from './quote.mjs'; // 共享行情层：与 /stock 看板共用进程内缓存，避免同标的重复抓取
 import { advanceAlertState } from './alert_logic.mjs';
@@ -31,18 +37,22 @@ import { getNewsArticles, getNewsStatus, refreshNewsSources, scheduleNewsIngesti
 import { interpretNews, getNewsInterpretations, refreshNewsInterpretations, getLLMNewsStatus, pruneLLMNewsCache, getGroupNewsRisk, extractAnnouncements, getAnnouncementExtractions, getLLMTokenUsage } from './llm_news.mjs';
 import { getAllGroups } from './grouping.mjs';
 import { getCompanyProfile, generateCompanyProfile, pruneCompanyProfileCache } from './llm_company_profile.mjs';
+import { runWeeklyReportIfDue } from './radar_weekly_report.mjs';
+import { produceScreenerDossiersForRun, backfillScreenerForRecentRuns, isScreenerEnabledForMarket } from './radar_screener_producer.mjs';
+import { refreshAllBenchmarkBars } from './radar_benchmark_bars.mjs';
 // 机会雷达只运行 V2；历史财务归档只由显式迁移命令处理。
 import { scheduleRadar, startAutoAssetAuditLoop, getSchedulerState as getRadarSchedulerState } from './radar_scheduler.mjs';
 import {
   runScan as runRadarScan,
-  getScanStatus as getRadarScanStatus,
+  getScanRuntimeStatus as getRadarScanRuntimeStatus,
   reconcileNonTradingDayScanJobs,
 } from './radar_scanner.mjs';
-import { getTopCandidates as getRadarTopCandidates, getCandidateDetail as getRadarCandidateDetail, getRunHistory as getRadarRunHistory, getScanStats as getRadarScanStats, listDossiers as listRadarDossiers, getDossierDetail as getRadarDossierDetail, listOpportunities as listRadarOpportunities, listDossierEvaluations as listRadarEvaluations, listSymbolsAcrossChannels as listRadarSymbols, getDossiersBySymbol as getRadarDossiersBySymbol, listSparklines as listRadarSparklines, getV2Kline as getRadarKline, listResearchQueue as listRadarResearchQueue, dismissSymbol as dismissRadarSymbol, restoreSymbol as restoreRadarSymbol, listDismissedSymbols as listRadarDismissedSymbols, setAssetAudit as setRadarAssetAudit, getRadarDigestData } from './radar_query_api.mjs';
+import { getTopCandidates as getRadarTopCandidates, getCandidateDetail as getRadarCandidateDetail, getRunHistory as getRadarRunHistory, listDossiers as listRadarDossiers, getDossierDetail as getRadarDossierDetail, listOpportunities as listRadarOpportunities, listDossierEvaluations as listRadarEvaluations, getDossiersBySymbol as getRadarDossiersBySymbol, listSparklines as listRadarSparklines, getV2Kline as getRadarKline, dismissSymbol as dismissRadarSymbol, restoreSymbol as restoreRadarSymbol, listDismissedSymbols as listRadarDismissedSymbols, setAssetAudit as setRadarAssetAudit } from './radar_query_api.mjs';
 import { tryGenerateShadow as tryRadarGenerateShadow, rollbackToDefault as rollbackRadarToDefault, getFeedbackStatus as getRadarFeedbackStatus } from './radar_feedback.mjs';
 import { produceEventDossiers, linkObservationsForMarket, linkObservationsForRun, reconcilePendingRuns } from './radar_dossier_producer.mjs';
 import { produceEventFacts } from './radar_event_facts_producer.mjs';
 import { getRadarDb } from './radar_schema.mjs';
+import { forwardReview } from './stock_engine.mjs';
 import { produceTrendForRunIfEnabledAsync, fullTrendReconcileAsync, isTrendEnabledForMarket } from './radar_trend_producer.mjs';
 import { produceFundamentalDossiers, isFundamentalEnabledForMarket } from './radar_fundamental_producer.mjs';
 import { getV2FinancialHistory } from './radar_financial_store.mjs';
@@ -52,6 +62,7 @@ import { produceThesesForDossiers, isThesisEnabled, getThesisStatus, pruneThesis
 import { enqueueBackgroundTask, enqueueMaintenanceTask, enqueueAnalyticsTask, enqueueRadarResearchTask, enqueueIngestionTask, getBackgroundTaskStatus } from './background_tasks.mjs';
 import { refreshEarningsCalendar, getNextEarnings, getAllUpcomingEarnings, getEarningsCalendarStatus, startEarningsCalendarScheduler, summarizeEarningsProximity } from './earnings_calendar.mjs';
 import { refreshEconomicCalendar, getUpcomingEconomicEvents, getMacroBlackoutStatus, startEconomicCalendarScheduler } from './economic_calendar.mjs';
+import { startTrackerOfficialNavScheduler, getTrackerOfficialNav, getTrackerOfficialNavRecent } from './hkex_li_nav.mjs';
 import { refreshFxRates, getFxStatus } from './fx_rate.mjs';
 import { getIndexBarSnapshot } from './market_index_bar.mjs';
 import { buildStockDataHealth } from './stock_data_health.mjs';
@@ -71,7 +82,7 @@ import {
 } from './alert_engine.mjs';
 import { handleCompanyProfilePost } from './server_route_handlers.mjs';
 import { registerMcpRoutes } from './mcp_server.mjs';
-// 兼容直接导入 server.mjs 的测试/开发入口。正式入口会在业务模块求值前加载运行时配置；
+// 专用启动入口会在业务模块求值前加载运行时配置。这里兼容直接导入 server.mjs 的测试。
 // 此处调用保持幂等，但不再承担正式启动顺序保证。
 import { applyRadarRuntimeConfig } from './radar_runtime_config.mjs';
 applyRadarRuntimeConfig();
@@ -98,6 +109,18 @@ function isSameOriginRequest(req) {
   }
 }
 
+// Apply schema changes once in the owner process before the read-only child opens it.
+initializeRadarDb();
+const radarReadOptions={dbPath:fileURLToPath(new URL('./data/market_data.db',import.meta.url))};
+const radarQueries = new RadarQueryProcess(radarReadOptions);
+// Status must not wait behind a cold queue query; two bounded processes at most.
+const radarStatusQueries = new RadarQueryProcess(radarReadOptions);
+const invalidateRadarQueries=()=>{radarQueries.invalidate();radarStatusQueries.invalidate();};
+const getRadarScanStats = () => radarStatusQueries.query('stats');
+const listRadarResearchQueue = (options) => radarQueries.query('queue',{...options,discovery:true});
+const getRadarDigestData = (market) => radarQueries.query('digest',{market,discovery:true});
+process.once('exit',()=>{radarQueries.close();radarStatusQueries.close();});
+
 // MCP 只读接口依赖注入：暴露给 mcp_server.mjs 的查询函数（全部只读，复用进程内缓存）。
 const mcpDeps = {
   getWatchlist,
@@ -116,11 +139,20 @@ const mcpDeps = {
 };
 const QUOTES_HISTORY_FILE = path.join(APP_DIR, 'quotes_history.json'); // 股票报价/信号/盘前盘后历史（复盘用）
 const LOGS_DIR = path.join(process.cwd(), 'logs');
-const PERF_LOG_FILE = path.join(LOGS_DIR, 'perf.log'); // 慢请求(>=500ms)实时日志，便于实时排查
+// Bounded in-memory diagnostics; no per-stage SQLite writes.
+const eventLoopDelay = monitorEventLoopDelay({resolution: 20});
+eventLoopDelay.enable();
+let eventLoopSample = null, trackerStageSample = null;
+setInterval(()=>{
+  eventLoopSample = {at:Date.now(),windowMs:10000,p95Ms:eventLoopDelay.percentile(95)/1e6,maxMs:eventLoopDelay.max/1e6};
+  eventLoopDelay.reset();
+},10000).unref();
+const PERF_LOG_FILE = path.join(LOGS_DIR, 'perf.log'); // 慢请求(>=500ms)实时日志，便于 部署环境 上 tail -f
 
 // /health version information: Git metadata is refreshed asynchronously only.
-// Deployment metadata is preferred on a host without an authoritative .git checkout.
-// It records the source revision and deployment time; local development falls back to .git.
+// P1-1 codex 复审：部署环境 部署不含 .git 目录（或残留旧 .git），导致 /health 的 git 信息全为 null 或失真。
+//   修复：优先读 .deploy-info.json（由 部署环境-deploy.ps1 在部署时写入，记录源端 commit hash/branch/
+//   dirty/commitTs/deployedAt），它是部署的可追溯来源；本地开发无此文件时回退到 .git。
 let _healthGit = { hash:null, branch:null, dirty:null, commitTs:null };
 let _healthGitRefreshInFlight = false;
 
@@ -146,7 +178,7 @@ try {
 function refreshHealthGitMetadata() {
   if (_healthGitRefreshInFlight) return;
   const cwd = process.cwd();
-  // Prefer deployment metadata when it is present; otherwise read local Git metadata.
+  // 优先：.deploy-info.json（部署时写入，是版本来源的真相，避免 部署环境 残留旧 .git 导致失真）
   const deployInfoPath = path.join(cwd, '.deploy-info.json');
   if (fs.existsSync(deployInfoPath)) {
     try {
@@ -646,24 +678,101 @@ async function fetchPairData(pair) {
   return { etf, und, fx };
 }
 
-// 2. 推算理论 NAV + 溢价率
+// 2. 推算 NAV + 溢价率
+// 口径优先级：
+//   1) 官方收盘 NAV（港交所披露易 tracker_official_nav）：命中即直接采用官方 NAV 与官方溢价，
+//      navQuality='official' / navMethod='official_close'，premiumSource='official'。
+//   2) 模型推算（官方未命中）：这是**以 ETF 市价为锚**的推算，不是官方净值。
+//      单会话 nav = etf.prev × (1 + lev × undRet)，navMethod='single_session_price_anchor'；
+//      多会话 nav = etfBaseClose × Πfactor，navMethod='daily_reset_with_fx'。
+//      anchorPremium 记录锚点日 ETF 市价相对同日官方 NAV 的偏离（无官方值时 null），
+//      用来量化"市价锚 vs 官方净值"带来的系统性误差。
 function computeNav(pair, etf, und, fx, dailyContextPrebuilt = null) {
   const etfPrice = etf ? etf.price : null;
   const undPrice = und ? und.price : null;
   let nav = null, premium = null, undRet = null;
   let navQuality = 'unavailable', navMethod = 'none', navSessions = 0, navAnchorDate = null;
-  let underlyingStale = false;
+  let underlyingStale = false, anchorPremium = null, anchorNav = null, premiumSource = 'none';
+  // 正股实时收益：官方 NAV 分支同样要提供给上游做极端波动判断，与 NAV 口径无关
+  if (etf && und && fx && isFinite(und.prev) && und.prev > 0 && Number.isFinite(undPrice)
+      && isFinite(fx.price) && fx.price > 0 && isFinite(fx.prevClose) && fx.prevClose > 0) {
+    undRet = (undPrice * fx.price) / (und.prev * fx.prevClose) - 1;
+  }
+  // 官方 NAV 优先：仅当 ETF 报价日期与官方披露日期同日时命中（盘中不命中，继续走模型）
+  const etfQuoteDate = String(etf?.providerTime||'').replace(/\D/g,'').slice(0,8);
+  const quoteDate = /^\d{8}$/.test(etfQuoteDate)
+    ? `${etfQuoteDate.slice(0,4)}-${etfQuoteDate.slice(4,6)}-${etfQuoteDate.slice(6,8)}`
+    : null;
+  const official = quoteDate ? getTrackerOfficialNav(pair.id, quoteDate) : null;
+  if (official && Number(official.nav) > 0) {
+    nav = Number(official.nav);
+    navQuality = 'official'; navMethod = 'official_close'; navSessions = 1; navAnchorDate = String(official.date);
+    premiumSource = 'official';
+    const officialPremium = Number(official.premium);
+    premium = Number.isFinite(officialPremium) ? officialPremium
+      : (etfPrice != null ? (etfPrice - nav) / nav * 100 : null);
+    return { etfPrice, undPrice, nav, premium, undRet, navQuality, navMethod, navSessions, navAnchorDate, underlyingStale, anchorPremium, anchorNav, premiumSource, anchorSource: 'official' };
+  }
+  // 官方 NAV 锚点（固定时段基准重置）：
+  //   nav_t = anchorNav × (1 + lev × (und_t / anchorUnd − 1)) × (fx_t / anchorFx)
+  // 锚点由 hkex_li_nav 在官方 NAV 抓取成功后重建落表；表里没有时这里按同一套校验动态解析。
+  // 只有锚点缺失时才回退旧的"ETF 市价锚"模型——那实际上算的是溢价变化量，盘中会随 ETF 波动剧烈跳动。
+  let anchorSource = 'none';
+  const resolveAnchor = () => {
+    const stored = getTrackerNavAnchor(pair.id, quoteDate);
+    if (stored && Number(stored.anchor_nav) > 0 && Number(stored.anchor_und) > 0 && Number(stored.anchor_fx) > 0) {
+      const etfClose = Number(stored.anchor_etf_close);
+      return {
+        date: String(stored.anchor_date), nav: Number(stored.anchor_nav),
+        und: Number(stored.anchor_und), fx: Number(stored.anchor_fx),
+        etfClose: etfClose > 0 ? etfClose : null,
+      };
+    }
+    // 锚点表尚未重建（如调度任务还没跑过）：从最近的官方 NAV 往前找一条正股收盘 + 同日汇率齐备的记录
+    for (const row of getTrackerOfficialNavRecent(pair.id, 12)) {
+      const date = String(row.date || '');
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date >= quoteDate) continue;
+      const undClose = getTrackerCloseOnDate(pair.underlying, date);
+      if (!(undClose > 0)) continue;
+      const fxClose = pair.fx_pair ? getTrackerFxCloseOnDate(pair.fx_pair, date) : 1;
+      if (!(fxClose > 0)) continue;
+      return { date, nav: Number(row.nav), und: undClose, fx: fxClose, etfClose: getTrackerCloseOnDate(pair.etf, date) };
+    }
+    return null;
+  };
+  if (etf && und && fx && quoteDate && Number.isFinite(undPrice) && undPrice > 0
+      && isFinite(fx.price) && fx.price > 0) {
+    const lev = Number(pair.leverage) || 2;
+    const anchor = resolveAnchor();
+    if (anchor) {
+      nav = anchor.nav * (1 + lev * (undPrice / anchor.und - 1)) * (fx.price / anchor.fx);
+      navQuality = 'aligned'; navMethod = 'official_nav_anchor'; navSessions = 1;
+      navAnchorDate = anchor.date; anchorNav = anchor.nav; anchorSource = 'official';
+      anchorPremium = anchor.etfClose > 0 ? (anchor.etfClose / anchor.nav - 1) * 100 : null;
+      premiumSource = 'model';
+      const dailyContext = dailyContextPrebuilt !== null
+        ? dailyContextPrebuilt
+        : getTrackerDailyContext(pair.etf, pair.underlying, pair.fx_pair, etfQuoteDate, undPrice, fx.price,
+            String(und.providerTime||'').replace(/\D/g,'').slice(0,8));
+      underlyingStale = !!dailyContext.underlyingStale;
+      const underlyingQuoteDate = String(und.providerTime||'').replace(/\D/g,'').slice(0,8);
+      if (underlyingQuoteDate && etfQuoteDate !== underlyingQuoteDate) {
+        // 正股报价停在上一交易日：用锚点外推会放大误差，降级并明确标注
+        navQuality = 'date_mismatch'; navMethod = 'cross_market_stale_date'; underlyingStale = true;
+      }
+      if (nav > 0) premium = (etfPrice - nav) / nav * 100;
+      return { etfPrice, undPrice, nav, premium, undRet, navQuality, navMethod, navSessions, navAnchorDate, underlyingStale, anchorPremium, anchorNav, premiumSource, anchorSource };
+    }
+  }
   if (etf && und && fx
       && isFinite(etf.prev) && etf.prev > 0
       && isFinite(und.prev) && und.prev > 0
       && isFinite(fx.price) && fx.price > 0
       && isFinite(fx.prevClose) && fx.prevClose > 0) {
     const lev = Number(pair.leverage) || 2;
-    const undNowInEtfCcy = undPrice * fx.price;
-    const undPrevInEtfCcy = und.prev * fx.prevClose;
-    undRet = undNowInEtfCcy / undPrevInEtfCcy - 1;
     nav = etf.prev * (1 + lev * undRet);
-    navQuality = 'aligned'; navMethod = 'single_session_exact'; navSessions = 1;
+    navQuality = 'aligned'; navMethod = 'single_session_price_anchor'; navSessions = 1;
+    anchorSource = 'model_fallback';
     // 复用调用方预构建的 dailyContext，避免同一 pair 内重复查询 tracker_fx_daily/stock_kline
     const dailyContext = dailyContextPrebuilt !== null
       ? dailyContextPrebuilt
@@ -697,8 +806,22 @@ function computeNav(pair, etf, und, fx, dailyContextPrebuilt = null) {
         navAnchorDate = dailyContext.etfBaseDate;
       }
     }
+    // 锚点溢价：模型以 ETF 市价为锚，锚点市价相对同日官方 NAV 的偏离即系统性误差来源。
+    // 官方 NAV 未覆盖锚点日时保持 null（不猜、不外推）。
+    if (multiSessionTriggered && dailyContext.etfBaseDate) {
+      navAnchorDate = dailyContext.etfBaseDate;
+    } else if (!multiSessionTriggered && dailyContext.etfPrevKlineDate) {
+      navAnchorDate = dailyContext.etfPrevKlineDate;
+    }
+    const anchorPrice = multiSessionTriggered ? dailyContext.etfBaseClose : etf.prev;
+    if (navAnchorDate && Number.isFinite(anchorPrice) && anchorPrice > 0) {
+      const anchorOfficial = getTrackerOfficialNav(pair.id, navAnchorDate);
+      if (anchorOfficial && Number(anchorOfficial.nav) > 0) {
+        anchorNav = Number(anchorOfficial.nav);
+        anchorPremium = (anchorPrice / anchorNav - 1) * 100;
+      }
+    }
     // 实时报价日期错位校验：今天 HK 开盘但 KR 休市（或反之），underlyingPrice 为过时报价
-    const etfQuoteDate = String(etf.providerTime||'').replace(/\D/g,'').slice(0,8);
     const underlyingQuoteDate = String(und.providerTime||'').replace(/\D/g,'').slice(0,8);
     if (etfQuoteDate && underlyingQuoteDate && etfQuoteDate !== underlyingQuoteDate) {
       navQuality = 'date_mismatch'; navMethod = 'cross_market_stale_date'; underlyingStale = true;
@@ -718,8 +841,9 @@ function computeNav(pair, etf, und, fx, dailyContextPrebuilt = null) {
       navQuality = 'date_mismatch'; navMethod = 'cross_market_kline_blind'; underlyingStale = true;
     }
     if (nav > 0) premium = (etfPrice - nav) / nav * 100;
+    if (nav != null) premiumSource = 'model';
   }
-  return { etfPrice, undPrice, nav, premium, undRet, navQuality, navMethod, navSessions, navAnchorDate, underlyingStale };
+  return { etfPrice, undPrice, nav, premium, undRet, navQuality, navMethod, navSessions, navAnchorDate, underlyingStale, anchorPremium, anchorNav, premiumSource, anchorSource };
 }
 
 // 3. EWMA 方差 → 年化波动率损耗 + 日波动率（用于动态阈值）
@@ -900,7 +1024,16 @@ async function computePair(pair, runtime = {}) {
     : null;
   // 2. NAV + 溢价
   const navResult = computeNav(pair, etf, und, fx, dailyContextForPair);
-  const { etfPrice, undPrice, nav, premium, undRet, navQuality, navMethod, navSessions, navAnchorDate, underlyingStale } = navResult;
+  const { etfPrice, undPrice, nav, premium, undRet, navQuality, navMethod, navSessions, navAnchorDate, underlyingStale, anchorPremium, anchorNav, premiumSource, anchorSource } = navResult;
+  // 跨市场收盘缺口标注：ETF 仍在交易但正股市场已收盘（典型 KR 15:30 KST=14:30 HKT 收盘后，
+  // 港股仍交易到 16:00）。这段窗口正股报价冻结、ETF 仍在波动，模型外推必然产生虚假溢价且无法消除。
+  // 这里只打标签、不改数值，接口与前端据此把它当"参考值"而不是精确值展示。
+  const underlyingMarketStatus = pair.underlying_market
+    ? getMarketStateFor(String(pair.underlying_market).toUpperCase()) : null;
+  let premiumReliability = 'ok';
+  if (premium == null) premiumReliability = 'unavailable';
+  else if (premiumSource === 'model' && etfMarketStatus.session === 'open'
+    && (underlyingMarketStatus?.state !== 'open' || underlyingStale)) premiumReliability = 'underlying_closed';
   // 3. 波动率损耗
   const { volDecayPctAnn, underlyingVolDaily } = computeVolDecay(pair, etf, und, fx, dailyContextForPair);
   // 派生数据
@@ -1049,6 +1182,13 @@ async function computePair(pair, runtime = {}) {
     signal_available: signalAvailable, exit_pending: exitPending, data_gate: { status: signalAvailable?'pass':(exitPending?'exit_pending':'blocked'), reasons: criticalDataReasons },
     signal_version: 'tracker-stock-aligned-v5', signal_gate: sig.gate, nav_quality: sig.navQuality, nav_method: navMethod,
     nav_sessions: navSessions, nav_anchor_date: navAnchorDate, underlying_stale: underlyingStale,
+    premium_source: premiumSource, anchor_premium: anchorPremium != null ? +anchorPremium.toFixed(4) : null,
+    anchor_nav: anchorNav,
+    // 锚点来源可观测：official=官方 NAV 锚点（水平值），model_fallback=旧市价锚（实为溢价变化量），
+    // none=无锚点/官方直接命中。前端与排查脚本据此判断当前盘中溢价的口径。
+    nav_anchor_source: anchorSource,
+    premium_reliability: premiumReliability, premium_reliable: premiumReliability === 'ok',
+    underlying_market_state: underlyingMarketStatus?.state ?? null,
     etf_quote_date: sig.etfDate, underlying_quote_date: sig.underlyingDate,
     underlying_action: sig.underlyingAction,
     underlying_requested_action: underlyingRequestedAction,
@@ -1094,6 +1234,7 @@ async function refreshTracker() {
   if (trackerRefreshing) return; // 防止上一次刷新（异步网络）未完成时定时器再次触发，造成重叠
   trackerRefreshing = true;
   const refreshStartedAt = Date.now();
+  const trackerStages = {setupMs:0,fxMs:0,pairsMs:0,pruneMs:0};
   try {
     const analysisSnapshot = getLatestAnalysis();
     const positionsByPair = new Map(getTrackerPositions().map(position => [Number(position.pair_id), position]));
@@ -1103,12 +1244,16 @@ async function refreshTracker() {
       String(p.etf_market || '').toUpperCase() === 'KR' ||
       String(p.underlying_market || '').toUpperCase() === 'KR'
     ));
+    trackerStages.setupMs = Date.now()-refreshStartedAt;
+    const fxStartedAt=Date.now();
     if (hasKrwExposure) {
       try {
         const usdkrw = await fetchFxPair('fx_skrwusd');
         if (usdkrw && Number.isFinite(usdkrw.price) && usdkrw.price > 0) setKrwPerUsd(usdkrw.price);
       } catch (e) { /* 静默失败，沿用上一次注入值或默认 1300 */ }
     }
+    trackerStages.fxMs=Date.now()-fxStartedAt;
+    const pairsStartedAt=Date.now();
     for (const pair of trackerPairs) {
       if (pair.active === 0) { trkCache.delete(pair.id); continue; }
       let rec;const previous=trkCache.get(pair.id)||null;
@@ -1151,13 +1296,25 @@ async function refreshTracker() {
       const etfMarket = getMarketStateFor(String(pair.etf_market || 'HK').toUpperCase());
       const etfMarketState = etfMarket.state;
       recordTrackerSignalAudit(rec, etfMarketState);
-      // Formal daily samples are frozen once the ETF's own regular session has
-      // closed.  Pre-open/lunch/post-market or stale intraday observations never
-      // enter threshold calibration or next-day NAV repair statistics.
+      // 正式日样本封口规则（P0-3 收紧）：盘中 / 午休 / 盘前盘后样本不得进入阈值校准与次日 NAV 修复统计。
+      // 正式日样本只在「两地都已收盘」且「ETF / 正股报价同为同一交易日」时才封口：
+      // 任一市场仍在交易、或一方报价停留在上一交易日（跨市场休市）时，溢价必然失真，
+      // 不允许进入阈值、分位与次日修复统计。
       const premiumDate = String(rec.etf_provider_time || '').replace(/\D/g, '').slice(0, 8).replace(/^(\d{4})(\d{2})(\d{2})$/, '$1-$2-$3');
-      if (etfMarket.session === 'closed') {
+      const etfProviderDate = String(rec.etf_provider_time || '').replace(/\D/g, '').slice(0, 8);
+      const undProviderDate = String(rec.underlying_provider_time || '').replace(/\D/g, '').slice(0, 8);
+      const undMarket = pair.underlying_market ? getMarketStateFor(String(pair.underlying_market).toUpperCase()) : null;
+      const bothClosed = etfMarket.session === 'closed' && (!undMarket || undMarket.session === 'closed');
+      const sameProviderDate = !pair.underlying || (!!etfProviderDate && etfProviderDate === undProviderDate);
+      if (bothClosed && sameProviderDate && premiumDate) {
         recordTrackerPremiumDaily(pair.id, premiumDate, rec.premium, rec.nav_quality, rec.liquidity_status, rec.etf_price, rec.nav,
-          { finalize:true, finalizedAt:rec.ts, marketState:etfMarket.session });
+          { finalize:true, finalizedAt:rec.ts, marketState:etfMarket.session,
+            underlyingStale: rec.underlying_stale === true,
+            navMethod: rec.nav_method, anchorDate: rec.nav_anchor_date,
+            anchorNav: rec.anchor_nav, anchorPremium: rec.anchor_premium,
+            underlyingPrice: rec.underlying_price,
+            etfProviderTime: rec.etf_provider_time, underlyingProviderTime: rec.underlying_provider_time,
+            premiumSource: rec.premium_source });
       }
       // 信号提醒（Webhook 推送）：ETF 进入目标档位则推送
       const etfMarketOpen = etfMarketState === 'open';
@@ -1174,10 +1331,14 @@ async function refreshTracker() {
       await yieldTrackerRefresh();
     }
     etfAlertPrimed.v = true; // 首轮刷新完成后，后续信号变化才推送
+    trackerStages.pairsMs=Date.now()-pairsStartedAt;
+    const pruneStartedAt=Date.now();
     pruneTrackerIntradayHistory(14);
+    trackerStages.pruneMs=Date.now()-pruneStartedAt;
   } finally {
     trackerRefreshing = false;
     const elapsed = Date.now() - refreshStartedAt;
+    trackerStageSample={at:Date.now(),totalMs:elapsed,...trackerStages};
     if (elapsed >= 500) console.log(`[perf] refreshTracker ${elapsed}ms`);
     try { recordRuntimeMetric({ endpoint: 'func:refreshTracker', durationMs: elapsed, statusCode: 200 }); } catch {}
   }
@@ -1254,8 +1415,14 @@ function saveQuotesHistory() {
 // 3456 反向代理与 reconcile 已移除：股票监控看板完全本地化（./stock_engine.mjs）。
 
 // ---------- 主服务 ----------
+import { startRsi6, serveRsi6 } from './rsi6/scanner.mjs';
+
 const server = http.createServer(async (req, res) => {
   const requestStartedAt = Date.now();
+  const requestClock = performance.now();
+  let responseEndedAt = null;
+  const originalEnd = res.end;
+  res.end = function(...args) { responseEndedAt = performance.now(); return originalEnd.apply(this,args); };
   const u = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
   const p = u.pathname;
 
@@ -1274,6 +1441,11 @@ const server = http.createServer(async (req, res) => {
   if (isApiPath) {
     res.once('finish', () => {
       const durationMs = Date.now() - requestStartedAt;
+      if(p === '/control/status') {
+        const end = responseEndedAt ?? performance.now();
+        const timing = {handlerToEndMs:end-requestClock,endToFinishMs:performance.now()-end,eventLoop:eventLoopSample};
+        try { fs.appendFileSync(PERF_LOG_FILE, `${new Date().toISOString()} [control-timing] ${JSON.stringify(timing)}\n`); } catch {}
+      }
       try { recordRuntimeMetric({ endpoint: p, durationMs, statusCode: res.statusCode }); } catch {}
       if (durationMs >= 500) {
         const line = `${new Date().toISOString()} [slow] ${req.method} ${p} ${res.statusCode} ${durationMs}ms\n`;
@@ -1282,9 +1454,13 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
+  if (p.startsWith('/rsi6/api/')) return serveRsi6(req, res, u);
+
   let file = null;
   if (p === '/') file = path.join(APP_DIR, 'land.html'); // 根路径：项目门户落地页
   else if (p === '/stock') file = path.join(APP_DIR, 'stock.html');
+  else if (p === '/macro') file = path.join(APP_DIR, 'macro.html');
+  else if (p === '/macro.js') file = path.join(APP_DIR, 'macro.js');
   else if (p === '/lab') file = path.join(APP_DIR, 'scenario-research.html');
   else if (p === '/tracker') file = path.join(APP_DIR, 'tracker.html');
   else if (p === '/radar') file = path.join(APP_DIR, 'radar.html');
@@ -1322,6 +1498,9 @@ const server = http.createServer(async (req, res) => {
     return sendFile(res, resolved);
   }
 
+  if (p === '/macro/snapshot' || p === '/macro/push') {
+    return serveMacro(req, res, { curlText, pushFeishu, enabled: controlSettings.webhookEnabled && feishuIntegrationStatus().configured }, p);
+  }
   if (p === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(getHealthPayload()));
@@ -1342,18 +1521,25 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify({ok:false,error:'Method not allowed'}));
   }
   if (p === '/control/status' && req.method === 'GET') {
-    const radarStatus=getRadarScanStatus();
-    const radarStats=getRadarScanStats();
+    const stages = {};
+    const measure = (name, fn) => {const t=performance.now();try{return fn();}finally{stages[name]=+(performance.now()-t).toFixed(2);}};
+    const statsStarted=performance.now();
+    const statusReads=await radarStatusQueries.query('control');
+    stages.statusDatabase=+(performance.now()-statsStarted).toFixed(2);
+    const radarStatus=measure('radarStatus',getRadarScanRuntimeStatus);
+    if(!statusReads.ok){res.writeHead(503,{'Content-Type':'application/json; charset=utf-8'});return res.end(JSON.stringify(statusReads));}
     res.writeHead(200, { 'Content-Type':'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({
-      ts:Date.now(),uptimeSeconds:Math.round(process.uptime()),markets:getAllMarketStatus(),
-      settings:controlSettings,updatedAt:controlUpdatedAt,webhook:feishuIntegrationStatus(),
-      radar:{active:radarStatus.active,inFlightMarkets:radarStatus.inFlightMarkets,lastRuns:radarStatus.lastRuns,stats:radarStats.ok ? radarStats.data : []},
-      backgroundTasks:getBackgroundTaskStatus(),
-      runtimeMetrics:getRuntimeMetrics({hours:24,limit:3000}),
-      dataHealth:dataHealthPayload(),news:getNewsStatus(),
-      recentAlerts:getAlertAudit({limit:40}),
-    }));
+    const payload = {
+      ts:Date.now(),uptimeSeconds:Math.round(process.uptime()),markets:measure('markets',getAllMarketStatus),
+      settings:controlSettings,updatedAt:controlUpdatedAt,webhook:measure('webhook',feishuIntegrationStatus),
+      radar:{active:radarStatus.active,inFlightMarkets:radarStatus.inFlightMarkets,lastRuns:radarStatus.lastRuns,stats:statusReads.data.stats},
+      backgroundTasks:measure('backgroundTasks',getBackgroundTaskStatus),
+      runtimeMetrics:measure('runtimeMetrics',()=>getRuntimeMetrics({hours:24,limit:3000})),
+      dataHealth:measure('dataHealth',dataHealthPayload),news:measure('news',()=>getNewsStatus(statusReads.data.news)),
+      recentAlerts:measure('recentAlerts',()=>getAlertAudit({limit:40})),
+      diagnostics:{stagesMs:stages,eventLoop:eventLoopSample,tracker:trackerStageSample},
+    };
+    return res.end(JSON.stringify(payload));
   }
   if (p === '/control/token-usage' && req.method === 'GET') {
     const hours = Math.max(1, Math.min(720, parseInt(u.searchParams.get('hours') || '24', 10) || 24));
@@ -1508,9 +1694,12 @@ const server = http.createServer(async (req, res) => {
 
   // v2 扫描状态
   if (p === '/radar/status' && req.method === 'GET') {
+    const diagnostics=await radarStatusQueries.query('diagnostics');
+    if(!diagnostics.ok){res.writeHead(503,{'Content-Type':'application/json; charset=utf-8'});return res.end(JSON.stringify(diagnostics));}
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify({
-      ...getRadarScanStatus(),
+      ...getRadarScanRuntimeStatus(),
+      ...diagnostics.data,
       scheduler: getRadarSchedulerState(),
     }));
   }
@@ -1535,6 +1724,7 @@ const server = http.createServer(async (req, res) => {
     setImmediate(() => {
       runRadarScan({ market, trigger: 'manual', scanMode: 'official' })
         .then(result => {
+          invalidateRadarQueries();
           if (!dossierEnabledForRefresh || !result?.ok) return;
           // 单市场：result.runId 非空
           if (result.runId != null && result.status === 'complete') {
@@ -1613,8 +1803,8 @@ const server = http.createServer(async (req, res) => {
 
   // v2 扫描统计
   if (p === '/radar/stats' && req.method === 'GET') {
-    const result = getRadarScanStats();
-    res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+    const result = await getRadarScanStats();
+    res.writeHead(result.ok ? 200 : 503, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
 
@@ -1660,7 +1850,7 @@ const server = http.createServer(async (req, res) => {
     const limit = Number(u.searchParams.get('limit')) || 100;
     const offset = Number(u.searchParams.get('offset')) || 0;
     const search = u.searchParams.get('search') || '';
-    const result = listRadarSymbols({ market, channel, limit, offset, search });
+    const result = await radarQueries.query('archive', { market, channel, limit, offset, search });
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
@@ -1673,14 +1863,15 @@ const server = http.createServer(async (req, res) => {
     const market = u.searchParams.get('market') || undefined;
     const limit = Number(u.searchParams.get('limit')) || 30;
     const search = u.searchParams.get('search') || undefined;
-    const result = listRadarResearchQueue({ market, limit, search });
-    res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
+    const result = await listRadarResearchQueue({ market, limit, search });
+    res.writeHead(result.ok ? 200 : 503, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
   if (p === '/radar/queue/dismiss' && req.method === 'POST') {
     const market = (u.searchParams.get('market') || '').toUpperCase();
     const symbol = (u.searchParams.get('symbol') || '').toUpperCase();
     const result = dismissRadarSymbol(market, symbol);
+    if(result.ok)invalidateRadarQueries();
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
@@ -1688,6 +1879,7 @@ const server = http.createServer(async (req, res) => {
     const market = (u.searchParams.get('market') || '').toUpperCase();
     const symbol = (u.searchParams.get('symbol') || '').toUpperCase();
     const result = restoreRadarSymbol(market, symbol);
+    if(result.ok)invalidateRadarQueries();
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
   }
@@ -1713,6 +1905,7 @@ const server = http.createServer(async (req, res) => {
         const assetCategory = parsed.asset_category || '';
         const note = parsed.note || null;
         const result = setRadarAssetAudit(market, symbol, assetCategory, { source: 'manual', note });
+        if(result.ok)invalidateRadarQueries();
         res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify(result));
       } catch (e) {
@@ -1728,12 +1921,84 @@ const server = http.createServer(async (req, res) => {
   // 每 dossier 最新 3 条 observation，不带 evaluations/source_refs——下钻已走
   // /radar/dossier/detail 懒加载）；?mode=full 返回完整档案。
   if (p === '/radar/symbol-dossiers' && req.method === 'GET') {
-    const market = u.searchParams.get('market') || '';
-    const symbol = u.searchParams.get('symbol') || '';
+    const market = (u.searchParams.get('market') || '').toUpperCase();
+    const symbol = (u.searchParams.get('symbol') || '').toUpperCase();
     const mode = u.searchParams.get('mode') === 'full' ? 'full' : 'summary';
     const result = getRadarDossiersBySymbol(market, symbol, { includeManual: false, mode });
+    if (result.ok && result.data && ['US', 'HK'].includes(market) && symbol) {
+      let liveQuote = null;
+      try {
+        liveQuote = await Promise.race([
+          fetchQuote(market, symbol),
+          new Promise(resolve => setTimeout(() => resolve(null), 2200)),
+        ]);
+      } catch { liveQuote = null; }
+      const fundamentalPositive = Array.isArray(result.data.groups) && result.data.groups.some(
+        g => g.channel === 'fundamental' && g.dossiers?.[0]?.dossier?.direction === 'positive',
+      );
+      result.data.trade_plan = buildRadarTradePlan(getRadarDb(), {
+        market,
+        symbol,
+        name: result.data.name || liveQuote?.name || '',
+        assetCategory: result.data.eligibility?.asset_category || null,
+        bonusMultiplier: fundamentalPositive ? 1.25 : 1.0,
+        liveQuote,
+      });
+      if (liveQuote?.price > 0 && result.data.latest_price == null) {
+        result.data.latest_price = Number(liveQuote.price);
+      }
+    }
     res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify(result));
+  }
+
+  // C8: Refresh direct trade plan with real-time quote check on Opportunity Radar.
+  if (p === '/radar/trade-plan' && req.method === 'GET') {
+    const market = (u.searchParams.get('market') || '').toUpperCase();
+    const symbol = (u.searchParams.get('symbol') || '').toUpperCase();
+    if (!market || !symbol) {
+      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok: false, error: 'market 与 symbol 必填' }));
+    }
+    let liveQuote = null;
+    try {
+      liveQuote = await Promise.race([
+        fetchQuote(market, symbol),
+        new Promise(resolve => setTimeout(() => resolve(null), 2500)),
+      ]);
+    } catch { liveQuote = null; }
+    const plan = buildRadarTradePlan(getRadarDb(), {
+      market,
+      symbol,
+      name: liveQuote?.name || '',
+      liveQuote,
+    });
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ ok: true, data: plan }));
+  }
+
+  // C8: Direct buy execution from Opportunity Radar -> auto-add to watchlist + record holding & stop-loss.
+  if (p === '/radar/execute-buy' && req.method === 'POST') {
+    const body = await readBody(req);
+    try {
+      const parsed = JSON.parse(body || '{}');
+      const outcome = executeRadarDirectBuy({
+        market: parsed.market,
+        symbol: parsed.symbol,
+        shares: parsed.shares,
+        price: parsed.price,
+        fee: parsed.fee,
+        date: parsed.date,
+        note: parsed.note,
+        stopLoss: parsed.stopLoss,
+      });
+      invalidateRadarQueries();
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify(outcome));
+    } catch (e) {
+      res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ ok: false, error: e?.message || String(e) }));
+    }
   }
 
   // v2 批量 sparkline（POST，body 为 { keys: [{market, symbol}], days: 30 }）
@@ -1866,6 +2131,7 @@ const server = http.createServer(async (req, res) => {
     const market = (u.searchParams.get('market') || 'US').toUpperCase();
     try {
       const result = rollbackRadarToDefault(market);
+      if(result.ok)invalidateRadarQueries();
       res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(JSON.stringify(result));
     } catch (e) {
@@ -2309,6 +2575,7 @@ server.listen(FRONT_PORT, FRONT_HOST, () => {
   // explicitly set this to 0 so a first run never starts network-backed jobs.
   const backgroundAutomationEnabled = String(process.env.MARKET_DASHBOARD_BACKGROUND_ENABLED ?? '1').trim() !== '0';
   if (backgroundAutomationEnabled) {
+    startRsi6().catch(error => console.error('[rsi6] initialization failed', error));
   initStockEngine({ runBackgroundTask:enqueueAnalyticsTask }).catch((e) => console.error('[stock-engine] init failed', e.message));
   console.log('[store] 自选股/持仓由 ./stock_engine.mjs 经 SQLite 管理');
   scheduleNewsIngestion({ runTask: enqueueIngestionTask });
@@ -2323,7 +2590,7 @@ server.listen(FRONT_PORT, FRONT_HOST, () => {
   const v2DossierEnabled = String(process.env.RADAR_DOSSIER_ENABLED || process.env.RADAR_ENABLED || '').trim() === '1';
 
   // === 自动资产审计（轻操作：规则分类 provisional，无任何开关依赖） ===
-  // 审计修正：资产分类不能挂在扫描调度开关下（生产环境 scanner 默认关闭，
+  // 审计修正：资产分类不能挂在扫描调度开关下（部署环境 生产 scanner 默认关闭，
   // 挂 scheduleRadar 会导致审计永不执行）。幂等 + 分批让出，首轮延迟 120s。
   startAutoAssetAuditLoop();
 
@@ -2340,6 +2607,7 @@ server.listen(FRONT_PORT, FRONT_HOST, () => {
   if (v2ScannerEnabled) {
     scheduleRadar({
       onRunComplete: ({ market, trigger, result }) => {
+        invalidateRadarQueries();
         console.log(`[radar_v2] ${market} ${trigger} 完成: ok=${result?.ok}, status=${result?.status ?? 'n/a'}, candidates=${result?.candidatesCount ?? 0}`);
         // F.1-5 + F.2-3: 扫描完成后按本次 run 增量关联（仅当 dossier 也启用时）。
         // 只在 run.status='complete' 时补（partial/failed run 的 candidate 不完整，不关联）。
@@ -2372,15 +2640,29 @@ server.listen(FRONT_PORT, FRONT_HOST, () => {
             }
           }).catch(e => console.log(`[radar_trend] ${market} run#${result.runId} 异步任务异常: ${e.message}`));
 
+          // screener 榜单注入：从东财榜单 + radar_v2_bars 自算（K 线在扫描期间已落库，
+          // 与 trend 无依赖，各自独立通道）。RADAR_SCREENER_ENABLED 控制市场白名单。
+          if (isScreenerEnabledForMarket(market)) {
+            const screenerKey = `screener:${market}:${result.runId}`;
+            enqueueBackgroundTask(screenerKey, () => produceScreenerDossiersForRun({ market, runId: result.runId }), {
+              priority: 'low',
+              dedupeKey: screenerKey,
+            }).then(sr => {
+              if (sr?.ok) console.log(`[radar_screener] ${market} run#${result.runId} 注入 ${sr.created} 条（source=${sr.source}, considered=${sr.considered}）`);
+            }).catch(e => console.log(`[radar_screener] ${market} run#${result.runId} 异常: ${e.message}`));
+          }
+
           // 盘后扫描聚合推送：风险待核验 + 今日新进入候选池
           // 复用 trend 任务后的时间窗口，避免与重操作并发；通知本身是 fire-and-forget
-          setImmediate(() => {
+          setImmediate(async () => {
             try {
-              const digestResult = getRadarDigestData(market);
+              const digestResult = await getRadarDigestData(market);
               if (digestResult?.ok && digestResult.data) {
                 sendRadarDigest(market, digestResult.data).catch(e =>
                   console.log(`[radar_v2] ${market} digest 推送异常: ${e.message}`)
                 );
+              } else {
+                console.log(`[radar_v2] ${market} digest 数据查询失败: ${digestResult?.error || 'unknown'}`);
               }
             } catch (e) {
               console.log(`[radar_v2] ${market} digest 数据查询异常: ${e.message}`);
@@ -2390,6 +2672,12 @@ server.listen(FRONT_PORT, FRONT_HOST, () => {
       },
     });
     console.log('[radar_v2] scanner 调度已启动（RADAR_SCANNER_ENABLED=1；持久化 job + 串行调度 + cursor 续跑）');
+    // screener 启动回补：重启/宕机期间漏掉的日扫 run（change_key 日期幂等，重放安全）
+    setTimeout(() => {
+      backfillScreenerForRecentRuns({ markets: ['US', 'HK', 'CN'].filter(isScreenerEnabledForMarket) })
+        .then(rs => { const created = rs.reduce((a, r) => a + (r.created || 0), 0); if (created > 0) console.log(`[radar_screener] 启动回补注入 ${created} 条`); })
+        .catch(e => console.log('[radar_screener] 启动回补异常: ' + e.message));
+    }, 90_000);
   } else {
     console.log('[radar_v2] scanner 调度未启动（默认关闭；设置 RADAR_SCANNER_ENABLED=1 启用）');
   }
@@ -2585,10 +2873,41 @@ server.listen(FRONT_PORT, FRONT_HOST, () => {
     .catch(error => console.log('[signal-drift] '+error.message));
   scheduleSignalDrift();
   setInterval(scheduleSignalDrift, 24 * 60 * 60 * 1000);
+  // 机会雷达候选池质量周报：内部幂等（radar_backtest_reports 按 week_end 去重），
+  // 启动 2 分钟后首查 + 每 60 分钟检查一次（窗口：周一 19:00 后 ~ 周三内补跑）
+  const scheduleRadarWeeklyReport = () => enqueueBackgroundTask('radar:weekly-quality', () => runWeeklyReportIfDue(), { priority: 'low', dedupeKey: 'radar:weekly-quality' })
+    .then(r => { if (r?.ok || r?.skipped === 'already-reported') console.log(`[radar_weekly] ${r.ok ? `已落库 n=${r.n}` : '本周已生成'} (${r.week_end || ''})`); })
+    .catch(e => console.log('[radar_weekly] ' + e.message));
+  setTimeout(scheduleRadarWeeklyReport, 2 * 60 * 1000);
+  setInterval(scheduleRadarWeeklyReport, 60 * 60 * 1000);
+  // 基准指数 K 线（QQQ/02800/000300 → radar_daily_bars）：outcomes 超额收益的分母，
+  // 缺口会导致 benchmark_date_mismatch。启动即刷一次 + 每 6 小时刷新。
+  const refreshBenchmarks = () => enqueueBackgroundTask('radar:benchmark-bars', () => refreshAllBenchmarkBars(), { priority: 'low', dedupeKey: 'radar:benchmark-bars' })
+    .then(r => console.log(`[radar_bench] 基准K线刷新 ${r.refreshed}/${Object.keys(r.results).length} (${JSON.stringify(r.results)})`))
+    .catch(e => console.log('[radar_bench] 刷新失败: ' + e.message));
+  refreshBenchmarks();
+  setInterval(refreshBenchmarks, 6 * 60 * 60 * 1000);
+  let capturingDiscoveries = false;
+  async function captureDiscoveries() {
+    if (capturingDiscoveries) return;
+    capturingDiscoveries = true;
+    try {
+      for (const market of ['US','HK']) {
+        const result = await listRadarResearchQueue({market,limit:30});
+        if (!result.ok) { console.error('[low-frequency] discovery',market,result.error); continue; }
+        forwardReview.recordScan(market,result.data,Date.now());
+      }
+    } catch (e) { console.error('[low-frequency] discoveries', e.message); }
+    finally { capturingDiscoveries = false; }
+  }
+  setTimeout(captureDiscoveries, 120000);
+  setInterval(captureDiscoveries, 30 * 60000);
   // 财报日历：6 小时刷新一次（US Nasdaq API + HK HKEX + CN 巨潮）
   startEarningsCalendarScheduler({ runTask: enqueueMaintenanceTask });
   // 宏观日历：6 小时刷新一次（Nasdaq Economic Calendar，90s 延迟启动与财报日历错峰）
   startEconomicCalendarScheduler({ runTask: enqueueMaintenanceTask });
+  // 官方 NAV：港交所披露易在每交易日收盘后披露 XLSX，21:30 / 23:30 / T+1 08:00（HKT）各抓一次
+  startTrackerOfficialNavScheduler({ runTask: enqueueMaintenanceTask });
   // 汇率刷新：5 分钟一次（仓位计算用 CNY→USD/HKD/KRW 实时转换）
   refreshFxRates().then(() => console.log('[fx] 汇率首次刷新完成')).catch(e => console.log('[fx] 首次刷新失败: ' + e.message));
   setInterval(() => refreshFxRates().catch(e => console.log('[fx] 刷新失败: ' + e.message)), 5 * 60 * 1000);

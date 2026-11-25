@@ -1,7 +1,7 @@
 const $ = id => document.getElementById(id);
 let selectedSym = null, chPrice = null, wl = [], pos = {}, lastRaw = {}, lastAna = {}, extData = {}, extMeta = null, optScanData = {}, shortData = {}, dragJustFinished = false, riskRadarEarnings = null;
 let earningsUpcoming = [], earningsUpcomingAt = 0;
-const requestedSymbol = new URLSearchParams(location.search).get('symbol')?.trim().toUpperCase() || null;
+let requestedSymbol = new URLSearchParams(location.search).get('symbol')?.trim().toUpperCase() || null;
 let stockHeavySymbol = null, stockHeavyAt = 0, stockChartKey = '', stockOptionRenderKey = '', stockShortRenderKey = '';
 let stockDetailRequestId = 0, stockOptionController = null, stockShortController = null;
 let stockChartRequestId = 0, stockChartController = null;
@@ -30,10 +30,11 @@ function selectAllMarkets(){
 }
 function syncMktFilterUI(){
   document.querySelectorAll('#mktFilter button[data-mkt]').forEach(btn => {
-    btn.classList.toggle('active', activeMarkets.has(btn.dataset.mkt));
+    btn.classList.toggle('active', activeMarkets.size < 4 && activeMarkets.has(btn.dataset.mkt));
   });
+  document.querySelectorAll('#mktFilter [data-mkt]').forEach(b=>b.setAttribute('aria-pressed',String(activeMarkets.size < 4 && activeMarkets.has(b.dataset.mkt))));
   const allBtn = document.querySelector('#mktFilter button:not([data-mkt])');
-  if (allBtn) allBtn.classList.toggle('active', activeMarkets.size === 4);
+  if (allBtn) { allBtn.classList.toggle('active',activeMarkets.size === 4); allBtn.setAttribute('aria-pressed',String(activeMarkets.size === 4)); }
 }
 const POSITION_TYPE_LABELS={manual:'普通仓位',probe:'试仓',swing:'波段仓',core:'核心仓'};
 const POSITION_SOURCE_LABELS={manual:'自主交易',current_signal:'当前系统信号',legacy_signal:'旧版看板信号'};
@@ -94,6 +95,7 @@ function curSym(mkt){ return mkt==="KR" ? "₩" : mkt==="HK" ? "HK$" : mkt==="CN
 function mktTag(mkt){ return mkt==="HK" ? "港" : mkt==="KR" ? "韩" : mkt==="US" ? "美" : mkt==="CN" ? "A" : ""; }
 function earningsTagFor(symbol, mkt){
   if (mkt === 'KR') return '';
+  if(!earningsUpcomingAt || Date.now()-earningsUpcomingAt>=6*60*60*1000) return ' <span class="earn-flag" title="财报日历缺失或过期">财 待核</span>';
   const hit = earningsUpcoming.find(e => e.symbol === symbol && e.market === mkt);
   if (!hit) return '';
   if(hit.is_fresh!==true)return ' <span class="earn-flag" title="财报日历已过期或本轮扫描不完整，不参与风险门控">财 待核</span>';
@@ -159,32 +161,15 @@ function isOpen(symbol){
   const w = wl.find(x => x.symbol === symbol);
   return marketState((w && w.market) || "US").open;
 }
-// 工具栏：市场开盘状态药丸（每分钟轻量刷新，不请求后端）
 function renderMarketStatus(){
-  const cont = $("mktStatus"); if (!cont) return;
-  const defs = [ { key:"US", name:"美股" }, { key:"HK", name:"港股" }, { key:"KR", name:"韩股" }, { key:"CN", name:"A股" } ];
-  let h = "";
-  const problemMarkets=[];
-  for (const d of defs){
-    const st = marketState(d.key);
-    const health=marketDataHealth[d.key]||null;
-    const readProblem=st.open&&dataHealthReadFailed;
-    const dataProblem=st.open&&(readProblem||(health&&['error','degraded'].includes(health.status)));
-    const tone=dataProblem?(readProblem||health.status==='error'?'error':'amber'):st.tone;
-    const dot=tone==='error'?'🔴':tone==='on'?'🟢':tone==='amber'?'🟡':'⚪';
-    const label=readProblem?'状态检测失败':dataProblem?health.label:st.label;
-    const detail=[st.open?st.label:'',readProblem?'无法读取后台数据健康状态，将自动重试':dataProblem?health.detail:'',st.note||''].filter(Boolean).join('；');
-    const title=detail?' title="'+esc(detail)+'"':'';
-    h+='<span class="mktpill '+tone+'"'+title+'>'+dot+' '+d.name+' '+esc(label)+'</span>';
-    if(dataProblem)problemMarkets.push(d.key);
-  }
-  const anyOpen = defs.some(d => marketState(d.key).open);
-  if(problemMarkets.length){
-    h+='<button type="button" class="mkt-health-retry" onclick="recheckDataHealth()" title="绕过失败冷却，重新检测当前开盘市场的数据源">重新检测</button>';
-  }else{
-    h+='<span class="mktpill '+(anyOpen?'on':'off')+'">'+(anyOpen?'🔄 实时刷新 5s':'💤 休市暂停行情与信号重算')+'</span>';
-  }
-  if(cont.innerHTML!==h)cont.innerHTML = h;
+  const rows = [['US','美股'],['HK','港股'],['KR','韩股'],['CN','A股']].map(([key,name]) => {
+    const st = marketState(key), health = marketDataHealth[key];
+    const readFailed = st.open && dataHealthReadFailed;
+    const problem = st.open && (readFailed || ['error','degraded'].includes(health?.status));
+    return {name,open:st.open,problem,label:readFailed ? '状态检测失败' : problem ? health.label : st.label,
+      detail:[problem ? st.label : '',readFailed ? '数据健康状态将自动重试' : problem ? health.detail : '',st.note].filter(Boolean).join(' · ')};
+  });
+  DashboardMarketStatus.display(rows, rows.some(row => row.open) ? '行情与信号每 5 秒刷新' : '休市期间暂停行情与信号重算', recheckDataHealth);
 }
 async function recheckDataHealth(){
   const button=document.querySelector('.mkt-health-retry');
@@ -241,17 +226,7 @@ let clientAlertPrimed = false;
 const sessionRiskAlertState = {};
 let sessionRiskAlertPrimed = false;
 function normSig(s){ const v=String(s||'').toUpperCase();return STOCK_TIERS.includes(v)||v==='HOLD'||v==='NONE'?v:null; }
-function showToast(msg){
-  let box = $('toastBox');
-  if (!box){ box = document.createElement('div'); box.id = 'toastBox';
-    box.style.cssText = 'position:fixed;right:18px;bottom:18px;z-index:9999;display:flex;flex-direction:column;gap:8px';
-    document.body.appendChild(box); }
-  const t = document.createElement('div');
-  t.style.cssText = 'background:#1f2329;color:#fff;padding:10px 14px;border-radius:8px;font-size:13px;box-shadow:0 4px 14px rgba(0,0,0,.25);max-width:330px;line-height:1.5';
-  t.textContent = msg;
-  box.appendChild(t);
-  setTimeout(() => { t.style.transition = 'opacity .4s'; t.style.opacity = '0'; setTimeout(() => t.remove(), 400); }, 6000);
-}
+function showToast(msg){ DashboardPageNotices.add(msg); }
 // 浏览器通知文案模板：与服务端 /stock/alert-template 保持一致，占位符 {title}/{name}/{symbol}/{action}/{detail}/{time}
 let notifyTemplates = null;
 async function loadNotifyTemplates(){
@@ -376,8 +351,8 @@ function populateAlertModal(){
   const b = $('browserChk'); if (b) b.checked = !!alertCfg.browser;
   DashboardNotificationCenter.render(alertCfg);
 }
-function openAlertModal(){ populateAlertModal(); $('alertModal').style.display = 'flex'; DashboardNotificationCenter.load(alertCfg); }
-function closeAlertModal(){ $('alertModal').style.display = 'none'; }
+function openAlertModal(){ populateAlertModal(); $('alertModal').showModal(); DashboardNotificationCenter.load(alertCfg); }
+function closeAlertModal(){ $('alertModal').close(); }
 function collectStockTiers(){
   const c = $('stockTierBox');
   if (!c) return alertCfg.stockTiers.slice();
@@ -439,11 +414,11 @@ function personaVerdictsHtml(bundle){
       +(plan?'<span class="dc-persona-plan">'+esc(plan)+'</span>':'')
       +'<span class="dc-persona-reason">'+esc(profile.reason||'')+'</span></div>';
   }).join('');
-  return '<section class="dc-persona-verdicts">'
-    +'<div class="dc-persona-title">三种策略判断</div>'
+  return '<details class="dc-persona-verdicts">'
+    +'<summary class="dc-persona-title">对照三种策略判断</summary>'
     +'<div class="dc-persona-grid">'+rows+'</div>'
     +'<div class="dc-persona-foot">'+esc(bundle.note||'三项均经过完整决策链；只有当前策略写入正式信号。')+'</div>'
-    +'</section>';
+    +'</details>';
 }
 function hasInfrastructureDataGate(sw){return !!(sw&&sw.dataGate&&sw.dataGate.status&&sw.dataGate.status!=='pass');}
 function isInfrastructureReason(value){return /(?:行情源|实时行情|本地历史缓存|缓存报价|报价已过期|缺少有效报价|关键数据不可用|盘中报价)/.test(String(value||''));}
@@ -539,8 +514,11 @@ function renderDecisionCard(ai, plan, eff, sw, mkt, sessionRisk){
 
   h += decisionAssessmentsHtml(sw);
   h += decisionExplanationHtml(sw);
-  h += personaVerdictsHtml(ai.personaVerdicts);
   h += keyPlanHtml(ai,sw,mkt);
+  h += personaVerdictsHtml(ai.personaVerdicts);
+  if(sessionRisk){
+    h += '<div class="detail-note soft compact"><strong>扩展时段风险：'+esc(sessionRisk.label||'待核')+'</strong> '+esc(sessionRisk.reason||'')+'（不改变正式执行状态）</div>';
+  }
 
   h += '<details class="dc-more-research"><summary>更多研究信息</summary><div class="dc-more-research-body">';
 
@@ -590,6 +568,49 @@ function renderDecisionCard(ai, plan, eff, sw, mkt, sessionRisk){
   h += '</div></details>';
 
   el.innerHTML = h;
+}
+// Refresh risk presentation independently of charts and the heavy-detail clock.
+const stockRiskDetails = new Map();
+function rememberRiskDetail(symbol, kind, data){
+  const details = stockRiskDetails.get(symbol) || {};
+  details[kind] = {data, at:Date.now()};
+  stockRiskDetails.set(symbol, details);
+  if(stockRiskDetails.size>100) stockRiskDetails.delete(stockRiskDetails.keys().next().value);
+}
+function riskDataGaps(earnings, groupRisk, option, short, extended, market){
+  const ready = value => value && !value.error && !value.pending && !value.stale && value.is_fresh!==false && !value.cacheState?.stale;
+  const gaps = [];
+  if(market!=='KR' && (!ready(earnings) || earnings.is_fresh!==true)) gaps.push('财报');
+  if(!ready(groupRisk)) gaps.push('分组事件');
+  if(market==='US'){
+    if(!ready(extended) || extended.extPct==null) gaps.push('盘前盘后');
+    if(!ready(option) || (!option.unsupported && !option.sentiment)) gaps.push('期权');
+  }
+  if(['US','HK'].includes(market) && (!ready(short) || (!short.unsupported && (market==='US' ? short.shortPercentOfFloat==null : short.shortPctTurnover==null)))) gaps.push('空头');
+  return gaps;
+}
+function refreshSelectedRisk(){
+  const symbol=selectedSym;
+  if(!symbol) return;
+  const ai=lastAna?.[symbol], market=wl.find(w=>w.symbol===symbol)?.market||'US';
+  const details=stockRiskDetails.get(symbol)||{};
+  const detail=(kind,ttl)=>details[kind] && Date.now()-details[kind].at<ttl ? details[kind].data : null;
+  const scan=(data,at,ttl)=>data && (!at || Date.now()-at>=ttl) ? {...data,stale:true} : data;
+  const latest=(kind,data,at,ttl)=>{
+    const value=detail(kind,ttl);
+    return value && (!data || details[kind].at>at) ? value : scan(data,at,ttl)||value;
+  };
+  const earnings=latest('earnings',earningsUpcoming.find(e=>e.symbol===symbol&&e.market===market),earningsUpcomingAt,6*60*60*1000)||ai?.earnings||null;
+  const option=latest('option',optScanData[symbol],optionScanAt,60000);
+  const short=latest('short',shortData[symbol],shortRefreshAt,5*60*1000);
+  const extended=market==='US'?extData[symbol]:null;
+  const group=ai?.groupRisk||null, sw=swingPlan(ai);
+  const gaps=riskDataGaps(earnings,group,option,short,extended,market);
+  preserveStockScroll(()=>{
+    renderDecisionCard(ai,activeProfileStrategy(ai),swingTier(ai)||{},sw,market,extended?.riskOverlay||null);
+    if(gaps.length && $('d_decision')) $('d_decision').innerHTML += '<div class="detail-note soft compact">附加风险待核：'+esc(gaps.join('、'))+'。数据缺失或过期，不代表无风险。</div>';
+    renderRiskCard(ai,sw,earnings,group,option,short,extended,market);
+  });
 }
 function renderRiskCard(ai, sw, earnings, groupRisk, optData, shortData, extData, mkt){
   const el = $('d_risk_card'); if(!el) return;
@@ -642,10 +663,12 @@ function renderRiskCard(ai, sw, earnings, groupRisk, optData, shortData, extData
     }
   }
 
+  const gaps=riskDataGaps(earnings,groupRisk,optData,shortData,extData,mkt);
+  const unknown=gaps.length ? '<div class="rc-empty">风险数据待核：'+esc(gaps.join('、'))+'（缺失或过期），不能判定无风险。</div>' : '';
   // 渲染
   if(risks.length === 0){
     el.className = 'risk-card';
-    el.innerHTML = '<div class="rc-title">关键风险</div><div class="rc-empty"><span class="rc-ok">✓</span> 暂无异常风险信号</div>';
+    el.innerHTML = '<div class="rc-title">关键风险</div>' + (unknown || '<div class="rc-empty"><span class="rc-ok">✓</span> 暂无异常风险信号</div>');
     return;
   }
   const hasHigh = risks.some(r => r.sev === 'high');
@@ -660,7 +683,7 @@ function renderRiskCard(ai, sw, earnings, groupRisk, optData, shortData, extData
     h += '</div>';
   }
   h += '</div>';
-  el.innerHTML = h;
+  el.innerHTML = h + unknown;
 }
 function renderDecisionBasis(ai, plan, sw){
   const el = $('d_basis'); if(!el) return;
@@ -923,7 +946,7 @@ function openGroupModal(symbol, market, currentGroup){
     ? '当前分组：<b>' + currentKeys.map(esc).join('、') + '</b>'
     : '当前未设置分组';
   if (inputEl) inputEl.value = '';
-  modal.style.display = 'flex';
+  modal.showModal();
   // 异步加载已有分组 chip（多选 toggle）
   loadGroupChips();
   // 输入框：回车添加新分组到 selectedKeys
@@ -959,20 +982,20 @@ function updateGroupModalCurrent(){
 }
 function closeGroupModal(){
   const modal = $('groupModal');
-  if (modal) modal.style.display = 'none';
+  if (modal) modal.close();
 }
 
 // === 看板设置模态框：股票监控专属配置 ===
 // 列定义：可隐藏的列（名称/代码与操作列固定显示）
 const SETTINGS_COLUMNS = [
-  { key: 'price',     label: '现价',       thIndex: 1 },
-  { key: 'chg',       label: '涨跌%',      thIndex: 2 },
-  { key: 'ext',       label: '盘前/盘后',  thIndex: 3 },
-  { key: 'signal',    label: '信号',       thIndex: 4 },
-  { key: 'ind',       label: '量价',       thIndex: 5 },
-  { key: 'sentiment', label: '期权 / 空头', thIndex: 6 },
-  { key: 'holding',   label: '持仓 / 盈亏', thIndex: 7 },
-  { key: 'pl',        label: '盈亏',       thIndex: 8 },
+  { key: 'price',     label: '现价' },
+  { key: 'chg',       label: '涨跌%' },
+  { key: 'ext',       label: '盘前/盘后' },
+  { key: 'signal',    label: '信号' },
+  { key: 'ind',       label: '量价' },
+  { key: 'sentiment', label: '期权 / 空头' },
+  { key: 'holding',   label: '持仓 / 成本' },
+  { key: 'pl',        label: '浮动盈亏' },
 ];
 const LS_DEFAULT_MARKETS  = 'stock_default_markets';
 const LS_DEFAULT_FILTER   = 'stock_default_signal_filter';
@@ -999,25 +1022,21 @@ function readHiddenCols(){
 
 function applyColumnVisibility(){
   const hidden = readHiddenCols();
-  const table = document.querySelector('.stock-grid-table');
+  const table = document.getElementById('stockManagementTable');
   if (!table) return;
-  // colgroup
-  const cols = table.querySelectorAll('colgroup col');
-  // thead
-  const ths = table.querySelectorAll('thead th');
-  // tbody rows
-  const rows = table.querySelectorAll('tbody tr');
-  SETTINGS_COLUMNS.forEach(col => {
-    const isHidden = hidden.has(col.key);
-    const idx = col.thIndex;
-    if (cols[idx]) cols[idx].style.display = isHidden ? 'none' : '';
-    if (ths[idx]) ths[idx].style.display = isHidden ? 'none' : '';
-    rows.forEach(tr => {
-      const td = tr.children[idx];
-      if (td) td.style.display = isHidden ? 'none' : '';
-    });
-  });
+  for (const col of table.querySelectorAll('[data-field]')) {
+    col.hidden = hidden.has(col.dataset.field);
+  }
 }
+
+document.querySelector('.management-views').addEventListener('click', event => {
+  const choice = event.target.closest('button[data-fields]');
+  if (!choice) return;
+  $('stockManagementTable').dataset.fields = choice.dataset.fields;
+  for (const button of choice.parentElement.querySelectorAll('button')) {
+    button.setAttribute('aria-pressed', String(button === choice));
+  }
+});
 
 function applyDefaultFiltersOnLoad(){
   // 市场默认筛选
@@ -1033,10 +1052,10 @@ function applyDefaultFiltersOnLoad(){
 
 function openSettingsModal(){
   populateSettingsModal();
-  $('settingsModal').style.display = 'flex';
+  $('settingsModal').showModal();
 }
 function closeSettingsModal(){
-  $('settingsModal').style.display = 'none';
+  $('settingsModal').close();
 }
 
 // ===== 决策人格（全局默认偏好；已持仓标的被仓位绑定锁定，不跟随此设置） =====
@@ -1516,31 +1535,58 @@ async function loadAnalysisSnapshot(force = false){
   _analysisAt = Date.now();
   return value;
 }
-async function loadAll(){
+// Each extra has its own in-flight guard and timeout; failures retain the last
+// successful value/timestamp and remain eligible for retry on the next refresh.
+const stockExtrasInFlight = new Set();
+async function fetchStockExtra(url){
+  const response = await fetch(url, {signal: AbortSignal.timeout(8000)});
+  if(!response.ok) throw new Error('附加数据加载失败：HTTP '+response.status);
+  return response.json();
+}
+function refreshStockExtras(){
+  const run = (key, due, url, apply) => {
+    if(!due || stockExtrasInFlight.has(key)) return;
+    stockExtrasInFlight.add(key);
+    void fetchStockExtra(url).then(data => {
+      apply(data);
+      preserveStockScroll(()=>{
+        renderGrid(lastRaw, lastAna, extData);
+        refreshSelectedRisk();
+      });
+      if(key==='extended') detectSessionRiskAlerts(wl, extData);
+    }).catch(error=>console.warn('[stock extras]',key,error.message))
+      .finally(()=>stockExtrasInFlight.delete(key));
+  };
+  run('extended', true, '/stock/extended', data=>{extData=data.data||{};extMeta=data.meta||null;});
+  run('options', !optionScanAt || Date.now()-optionScanAt>=60000, '/stock/options-scan', data=>{optScanData=data||{};optionScanAt=Date.now();});
+  run('earnings', !earningsUpcomingAt || Date.now()-earningsUpcomingAt>=6*60*60*1000, '/stock/earnings-upcoming?days=14', data=>{
+    if(!Array.isArray(data)) throw new Error('Invalid earnings response');
+    earningsUpcoming=data;earningsUpcomingAt=Date.now();
+  });
+  void refreshShort(false);
+}
+let stockLoadInFlight, stockLoadRequested = false;
+function loadAll(){
+  stockLoadRequested = true;
+  if(stockLoadInFlight) return stockLoadInFlight;
+  stockLoadInFlight = (async()=>{
+    do {
+      stockLoadRequested = false;
+      await loadAllCore();
+      // An older response can repopulate analysis after a mutation invalidated it.
+      if(stockLoadRequested) invalidateAnalysisSnapshot();
+    } while(stockLoadRequested);
+  })().finally(()=>{stockLoadInFlight=null;});
+  return stockLoadInFlight;
+}
+async function loadAllCore(){
   try {
-    await loadWL(); await loadPos();
-    // 汇率异步刷新；到达后只重绘组合摘要，不阻塞行情与信号加载。
-    void ensureFxRates().then(fx => { if(fx) renderPortfolioBar(lastRaw, lastAna); });
-    const needOptionScan=!optionScanAt||Date.now()-optionScanAt>=60000;
-    const needShortScan=!shortRefreshAt||Date.now()-shortRefreshAt>=5*60*1000;
-    const needEarningsScan=!earningsUpcomingAt||Date.now()-earningsUpcomingAt>=6*60*60*1000;
-    const [raw, ana, extRes, optionRes, shortRes, earningsRes] = await Promise.all([
-      fetch("/stock-snapshot").then(r => r.json()),
-      loadAnalysisSnapshot(),
-      // 盘前/盘后数据非关键，3s 超时即跳过，避免 Sina API 慢响应阻塞整个看板
-      Promise.race([
-        fetch("/stock/extended").then(r => r.json()),
-        new Promise(resolve => setTimeout(() => resolve({ meta: null, data: {} }), 3000))
-      ]).catch(() => ({ meta: null, data: {} })),
-      needOptionScan?fetch("/stock/options-scan").then(r=>r.json()).catch(()=>optScanData||{}):Promise.resolve(optScanData||{}),
-      needShortScan?fetch("/stock/short-scan").then(r=>r.json()).catch(()=>shortData||{}):Promise.resolve(shortData||{}),
-      needEarningsScan?fetch("/stock/earnings-upcoming?days=14").then(r=>r.json()).catch(()=>[]):Promise.resolve(earningsUpcoming||[])
+    const [raw, ana] = await Promise.all([
+      fetch("/stock-snapshot").then(r => { if(!r.ok) throw new Error('行情加载失败：HTTP '+r.status); return r.json(); }),
+      loadAnalysisSnapshot(), loadWL(), loadPos()
     ]);
-    if(needOptionScan){optScanData=optionRes||{};optionScanAt=Date.now();}
-    if(needShortScan){shortData=shortRes||{};shortRefreshAt=Date.now();}
-    if(needEarningsScan){earningsUpcoming=Array.isArray(earningsRes)?earningsRes:[];earningsUpcomingAt=Date.now();}
-    extData = extRes.data || {};
-    extMeta = extRes.meta || null;
+    void ensureFxRates().then(fx => { if(fx) renderPortfolioBar(lastRaw, lastAna); }).catch(console.warn);
+    document.querySelector('.board-loading')?.remove();
     lastRaw = raw;
     lastAna = ana;
     $("status").textContent = "页面更新 " + new Date().toLocaleTimeString();
@@ -1552,13 +1598,16 @@ async function loadAll(){
     detectAlerts(ana, wl);
     detectSessionRiskAlerts(wl, extData);
     // A radar candidate can request a detail handoff without overriding later selection.
-    if (!selectedSym && requestedSymbol && wl.some(item => item.symbol === requestedSymbol)) selectStock(requestedSymbol);
-    else if (!selectedSym && wl.length > 0) selectStock(wl[0].symbol);
-    else if (selectedSym) loadDetail(selectedSym,{full:false});
-    refreshShort(false); // 缓存端点立即返回；真实上游更新由服务端后台完成
+    if (requestedSymbol && wl.some(item => item.symbol === requestedSymbol)) {
+      selectStock(requestedSymbol);
+      requestedSymbol = null;
+    } else if (selectedSym && document.body.classList.contains('reading-instrument')) loadDetail(selectedSym,{full:false});
+    refreshStockExtras();
   } catch(e){
     console.error('[stock] loadAll failed', e);
     $("status").textContent = "连接断开";
+    const pending = document.querySelector('.board-loading');
+    if (pending) pending.textContent = '行情读取失败，请刷新重试';
     setConnState('err', e && e.message ? e.message : '');
   }
 }
@@ -1636,25 +1685,21 @@ function indText(ai, chgPct){
 }
 function posHtml(s, st){
   const p = pos[s];
-  if (!p || !p.shares || !p.cost || !st || st.price == null) return '<td><small class="muted">—</small></td>';
+  if (!p || !p.shares || !p.cost || !st || st.price == null) return '<td data-field="pl" data-label="浮动盈亏"><small class="muted">—</small></td>';
   const mkt = (wl.find(w => w.symbol === s) || {}).market || "US";
   const pl = (st.price - p.cost) * p.shares;
   const pp = (st.price - p.cost) / p.cost * 100;
   const cls = pl >= 0 ? "disc" : "prem";
-  return '<td class="'+cls+'">'+curSym(mkt)+(pl>=0?"+":"")+pl.toFixed(0)+"<br><small>"+(pp>=0?"+":"")+pp.toFixed(2)+"%</small></td>";
+  return '<td data-field="pl" data-label="浮动盈亏" class="'+cls+'">'+curSym(mkt)+(pl>=0?"+":"")+pl.toFixed(0)+"<br><small>"+(pp>=0?"+":"")+pp.toFixed(2)+"%</small></td>";
 }
-function holdingHtml(s, mkt, st){
+function holdingHtml(s, mkt){
   const p = pos[s];
-  if (p?.ledgerStatus === 'invalid') return '<td title="'+esc(p.ledgerError || '')+'"><small class="muted">持仓待核对</small></td>';
-  if (!p || !p.shares) return '<td><small class="muted">—</small></td>';
+  if (p?.ledgerStatus === 'invalid') return '<td data-field="holding" data-label="持仓 / 成本" title="'+esc(p.ledgerError || '')+'"><small class="muted">持仓待核对</small></td>';
+  if (!p || !p.shares) return '<td data-field="holding" data-label="持仓 / 成本"><small class="muted">—</small></td>';
   const cost = Number(p.cost);
-  const px = st && st.price != null ? Number(st.price) : null;
-  const pl = px != null && cost>0 ? (px-cost)*Number(p.shares) : null;
-  const pp = px != null && cost>0 ? (px/cost-1)*100 : null;
-  const cls = pl == null ? '' : (pl>=0?'disc':'prem');
   const origin=(POSITION_TYPE_LABELS[p.position_type]||'普通仓位')+' · '+(POSITION_SOURCE_LABELS[p.source]||'自主交易');
   const title = (cost>0 ? ('持仓成本 '+fmtPrice(cost,mkt)) : '持仓成本待补')+'；'+origin;
-  return '<td class="holding-cell" title="'+esc(title)+'"><b>'+Number(p.shares).toLocaleString()+' 股</b>'+(pl==null?'':'<br><small class="'+cls+'">'+curSym(mkt)+(pl>=0?'+':'')+pl.toFixed(0)+' · '+(pp>=0?'+':'')+pp.toFixed(2)+'%</small>')+'<span class="position-origin">'+esc(origin)+'</span></td>';
+  return '<td data-field="holding" data-label="持仓 / 成本" class="holding-cell" title="'+esc(title)+'"><b>'+Number(p.shares).toLocaleString()+' 股</b><small>'+(cost>0 ? fmtPrice(cost,mkt) : '成本待补')+'</small>'+'<span class="position-origin">'+esc(origin)+'</span></td>';
 }
 
 // renderSessionRisk 已废弃：盘后风险覆盖逻辑已被 renderExecPlan 块 C 吸收
@@ -1726,17 +1771,19 @@ function renderActionQueue(raw, ana){
   const cls = ['aq-exit', 'aq-pending', 'aq-entry'];
   let h = '<span class="aq-title">今日行动</span>';
   for(const a of actions){
-    h += '<span class="aq-item ' + cls[a.priority] + '" title="' + esc(a.reason) + '" onclick="selectStock(\'' + esc(a.symbol) + '\')">';
+    h += '<button type="button" class="aq-item ' + cls[a.priority] + '" title="' + esc(a.reason) + '" onclick="selectStock(\'' + esc(a.symbol) + '\')">';
     h += '<span class="aq-label">' + esc(a.label) + '</span>';
     h += '<span class="aq-name">' + esc(a.name) + '</span>';
-    h += '</span>';
+    h += '</button>';
   }
   el.innerHTML = h;
   el.style.display = 'flex';
 }
 
 function renderGrid(raw, ana, ext){
-  const tb = $("gridBody"); tb.innerHTML = "";
+  const tb = $("gridBody");
+  const restoreFocus = rememberManagementFocus(tb,'sym');
+  tb.innerHTML = "";
   const topTs = raw.ts;
   // 排序：交易中置顶（默认）/ 代码 / 现价 / 涨跌幅 / 添加时间
   let rows = wl.slice();
@@ -1763,14 +1810,19 @@ function renderGrid(raw, ana, ext){
     rows = openRows.concat(closedRows);
   }
   const {query,filter}=stockListControls.view();
+  const groupCounts = {};
   rows=rows.filter(w=>{
     const st=raw[w.symbol]||{}, ai=ana[w.symbol], eff=swingTier(ai), action=eff?.action;
     const text=(w.symbol+' '+(w.label||'')+' '+(st.name||'')).toUpperCase();
-    return (!query||text.includes(query))&&(filter==='all'||stockActionGroup(action,eff.swing)===filter)&&activeMarkets.has(w.market||'US');
+    if ((query && !text.includes(query)) || !activeMarkets.has(w.market||'US')) return false;
+    const group = stockActionGroup(action,eff?.swing);
+    groupCounts[group] = (groupCounts[group] || 0) + 1;
+    return filter === 'all' || group === filter;
   });
   stockListControls.setCount(rows.length,wl.length);
   $("empty").textContent=wl.length?(rows.length?'':'没有符合筛选条件的股票'):'还没有添加股票。点击「+ 添加股票」加入。';
   $("empty").style.display=rows.length?'none':'block';
+  const cards = [];
   for (const w of rows){
     const s = w.symbol, mkt = w.market || "US";
     const st = raw[s], ai = ana[s];
@@ -1791,7 +1843,7 @@ function renderGrid(raw, ana, ext){
     const ex = (mkt === "US") ? (ext && ext[s]) : null;
     // v17: 列表页 sessionRiskInline 附加行已移除 —— 扩展时段风险统一在详情卡 auditTrail 展示
     // v17: 稳定器确认期不再渲染附加行 —— pendingLabel 已移除，统一由 auditTrail 展示
-    let extCell, extInline = '';
+    let extCell;
     if (ex && ex.extPrice != null) {
       const isPre = ex.extSession === "pre";
       const tag = isPre ? "盘前" : "盘后";
@@ -1799,35 +1851,41 @@ function renderGrid(raw, ana, ext){
       const hasExtPct = Number.isFinite(extPct);
       const cls = !hasExtPct ? "muted" : (extPct >= 0 ? "disc" : "prem");
       const pctText = hasExtPct ? ((extPct>=0?"+":"")+extPct.toFixed(2)+'%') : '涨跌待更新';
-      extCell = '<td><b class="'+cls+'">'+tag+' '+fmtPrice(ex.extPrice,"US")+'</b><br><small class="'+cls+'">'+pctText+'</small></td>';
-      extInline = '<small class="price-ext '+cls+'">'+tag+' '+fmtPrice(ex.extPrice,"US")+' · '+pctText+'</small>';
+      extCell = '<td data-field="ext" data-label="扩展时段"><b class="'+cls+'">'+tag+' '+fmtPrice(ex.extPrice,"US")+'</b><br><small class="'+cls+'">'+pctText+'</small></td>';
     } else {
-      extCell = '<td><small class="muted">—</small></td>';
+      extCell = '<td data-field="ext" data-label="扩展时段"><small class="muted">—</small></td>';
     }
-    const holdingCell = holdingHtml(s, mkt, st);
+    const holdingCell = holdingHtml(s, mkt);
     // 期权方向与空头情绪摘要；完整流水仍在右侧详情中。
-    const shortCell = shortCellHtml(s, mkt);
+    const shortCell = '<td class="sentiment-cell" data-field="sentiment" data-label="期权 / 空头">'+shortCellHtml(s, mkt)+'</td>';
     const open = isOpen(s);
     if (open) tr.classList.add("tr-open");
     const earningsTag = earningsTagFor(s, mkt);
     tr.innerHTML =
-      '<td><div class="name-cell"><button type="button" class="drag-handle" title="拖动排序" aria-label="拖动 '+esc(s)+' 排序">⋮⋮</button><div class="name-text"><span class="stock-name">'+esc((st && st.name) || w.label || s)+'</span><span class="stock-code">'+esc(s)+' <span class="mkt-badge mkt-'+mkt+'">'+mktTag(mkt)+'</span>'+earningsTag+'</span></div></div></td>'+
-      '<td>'+price+extInline+'</td>'+
-      '<td class="'+chgCls+'">'+chg+'</td>'+
-      extCell +
-      '<td>'+(sig ? '<span class="stock-signal-cell"><span class="badge '+(eff.swing ? swingBadgeClass(eff.swing) : sigClass(sig))+'" title="'+esc((eff.swing ? decisionSummaryForDisplay(eff.swing) : '')+(sigSub?'；'+sigSub:''))+'">'+esc(sigLabel)+'</span>'+(sigSub?'<small>'+esc(sigSub)+'</small>':'')+'</span>' : '<span class="muted">—</span>')+'</td>'+
-      '<td class="ind">'+ind+'</td>'+
-      shortCell+
-      holdingCell+
-      pl+
-      '<td><button class="btn ghost delbtn" title="删除" aria-label="删除"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1 1 L9 9 M9 1 L1 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button></td>';
+      '<td data-field="name"><div class="management-identity"><button type="button" class="drag-handle" title="拖动排序" aria-label="拖动 '+esc(s)+' 排序">⠿</button><div><strong>'+esc(st?.name || w.label || s)+'</strong><small>'+esc(s)+' · '+esc(mktTag(mkt))+(open?' · 交易中':'')+earningsTag+'</small></div></div></td>'+
+      '<td data-field="price" data-label="现价">'+price+'</td>'+
+      '<td data-field="chg" data-label="涨跌幅" class="'+chgCls+'">'+chg+'</td>'+extCell+
+      '<td data-field="signal" data-label="信号"><span class="management-signal" data-tone="'+stockActionGroup(sig,eff.swing)+'" title="'+esc(eff.swing ? decisionSummaryForDisplay(eff.swing) : '')+'">'+esc(sig ? sigLabel : '—')+'</span>'+(sigSub?'<small>'+esc(sigSub)+'</small>':'')+'</td>'+
+      '<td data-field="ind" data-label="量价">'+ind+'</td>'+shortCell+holdingCell+pl+
+      '<td data-field="action"><button type="button" class="delbtn" aria-label="移除 '+esc(s)+'">移除</button></td>';
     tr.querySelector(".delbtn").addEventListener("click", (ev) => { ev.stopPropagation(); delStock(s); });
     setupDragRow(tr,s);
+    cards.push({key:s, code:s+' · '+mktTag(mkt), name:st?.name || w.label || s,
+      value:price, secondary:chg, tone:chgCls, note:sig ? [sigLabel,sigSub].filter(Boolean).join(' · ') : '决策数据待更新',
+      group:stockActionGroup(sig,eff.swing)});
+    tr.tabIndex = 0;
+    tr.onkeydown = event => {
+      if (event.target !== tr || event.key !== 'Enter') return;
+      event.preventDefault();
+      selectStock(s);
+    };
     tr.onclick = () => { if(!dragJustFinished) selectStock(s); };
     tb.appendChild(tr);
   }
+  InstrumentBoard.render([["risk","风险复核"],["entry","进场信号"],["hold","持有跟踪"],["observe","继续观察"]],cards,selectStock,groupCounts);
   // 重新应用列显隐（tbody 刚被重建）
   applyColumnVisibility();
+  restoreFocus?.();
 }
 
 function dragAllowed(){
@@ -1868,7 +1926,7 @@ function shortCellHtml(s, mkt){
   const option = optScanData[s] || {};
   const sentiment = option.sentiment || null;
   const optionScore = Number(sentiment && sentiment.score);
-  const optionLabel = sentiment && sentiment.label ? sentiment.label : (mkt === 'US' ? '暂无异动' : '不适用');
+  const optionLabel = sentiment && sentiment.label ? sentiment.label : (mkt === 'US' ? '数据缺失' : '不适用');
   const optionCls = Number.isFinite(optionScore) ? (optionScore > 0.12 ? 'disc' : (optionScore < -0.12 ? 'prem' : '')) : '';
   let shortLabel = '—', shortCls = '';
   const sh = shortData[s] || null;
@@ -1886,10 +1944,8 @@ function shortCellHtml(s, mkt){
       shortCls = warn ? 'prem' : '';
     }
   }
-  return '<td class="sentiment-cell">'
-    + '<span class="sentiment-line"><span class="sentiment-key">期权</span><b class="'+optionCls+'">'+esc(String(optionLabel))+'</b></span>'
-    + '<span class="sentiment-line"><span class="sentiment-key">空头</span><b class="'+shortCls+'">'+esc(String(shortLabel))+'</b></span>'
-    + '</td>';
+  return '<span class="sentiment-line"><span class="sentiment-key">期权</span><b class="'+optionCls+'">'+esc(String(optionLabel))+'</b></span>'
+    + '<span class="sentiment-line"><span class="sentiment-key">空头</span><b class="'+shortCls+'">'+esc(String(shortLabel))+'</b></span>';
 }
 
 // 后台补抓空头数据（美股需串行抓取规避 Yahoo 限流，约 20s），完成后仅刷新空头列，不阻塞主列表即时显示
@@ -1897,23 +1953,21 @@ async function refreshShort(force=false){
   if(shortRefreshInFlight||(!force&&shortRefreshAt&&Date.now()-shortRefreshAt<5*60*1000))return;
   shortRefreshInFlight=true;
   try {
-    const d = await fetch("/stock/short-scan").then(r => r.json()).catch(() => ({}));
+    const d = await fetchStockExtra("/stock/short-scan");
     shortData = d;
     shortRefreshAt=Date.now();
     patchShortColumn();
+    refreshSelectedRisk();
     if (selectedSym && shortData[selectedSym]) preserveStockScroll(()=>renderShort(shortData[selectedSym],selectedSym));
   } catch(e){ console.warn('[stock]', e?.message||e); } finally {shortRefreshInFlight=false;}
 }
 function patchShortColumn(){
-  const ths = document.querySelectorAll("table thead th");
-  let idx = -1;
-  ths.forEach((th, i) => { if (th.dataset.col === "sentiment") idx = i; });
-  if (idx < 0) return;
   document.querySelectorAll("#gridBody tr").forEach(tr => {
     const s = tr.dataset.sym; if (!s) return;
     const w = wl.find(x => x.symbol === s);
     const mkt = (w && w.market) || "US";
-    if (tr.children[idx]) tr.children[idx].outerHTML = shortCellHtml(s, mkt);
+    const cell = tr.querySelector('[data-field="sentiment"]');
+    if (cell) cell.innerHTML = shortCellHtml(s, mkt);
   });
 }
 
@@ -1938,6 +1992,7 @@ function updateSortButtons(){
     if (!btn) return;
     const ind = btn.querySelector('.sort-indicator');
     const active = mode === key + '_asc' || mode === key + '_desc';
+    btn.closest('th').setAttribute('aria-sort', active ? (mode === key + '_asc' ? 'ascending' : 'descending') : 'none');
     btn.setAttribute('aria-pressed', String(active));
     if (ind) ind.innerHTML = active ? (mode === key + '_asc' ? '&#8593;' : '&#8595;') : '&#8597;';
   });
@@ -1953,14 +2008,12 @@ function restoreSortMode(){
   updateSortButtons();
 }
 
-function showDetailPanel(){
-  const panel=document.querySelector('.split-detail');
-  if(panel) panel.classList.add('active');
-}
-function hideDetailPanel(){
-  const panel=document.querySelector('.split-detail');
-  if(panel) panel.classList.remove('active');
-}
+const stockNavigation = DashboardDetailHistory(['symbol'], symbol => {
+  if (wl.some(item => item.symbol === symbol)) selectStock(symbol);
+  else requestedSymbol = symbol;
+}, () => { requestedSymbol = null; InstrumentBoard.close(); });
+function showDetailPanel(){ stockNavigation.enter(selectedSym); InstrumentBoard.open(selectedSym); }
+function hideDetailPanel(){ stockNavigation.back(); }
 function selectStock(s){
   const changing=selectedSym!==s;
   selectedSym = s;
@@ -2006,11 +2059,19 @@ function closeDetail(){
 }
 
 function ensureStockCharts(){
-  if(!chPrice)chPrice=echarts.init($("chPrice"));
+  if (!chPrice) {
+    const host = $('chPrice');
+    host.replaceChildren();
+    chPrice = echarts.init(host);
+  }
   // chChg 已移除（涨跌图合并进主图），不再 init
 }
 
 function clearStockCharts(loading=true){
+  if (!window.echarts || !chPrice && !$('stockStudy').open) {
+    $('chPrice').textContent = loading ? '正在加载图表…' : '';
+    return;
+  }
   ensureStockCharts();
   stockChartKey='';
   chPrice.hideLoading();
@@ -2028,7 +2089,7 @@ function prepareStockCharts(s){
   if(stockChartController)stockChartController.abort();
   stockChartController=null;
   const cached=stockChartCache.get(stockChartCacheKey(s,stockChartProfile));
-  if(cached)drawCharts(s,cached.study,cached.history,cached.ai,cached.position,cached.market,true);
+  if(cached && $('stockStudy').open)drawCharts(s,cached.study,cached.history,cached.ai,cached.position,cached.market,true);
   else clearStockCharts(true);
 }
 
@@ -2059,7 +2120,8 @@ function loadStockCharts(s,ai,position,mkt,replace=false){
   const requestedProfile=stockChartProfile;
   Promise.all([
     fetch("/stock-history?symbol="+encodeURIComponent(s)+"&minutes=240",{signal:controller.signal}).then(r=>r.json()),
-    fetch("/stock/chart-studies?symbol="+encodeURIComponent(s)+"&profile="+encodeURIComponent(requestedProfile)+"&days=320",{signal:controller.signal}).then(r=>r.ok?r.json():Promise.reject(new Error('chart studies HTTP '+r.status)))
+    fetch("/stock/chart-studies?symbol="+encodeURIComponent(s)+"&profile="+encodeURIComponent(requestedProfile)+"&days=320",{signal:controller.signal}).then(r=>r.ok?r.json():Promise.reject(new Error('chart studies HTTP '+r.status))),
+    DashboardCharts.load()
   ]).then(([history,study])=>{
     if(selectedSym!==s||requestId!==stockChartRequestId||requestedProfile!==stockChartProfile)return;
     const payload={history:Array.isArray(history)?history:[],study,ai,position,market:mkt,at:Date.now()};
@@ -2070,6 +2132,7 @@ function loadStockCharts(s,ai,position,mkt,replace=false){
     if(e.name==='AbortError'||selectedSym!==s||requestId!==stockChartRequestId)return;
     if(!stockChartCache.has(stockChartCacheKey(s,requestedProfile))){
       clearStockCharts(false);
+      if (!chPrice || !$('stockStudy').open) { $('chPrice').textContent='日K暂时无法加载'; return; }
       chPrice.setOption({title:{text:'日K暂时无法加载',left:'center',top:'middle',textStyle:{fontSize:12,color:'#8a9099'}}});
     }
   }).finally(()=>{if(requestId===stockChartRequestId)stockChartController=null;});
@@ -2080,10 +2143,6 @@ async function loadDetail(s,opts={}){
   const newSymbol=stockHeavySymbol!==s;
   const heavy=opts.full===true||newSymbol||(Date.now()-stockHeavyAt>=60000);
   if(heavy){stockHeavySymbol=s;stockHeavyAt=Date.now();}
-  // renderRiskCard 上下文（在 try 块中赋值，供期权/空头异步回调使用）
-  let riskCardCtx = null;
-  let rcOptDetail = null;
-  let rcShortDetail = null;
   // 切换股票时立即清空 5 个情报子板块与 fold-meta，避免上一支股票的数据残留
   if(newSymbol){
     ["d_group_risk","d_earnings_cal","d_opt","d_short","d_news_llm"].forEach(id=>{
@@ -2122,11 +2181,8 @@ async function loadDetail(s,opts={}){
         if(j&&j.symbol&&j.symbol!==s)throw new Error('symbol_mismatch');
         preserveStockScroll(()=>{
           renderOptFlow(j,s);
-          // 期权数据返回后更新风险卡（仅当扫描数据为空时）
-          if(riskCardCtx && !optScanData[s]){
-            rcOptDetail = j;
-            renderRiskCard(riskCardCtx.ai, riskCardCtx.sw, riskCardCtx.earnings, riskCardCtx.groupRisk, rcOptDetail, shortData[s]||rcShortDetail, riskCardCtx.extData, riskCardCtx.mkt);
-          }
+          rememberRiskDetail(s,'option',j);
+          refreshSelectedRisk();
         });
         if((j&&j.pending||(j&&j.cacheState&&j.cacheState.refreshing))&&attempt<8){
           setTimeout(()=>fetchOptionDetail(attempt+1),2500);
@@ -2145,11 +2201,8 @@ async function loadDetail(s,opts={}){
         if(j&&j.symbol&&j.symbol!==s)throw new Error('symbol_mismatch');
         preserveStockScroll(()=>{
           renderShort(j,s);
-          // 空头数据返回后更新风险卡（仅当扫描数据为空时）
-          if(riskCardCtx && !shortData[s]){
-            rcShortDetail = j;
-            renderRiskCard(riskCardCtx.ai, riskCardCtx.sw, riskCardCtx.earnings, riskCardCtx.groupRisk, optScanData[s]||rcOptDetail, rcShortDetail, riskCardCtx.extData, riskCardCtx.mkt);
-          }
+          rememberRiskDetail(s,'short',j);
+          refreshSelectedRisk();
         });
         if((j&&j.pending||(j&&j.cacheState&&j.cacheState.refreshing))&&attempt<8){
           setTimeout(()=>fetchShortDetail(attempt+1),2500);
@@ -2176,8 +2229,6 @@ async function loadDetail(s,opts={}){
     const plan = activeProfileStrategy(ai);
     const eff = swingTier(ai) || {};
     const sw = swingPlan(ai);
-    const ex = (mkt === "US") ? extData[s] : null;
-    const sessionRisk = ex && ex.riskOverlay ? ex.riskOverlay : null;
     const displayName = w.label || (st && st.name) || s;
     // === 段 0：标题栏（名称 / 代码 / 市场标 / 财报标 / 分组标 / 动作徽章 / 现价 / 涨跌%） ===
     $("d_head_idle").style.display = "none";
@@ -2221,33 +2272,28 @@ async function loadDetail(s,opts={}){
       chgEl.className = "head-chg " + (st.changePct>=0 ? "up" : "down");
     } else { chgEl.textContent = "--"; chgEl.className = "head-chg"; }
     // === 层 1：决策与执行（决策卡，含执行计划） ===
-    const earningsData = (ai&&ai.earnings)||riskRadarEarnings;
     const groupRiskData = (ai&&ai.groupRisk)||null;
-    riskCardCtx = {ai, sw, earnings:earningsData, groupRisk:groupRiskData, extData:ex, mkt};
-    if(heavy)preserveStockScroll(()=>renderDecisionCard(ai, plan, eff, sw, mkt, sessionRisk));
-    // === 层 2：关键风险卡（同步立即渲染一次，财报/期权/空头数据到达后再次更新） ===
-    if(heavy)preserveStockScroll(()=>renderRiskCard(ai, sw, earningsData, groupRiskData, optScanData[s]||null, shortData[s]||null, ex, mkt));
+    refreshSelectedRisk();
     // === 层 3：决策依据（折叠区） ===
     if(heavy)preserveStockScroll(()=>renderDecisionBasis(ai, plan, sw));
     if(heavy)loadSignalTransition(s);
     // === 层 4：K 线图 ===
     const p = pos[s];
-    if(heavy)loadStockCharts(s, ai, p, mkt, newSymbol);
+    if(heavy && $('stockStudy').open)loadStockCharts(s, ai, p, mkt, newSymbol);
     // === 层 5：深度情报（6 个子板块，风险计数已移至「关键风险」卡） ===
     if(heavy)preserveStockScroll(()=>{
       renderGroupRisk(groupRiskData,s,mkt);
     });
     // 财报节奏：独立接口，6h 刷新一次，非阻塞；返回后更新风险雷达与风险卡
     if(heavy){
+      const earningsRequestId=stockDetailRequestId;
       fetch("/stock/earnings-next?symbol=" + encodeURIComponent(s) + "&market=" + encodeURIComponent(mkt)).then(r=>r.json()).then(j=>{
-        if(selectedSym!==s)return;
+        if(selectedSym!==s||earningsRequestId!==stockDetailRequestId)return;
         preserveStockScroll(()=>{
           renderEarningsCadence(j, mkt, s);
           riskRadarEarnings = j;
-          if(riskCardCtx){
-            riskCardCtx.earnings = j;
-            renderRiskCard(riskCardCtx.ai, riskCardCtx.sw, j, riskCardCtx.groupRisk, optScanData[s]||rcOptDetail||null, shortData[s]||rcShortDetail||null, riskCardCtx.extData, riskCardCtx.mkt);
-          }
+          rememberRiskDetail(s,'earnings',j);
+          refreshSelectedRisk();
         });
       }).catch(()=>{ const el=$("d_earnings_cal"); if(el){ el.style.display='none'; el.innerHTML=''; } });
       // 只读取已有解读；模型调用必须由用户点击明确触发。
@@ -2482,7 +2528,7 @@ async function addTradeEvent(){
 async function loadTradeHistory(symbol){
   const el = $("d_trade_history"); if(!el) return;
   const myId = ++stockTradeHistoryRequestId;
-  // 立即清空：避免切换股票时残留上一支的记录（慢速环境下 fetch 期间旧 DOM 仍可见）
+  // 立即清空：避免切换股票时残留上一支的记录（部署环境 等慢速环境下 fetch 期间旧 DOM 仍可见）
   el.innerHTML = '<div class="detail-note soft compact">加载操作事件中…</div>';
   try {
     const r = await fetch("/stock/trade-events?symbol=" + encodeURIComponent(symbol));
@@ -2664,7 +2710,10 @@ async function delStock(sym){
     const r = await fetch("/stock-watchlist", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "remove", symbol: sym }) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
-    if (selectedSym === sym) closeDetail();
+    if (selectedSym === sym) {
+      if (document.body.classList.contains('reading-instrument')) hideDetailPanel();
+      closeDetail();
+    }
     // 清理该股票的本地缓存，避免内存随使用时长累积
     for(const key of stockChartCache.keys())if(key.startsWith(sym+'|'))stockChartCache.delete(key);
     delete clientAlertState[sym];
@@ -2782,6 +2831,12 @@ async function triggerNewsLLM(sym, mkt){
   }
 })();
 
+$('stockStudy').addEventListener('toggle', () => {
+  if (!$('stockStudy').open || !selectedSym) return;
+  const market = wl.find(row => row.symbol === selectedSym)?.market || 'US';
+  chPrice?.resize();
+  loadStockCharts(selectedSym, lastAna[selectedSym], pos[selectedSym], market, true);
+});
 DashboardDetailState.bind(document.querySelector('.detail-panel'),'stock-detail');
 restoreDetailTab();
 restoreSortMode();

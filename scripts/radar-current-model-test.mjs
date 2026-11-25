@@ -153,6 +153,8 @@ try {
   const oldColumns = new Set(oldDb.prepare(`PRAGMA table_info(radar_v2_candidates)`).all().map((row) => row.name));
   assert(oldColumns.has('scoring_version') && oldColumns.has('scoring_profile_name') && oldColumns.has('scoring_weights_json'),
     'pre-provenance candidate table migrates before its dependent index is created');
+  assert(oldDb.prepare("SELECT name FROM sqlite_master WHERE name='idx_v2_candidates_latest_score'").get()?.name === 'idx_v2_candidates_latest_score',
+    'latest-score index exists after legacy provenance migration');
   oldDb.close();
 } finally {
   clearRadarDbForTest();

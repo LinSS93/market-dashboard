@@ -6,6 +6,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { httpGet } from './quote.mjs';
+import { readControlNewsStorage } from './control_status_read.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DB_PATH = join(__dirname, 'data', 'market_data.db');
@@ -810,9 +811,9 @@ export function getNewsArticles({ market = null, symbol = null, limit = 80, minP
     ORDER BY COALESCE(published_at, fetched_at) DESC, id DESC LIMIT ?`).all(...args);
 }
 
-export function getNewsStatus() {
-  const rows = db.prepare('SELECT * FROM news_source_status ORDER BY source').all();
-  const cninfoCursor = getSourceCursor.get('cninfo_complete_date')?.cursor_value || null;
+export function getNewsStatus(storage = readControlNewsStorage(db)) {
+  const rows = storage.sources;
+  const cninfoCursor = storage.cninfoCompleteDate;
   return {
     pollIntervalsMs: { hkex: HKEX_POLL_INTERVAL_MS, official: OFFICIAL_POLL_INTERVAL_MS, media: MEDIA_POLL_INTERVAL_MS },
     requiredSources: SOURCE_METADATA.filter(item => item.required).map(item => item.id),
@@ -823,7 +824,7 @@ export function getNewsStatus() {
     cninfo: { latestCompleteDate: cninfoCursor, incrementalPages: CNINFO_INCREMENTAL_PAGES, maxDailyPages: CNINFO_MAX_DAILY_PAGES },
     sources: rows,
     lastRuns: Object.fromEntries(lastRuns),
-    storedArticles: db.prepare('SELECT COUNT(*) AS count FROM news_articles').get().count,
+    storedArticles: storage.storedArticles,
   };
 }
 

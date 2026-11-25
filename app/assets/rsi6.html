@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script defer src="/assets/workspace-nav.js"></script>
+<title>RSI6 扫描器</title>
+<link rel="stylesheet" href="/workspace-theme.css">
+<link rel="stylesheet" href="/assets/rsi6.css">
+</head>
+<body class="workspace-app rsi-workspace">
+<header class="workspace-header"><h1><a href="/" aria-label="Market Dashboard 首页">Market Dashboard</a></h1></header>
+<section class="topbar" aria-label="扫描器设置">
+  <div class="brand">
+    <h2>RSI6 扫描器</h2>
+    <span class="brand-sub">US · HK 盘中超卖观察</span>
+  </div>
+  <div class="topbar-right">
+    <span class="chip" id="chip-US"><i class="dot"></i>US</span>
+    <span class="chip" id="chip-HK"><i class="dot"></i>HK</span>
+    <details class="scan-settings"><summary>扫描阈值</summary><div class="threshold-control">
+      <span class="threshold-label">触发阈值</span>
+      <button id="threshold-minus" class="step-btn" type="button" title="降低 1">−</button>
+      <input id="threshold-input" type="number" min="5" max="50" step="1" value="20" aria-label="触发阈值">
+      <button id="threshold-plus" class="step-btn" type="button" title="提高 1">＋</button>
+    </div>
+    </details>
+    <span role="status" class="control-hint" id="control-hint"></span>
+    <button id="rescan-btn" class="btn" type="button">立即扫描</button>
+  </div>
+</section>
+
+<section class="summary">
+  <div class="card">
+    <div class="card-title">US 覆盖</div>
+    <div class="card-value" id="coverage-US">—</div>
+    <div class="card-sub" id="coverage-US-sub">日线就绪 / 总数</div>
+  </div>
+  <div class="card">
+    <div class="card-title">HK 覆盖</div>
+    <div class="card-value" id="coverage-HK">—</div>
+    <div class="card-sub" id="coverage-HK-sub">日线就绪 / 总数</div>
+  </div>
+  <div class="card">
+    <div class="card-title">当前触发</div>
+    <div class="card-value accent" id="oversold-count">—</div>
+    <div class="card-sub" id="oversold-sub">RSI6 低于阈值</div>
+  </div>
+  <div class="card">
+    <div class="card-title">上一轮扫描</div>
+    <div class="card-value" id="lastcycle-value">—</div>
+    <div class="card-sub" id="lastcycle-sub">等待首轮完成</div>
+  </div>
+</section>
+
+<div class="scan-filter">
+  <div class="board-segment" role="group" aria-label="扫描视图">
+    <button type="button" data-scan-view="oversold" aria-pressed="true">当前超卖</button>
+    <button type="button" data-scan-view="events" aria-pressed="false">触发与恢复</button>
+  </div>
+  <div class="board-segment" role="group" aria-label="结果市场">
+    <button type="button" data-scan-market="all" aria-pressed="true">全部</button>
+    <button type="button" data-scan-market="US" aria-pressed="false">美股</button>
+    <button type="button" data-scan-market="HK" aria-pressed="false">港股</button>
+  </div>
+</div>
+<main class="content">
+  <section class="panel" id="panel-oversold">
+    <div class="panel-head">
+      <h2 id="oversold-title">当前超卖</h2>
+      <span class="panel-count" id="oversold-n"></span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>标的</th><th class="num">RSI6</th><th class="num">现价</th>
+            <th class="num">1日</th><th class="num">5日</th>
+            <th class="num">20日均额</th><th>报价时间</th>
+          </tr>
+        </thead>
+        <tbody id="oversold-body"></tbody>
+      </table>
+      <div class="empty" id="oversold-empty">当前无标的低于阈值</div>
+    </div>
+  </section>
+
+  <section class="panel" id="panel-events" hidden>
+    <div class="panel-head">
+      <h2>事件记录</h2>
+      <span class="panel-count" id="events-n"></span>
+    </div>
+    <div class="event-list">
+      <div id="event-items"></div>
+      <div class="empty" id="events-empty">暂无触发 / 恢复事件</div>
+    </div>
+  </section>
+</main>
+
+<script src="/assets/rsi6.js"></script>
+</body>
+</html>

@@ -17,7 +17,7 @@ const MARKETS = ['US', 'HK', 'CN'];
 // 它们不是本产品的普通股研究对象，必须在唯一的 universe 入口剔除，避免
 // scanner、趋势状态机和回放验收得到彼此不一致的候选池。
 //
-// P0 重构（针对曾漏过的 ONEQ/ROBT/SPBC/TSPY/XSPI/BBB 等）：
+// P0 重构（针对 部署环境 线上漏过的 ONEQ/ROBT/SPBC/TSPY/XSPI/BBB 等）：
 //   名称正则不是可靠证券分类。queue 查询改为：
 //     1. 优先读 radar_v2_asset_audit.asset_category（人工或脚本审计的结果）
 //     2. 无审计记录时回到 instrument_type + 名称正则兜底

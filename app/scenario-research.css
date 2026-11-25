@@ -24,10 +24,7 @@
 .research-panel-head h3, .research-method h3 { margin:2px 0 0; color:var(--ws-ink); font-size:15px; }
 .research-panel-head .muted { font-size:11px; text-align:right; }
 .coverage-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(210px, 1fr)); gap:10px; margin-top:12px; }
-.coverage-item { padding:10px 11px; border:1px solid var(--ws-line); border-left:4px solid #8a94a6; border-radius:6px; background:var(--ws-surface-alt); }
-.coverage-item.status-complete { border-left-color:var(--research-green); }
-.coverage-item.status-waiting_data, .coverage-item.status-partial { border-left-color:var(--research-amber); }
-.coverage-item.status-blocked { border-left-color:var(--research-red); }
+.coverage-item { padding:10px 11px; border:1px solid var(--ws-line); border-radius:6px; background:var(--ws-surface-alt); }
 .coverage-title { display:flex; justify-content:space-between; gap:8px; color:var(--ws-muted); font-size:11px; }
 .coverage-title b { color:var(--ws-ink); font-size:13px; }
 .coverage-status { margin:5px 0 4px; color:var(--ws-ink); font-size:13px; font-weight:700; }
@@ -51,10 +48,7 @@
 .ranking-factor-meta { display:flex; flex-wrap:wrap; gap:4px 10px; margin-top:7px; color:var(--ws-muted); font-size:10.5px; font-variant-numeric:tabular-nums; }
 .ranking-factor-meta strong { color:var(--ws-ink-soft); font-size:11px; }
 .profile-grid { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:10px; margin-top:12px; }
-.profile-item { min-width:0; padding:12px; border:1px solid var(--ws-line); border-left:4px solid #8a94a6; border-radius:7px; background:var(--ws-surface-alt); }
-.profile-item.role-formal { border-left-color:var(--research-blue); }
-.profile-item.role-observe { border-left-color:var(--research-amber); }
-.profile-item.role-confirm { border-left-color:var(--research-green); }
+.profile-item { min-width:0; padding:12px; border:1px solid var(--ws-line); border-radius:7px; background:var(--ws-surface-alt); }
 .profile-title { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; }
 .profile-title b { display:block; color:var(--ws-ink); font-size:14px; }
 .profile-title small, .profile-asof { display:block; margin-top:2px; color:var(--ws-muted-soft); font-size:10px; }

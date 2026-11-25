@@ -20,12 +20,13 @@ function isoDate(offset) {
 const symbol = 'PROFILE_LAB_TEST';
 const defensiveSymbol = 'PROFILE_LAB_DEFENSIVE';
 const excludedSymbol = 'PROFILE_LAB_ETF';
+const excludedDefensiveSymbol = 'PROFILE_LAB_EXCLUDED_DEFENSIVE';
 const market = 'TEST';
-for (const cleanupSymbol of [symbol, defensiveSymbol, excludedSymbol]) {
+for (const cleanupSymbol of [symbol, defensiveSymbol, excludedSymbol, excludedDefensiveSymbol]) {
   db.prepare('DELETE FROM stock_signal_profile_shadow_outcomes WHERE profile_shadow_id IN (SELECT id FROM stock_signal_profile_shadows WHERE symbol=? AND market=?)').run(cleanupSymbol, market);
   db.prepare('DELETE FROM stock_signal_profile_shadows WHERE symbol=? AND market=?').run(cleanupSymbol, market);
 }
-db.prepare('DELETE FROM tracker_pairs WHERE etf=?').run(excludedSymbol);
+for (const cleanupEtf of [excludedSymbol, excludedDefensiveSymbol]) db.prepare('DELETE FROM tracker_pairs WHERE etf=?').run(cleanupEtf);
 
 try {
   const insertShadow = db.prepare(`INSERT INTO stock_signal_profile_shadows(
@@ -59,6 +60,18 @@ try {
   insertShadow.run('2026-08-03', now, symbol, market, 100, 'balanced', 'balanced-v2.1.0-rsi12-wilder', 'formal', 'BULLISH', 'FORMAL_BULLISH', 1, 0.3, 1, payload('state_transition'), 'live_profile_shadow', 'legacy-engine', now, payload('state_transition'), '1|BULLISH|FORMAL_BULLISH|1');
   db.prepare(`INSERT INTO tracker_pairs(etf,etf_market,underlying,underlying_market,leverage,label,active,created_at)
     VALUES(?,?,?,?,?,?,?,?)`).run(excludedSymbol, market, symbol, market, 2, 'test leveraged product', 1, now);
+  // 第二个被剔除产品只用于验证"排除标的上的防守策略动作仍被计数"，
+  // 它不进入任何收益统计，因此不改变其它计数。
+  db.prepare(`INSERT INTO tracker_pairs(etf,etf_market,underlying,underlying_market,leverage,label,active,created_at)
+    VALUES(?,?,?,?,?,?,?,?)`).run(excludedDefensiveSymbol, market, symbol, market, 2, 'test excluded defensive product', 1, now);
+  const excludedDefensiveId = Number(insertShadow.run(
+    '2026-08-06', now, excludedDefensiveSymbol, market, 100, 'responsive', responsiveVersion, 'observe',
+    'BEARISH', 'EARLY_BEARISH', -1, -0.3, 0,
+    payload('strategy_transition', { technicalChanged:false, strategyChanged:true }),
+    'live_profile_shadow', 'test', now,
+    payload('strategy_transition', { technicalChanged:false, strategyChanged:true }), '-1|BEARISH|EARLY_BEARISH|0',
+  ).lastInsertRowid);
+  markDefensiveShadow.run(STOCK_PROFILE_STRATEGY_VERSION, `${STOCK_PROFILE_STRATEGY_VERSION}|RISK_OFF|REDUCE|risk_off|stock_decision_arbiter`, excludedDefensiveId);
   insertShadow.run('2026-08-03', now, excludedSymbol, market, 100, 'responsive', responsiveVersion, 'observe', 'BULLISH', 'EARLY_BULLISH', 1, 0.3, 0, payload('state_transition'), 'live_profile_shadow', 'test', now, payload('state_transition'), '1|BULLISH|EARLY_BULLISH|0');
   for (let index = 0; index < 30; index += 1) {
     const date = isoDate(index * 6);
@@ -136,11 +149,18 @@ try {
   equal(confirmed.horizons[5].count, 0, 'pending confirmed state is excluded from performance settlement');
   equal(report.sampleFlow.ineligibleProfileOutcomes, 1, 'ineligible pending-confirmation outcome is auditable');
   equal(report.sampleFlow.historicalObservations, 1, 'previous profile calculation contract is retained as history');
-  equal(report.sampleFlow.excludedObservations, 1, 'only the leveraged product is excluded from profile research');
+  equal(report.sampleFlow.excludedObservations, 2, 'only leveraged products are excluded from profile research');
   const balancedHistory = report.historicalCohorts.find(row => row.id === 'balanced' && row.version === 'balanced-v2.1.0-rsi12-wilder');
   check(!!balancedHistory, 'previous balanced calculation contract is surfaced separately');
   equal(balancedHistory.observations, 1, 'historical profile observations are not mixed into the current cohort');
   check(report.sampleFlow.excludedSymbols.includes(excludedSymbol), 'leveraged product exclusion is auditable');
+  equal(report.sampleFlow.excludedDefensiveObservations, 1, 'defensive strategy actions on excluded products are counted outside the statistics');
+  check(report.sampleFlow.excludedDefensiveSymbols.includes(`${market}:${excludedDefensiveSymbol}`), 'excluded defensive symbols remain auditable');
+  equal(responsive.horizons[5].concentration.all.symbols, 1, 'concentration uses the same non-overlapping events as the summary');
+  equal(responsive.horizons[5].concentration.all.topSymbolSharePct, 100, 'single-symbol concentration reaches one hundred percent');
+  equal(responsive.horizons[5].concentration.all.topContributors[0].count, 30, 'top contributor reports its event count');
+  equal(responsive.horizons[5].concentration.all.topContributors[0].averageDirectionalReturnPct, 2, 'top contributor reports its average directional return');
+  equal(responsive.horizons[5].concentration.defensive.symbols, 0, 'nothing is mixed into a group without events');
   equal(report.sampleFlow.purgedOverlappingOutcomes, 3, 'overlapping 20d observations are reported as purged');
   equal(report.sampleFlow.acceptedNonOverlappingStrategyOutcomes, 32, 'full-strategy non-overlapping outcomes are audited');
   equal(report.pairedWithBalanced[5].responsive, 0, 'paired count is explicit when balanced anchors are absent');
@@ -161,11 +181,11 @@ try {
   equal(opportunityCost.outcome, 'opportunity_cost', 'defensive action records missed upside');
   equal(opportunityCost.returnPct, -10, 'opportunity cost is negative protection return');
 } finally {
-  for (const cleanupSymbol of [symbol, defensiveSymbol, excludedSymbol]) {
+  for (const cleanupSymbol of [symbol, defensiveSymbol, excludedSymbol, excludedDefensiveSymbol]) {
     db.prepare('DELETE FROM stock_signal_profile_shadow_outcomes WHERE profile_shadow_id IN (SELECT id FROM stock_signal_profile_shadows WHERE symbol=? AND market=?)').run(cleanupSymbol, market);
     db.prepare('DELETE FROM stock_signal_profile_shadows WHERE symbol=? AND market=?').run(cleanupSymbol, market);
   }
-  db.prepare('DELETE FROM tracker_pairs WHERE etf=?').run(excludedSymbol);
+  for (const cleanupEtf of [excludedSymbol, excludedDefensiveSymbol]) db.prepare('DELETE FROM tracker_pairs WHERE etf=?').run(cleanupEtf);
 }
 
 console.log(`stock signal profile lab checks: ${passed}/${passed} passed`);

@@ -39,7 +39,7 @@ let _roundRobinStart = 0;
 
 // 审计修正（P1 资产审计自动化）：上次自动资产审计时间，节流到每小时一次。
 // 任务幂等（守卫式 upsert）。
-// 部署实测修正：资产审计不依赖扫描调度开关（RADAR_SCANNER_ENABLED
+// 部署实测修正（部署环境）：资产审计不依赖扫描调度开关（RADAR_SCANNER_ENABLED
 // 默认关闭，挂在 scheduleRadar 里会导致审计永不执行）——由
 // startAutoAssetAuditLoop 独立挂载，server 启动即生效。
 // 首轮延迟 120 秒（启动窗口已有物化表重建等负载，立即叠加首轮审计会阻塞
@@ -149,9 +149,13 @@ function hasResumableJob(market, tradeDate, now, trigger = 'scheduled_daily') {
       ORDER BY updated_at DESC LIMIT 1
     `).get(market, tradeDate, trigger);
     if (!job) return false;
-    // partial/failed 且退避到期
+    // partial/failed 且退避到期。
+    // 部署环境 2026-09-10 事故修正：retry_after==NULL 是 scanner 的终态标记
+    // （重试预算耗尽 / 僵尸回收 / 非交易日隔离，均不再重试），不是"未设退避"。
+    // 旧写法把 NULL 当可续跑，与 scanner 语义相反，导致终态 job 被满速
+    // 重复派发（重复 finalize + 全表扫 scan_items），事件循环饿死、看板瘫痪。
     if ((job.status === 'partial' || job.status === 'failed') &&
-        (job.retry_after == null || job.retry_after <= now)) {
+        job.retry_after != null && job.retry_after <= now) {
       return true;
     }
     // running 但租约过期（可抢占续跑）

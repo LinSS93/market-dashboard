@@ -1,3 +1,4 @@
+import { readScanDiagnostics } from './radar_status_read.mjs';
 // 机会雷达 v2 扫描编排模块。
 //
 // Radar V2 扫描编排，负责协调：
@@ -10,9 +11,9 @@
 //   - 60秒节流：同一股票 60 秒内不重复请求 K 线
 //   - dry_run 模式不写 DB，只返回结果
 
-import { adapterFor, getAllAdapters, loadDailyBars } from './radar_market.mjs';
+import { adapterFor, getAllAdapters, loadDailyBars, shouldCountAsProviderFailure, resetEastmoneyStateForTest } from './radar_market.mjs';
 import { loadUniverse } from './radar_universe.mjs';
-import { scoreCandidate, fetchEventFacts, evaluateDataQualityGate } from './radar_scoring.mjs';
+import { scoreCandidate, fetchEventFacts, fetchEventFactsAsOf, evaluateDataQualityGate } from './radar_scoring.mjs';
 import {
   insertRun, updateRunStatus, insertCandidate, updateCandidateScoringProvenance,
   upsertScanJob, getScanJob, getCompletedScanJob, acquireLease, releaseLease,
@@ -20,10 +21,12 @@ import {
   finalizeScanJob, finalizeScanJobOwned, renewLease, getRadarDb,
   setJobRunId, insertScanItems, getPendingScanItems, updateScanItemStatus,
   getScanItemStats, resetFailedItems, countPendingItems,
-  countRetryableItems,
+  countRetryableItems, resetItemRetryBudget,
 } from './radar_schema.mjs';
-import { backfillPendingOutcomes, updateMaturedOutcomes } from './radar_outcomes.mjs';
-import { getMarketStatus, isTradingDate } from './market_calendar.mjs';
+import { getPendingOutcomeSymbols, settleOutcomesForMarket } from './radar_outcomes.mjs';
+import { refreshBenchmarkForMarket } from './radar_benchmark_bars.mjs';
+import { getMarketStatus, isTradingDate, lastCompletedTradingDate } from './market_calendar.mjs';
+import { marketCloseSnapshotAt } from './radar_history_backfill.mjs';
 
 // === 常量 ===
 
@@ -53,8 +56,29 @@ const MAX_ITEM_RETRIES = 2;
 // 日扫 job（旧实现每 45 分钟只推进一个 200 只批次，一天内不可能完成全市场，
 // 收盘后也不再调度，产生大量跨日 running 残留）。
 const INTRADAY_LIGHT_MAX_SYMBOLS = 300;
+// 上游熔断（部署环境 2026-09-10 mass-skip 护栏）。连续超过阈值的标的 fetch 全候选
+// 失败（空 K 线）= 基础设施级故障（腾讯风控/断网/接口变更），
+// 立即终结本批并进入退避，不再慢速空跑剩余 pending（9/10 US 扫描因此空跑 16 小时）。
+const UPSTREAM_FAILURE_BREAKER_MAX = 20;
+// 可注入开关（仅测试）：关闭扫描完成后的异步维护（基准兜底 / 未成熟标的刷新 /
+// outcome 回填），避免测试用例之间互相写 K 线缓存。
+let _postScanMaintenanceEnabled = true;
+export function setPostScanMaintenanceEnabledForTest(enabled) {
+  _postScanMaintenanceEnabled = Boolean(enabled);
+}
+// 可注入阈值（仅测试）：e2e 用小宇宙（5 只）无法自然达到 20，注入低阈值触发熔断。
+let upstreamFailureBreakerThreshold = UPSTREAM_FAILURE_BREAKER_MAX;
+// 熔断后退避：30 分钟后由调度器自动重试，上游恢复即自愈。
+const UPSTREAM_FAILURE_RETRY_MS = 30 * 60 * 1000;
 // 进程标识（用于租约）
 const PROCESS_ID = `pid-${process.pid}-${Date.now()}`;
+
+/**
+ * 为测试注入熔断阈值；传 null 恢复生产默认。
+ */
+export function setUpstreamBreakerThresholdForTest(threshold) {
+  upstreamFailureBreakerThreshold = (threshold == null) ? UPSTREAM_FAILURE_BREAKER_MAX : Number(threshold);
+}
 
 // === 进程内状态 ===
 
@@ -62,6 +86,9 @@ const PROCESS_ID = `pid-${process.pid}-${Date.now()}`;
 const _inFlight = new Map();
 // K线请求节流：symbol -> lastFetchTs，60 秒内不重复请求
 const _klineFetchedAt = new Map();
+// 上游熔断计数：jobId -> { count, lastFailure }。连续空 fetch 计数，
+// 成功或非 fetch 类 skip 清零；job 终态（complete/熔断 finalize）后清理。
+const _consecutiveFetchFailures = new Map();
 // 最近一次扫描完成信息：market -> { runId, completedAt, status, candidatesCount, error? }
 const _lastRun = new Map();
 // 当前正在跑的扫描状态（单市场粒度）
@@ -70,6 +97,46 @@ let _activeRun = null;
 // === 工具函数 ===
 
 function nowTs() { return Date.now(); }
+
+/**
+ * 扫描终态后的 outcome 结算（只读缓存 + 写 outcome，不发起网络请求）。
+ * 与网络型维护（基准兜底、未成熟标的 K 线刷新）解耦：结算必须同步完成，
+ * 网络维护仍可异步，避免进程重启把结算整块丢掉。
+ */
+async function settleOutcomesAfterRun(market, runId) {
+  if (!_postScanMaintenanceEnabled) return null;
+  try {
+    const result = await settleOutcomesForMarket(market, { updateLimit: 10000, topN: DEFAULT_TOP_N });
+    if (result.errors.length) {
+      console.error(`[radar_v2] ${market} run=${runId} outcome 结算错误:`, JSON.stringify(result.errors.slice(0, 5)));
+    }
+    if (result.updated > 0 || (result.backfill && result.backfill.ok > 0)) {
+      console.log(`[radar_v2] ${market} run=${runId} outcome 结算: matured更新=${result.updated}/${result.pendingScanned}, 回填=${result.backfill?.ok ?? 0}ok/${result.backfill?.total ?? 0} (pending ${result.backfill?.pending ?? 0})`);
+    }
+    return result;
+  } catch (error) {
+    console.error(`[radar_v2] ${market} run=${runId} outcome 结算失败:`, error?.message || error);
+    return null;
+  }
+}
+
+function persistScoredCandidate(runId, candidate, createdAt) {
+  return getRadarDb().transaction(() => {
+    insertCandidate.run({
+      run_id: runId, market: candidate.market, symbol: candidate.symbol, name: candidate.name,
+      score: candidate.score, tier: candidate.tier, direction: candidate.direction,
+      metrics_json: JSON.stringify(candidate.metrics),
+      evidence_json: JSON.stringify(candidate.evidence), created_at: createdAt,
+    });
+    const provenance = updateCandidateScoringProvenance.run({
+      run_id: runId, market: candidate.market, symbol: candidate.symbol,
+      scoring_version: candidate.scoring?.version ?? null,
+      scoring_profile_name: candidate.scoring?.profileName ?? null,
+      scoring_weights_json: candidate.scoring?.weightsJson ?? null,
+    });
+    if (provenance.changes !== 1) throw new Error('candidate_provenance_missing');
+  })();
+}
 
 // 返回时间戳在指定时区下的 'YYYY-MM-DD' 日期
 function dateInTz(timeZone, ts) {
@@ -179,7 +246,7 @@ async function runPool(items, worker, concurrency = DEFAULT_CONCURRENCY) {
  * dry_run 模式绕过 DB 缓存（skipCache + skipCacheWrite），不污染生产库。
  * @returns {object} 评分结果或 { skipped } 跳过原因
  */
-async function scanOne(adapter, member, scanMode) {
+async function scanOne(adapter, member, scanMode, asOf = null) {
   const { market, symbol, name, metadata } = member;
 
   // 节流窗口内跳过抓取（仅 official 模式；dry_run 不标记节流也不受节流限制，可重复执行）
@@ -190,29 +257,41 @@ async function scanOne(adapter, member, scanMode) {
   const options = scanMode === 'dry_run'
     ? { skipCache: true, skipCacheWrite: true }
     : {};
+  if (asOf) options.asOfDate = asOf.tradeDate;
   const barsResult = await loadDailyBars(adapter, symbol, options);
   // dry_run 模式不标记节流（没真正请求网络），避免影响后续 official 扫描
   if (scanMode !== 'dry_run') markKlineFetched(symbol);
 
-  const { rows: bars, dataSuspect, breaks } = barsResult;
+  const { rows: loadedBars, breaks: loadedBreaks, lastFailure, stale } = barsResult;
+  const bars = asOf ? loadedBars.filter(row => row.date <= asOf.tradeDate) : loadedBars;
+  const breaks = asOf ? loadedBreaks.filter(item => item.date <= asOf.tradeDate) : loadedBreaks;
+  const dataSuspect = breaks.length > 0;
+  if (stale || (asOf && bars.at(-1)?.date !== asOf.tradeDate)) return { market, symbol, name, skipped: 'stale_data' };
 
   // 合并 metadata：universe 的 marketCap + bars 的数据质量信息
   const mergedMeta = { ...(metadata || {}), dataSuspect, breaks };
 
+  // 空返回 = 抓取层失败（上游风控/断网/接口变更），区别于"标的数据本身不合格"。
+  // 附给调用方用于熔断计数与批次 skip 分布日志。
+  const fetchFailure = bars.length === 0 ? (lastFailure ?? { reason: 'empty_rows' }) : undefined;
+
   // 数据质量硬门槛（审计修正：可靠度从评分权重改为门槛，不达标不评分）
   const gate = evaluateDataQualityGate(bars, mergedMeta);
   if (!gate.ok) {
-    return { market, symbol, name, skipped: gate.reason };
+    return { market, symbol, name, skipped: gate.reason, fetchFailure };
   }
 
   const scored = scoreCandidate({
     market, symbol, name, bars, metadata: mergedMeta,
-    eventFacts: fetchEventFacts(market, symbol),
+    eventFacts: asOf
+      ? fetchEventFactsAsOf(market, symbol, asOf.timestamp)
+      : fetchEventFacts(market, symbol),
+    asOfTimestamp: asOf?.timestamp,
   });
 
   // scoreCandidate 内部同门槛兜底；此处防御性处理异常形态
   if (scored.skipped != null || typeof scored.score !== 'number') {
-    return { market, symbol, name, skipped: scored.skipped || 'insufficient_bars' };
+    return { market, symbol, name, skipped: scored.skipped || 'insufficient_bars', fetchFailure };
   }
 
   return {
@@ -246,7 +325,7 @@ async function scanOne(adapter, member, scanMode) {
  * @param {number} [limit] - 限制扫描股票数（测试用，覆盖 job 的 total_symbols）
  * @returns {Promise<{ok, runId, market, status, candidatesCount, ...}>}
  */
-export async function runScanForMarket(adapter, trigger, scanMode, limit) {
+export async function runScanForMarket(adapter, trigger, scanMode, limit, tradeDateOverride = null) {
   const market = adapter.market;
   if (_inFlight.has(market)) {
     return { ok: false, runId: null, market, candidatesCount: 0, error: 'already_running' };
@@ -255,6 +334,16 @@ export async function runScanForMarket(adapter, trigger, scanMode, limit) {
   const runPromise = (async () => {
     const startedAt = nowTs();
     const isDryRun = scanMode === 'dry_run';
+    let asOf = null;
+    if (tradeDateOverride != null) {
+      const expected = lastCompletedTradingDate(market, startedAt);
+      if (trigger !== 'scheduled_daily' || scanMode !== 'official' || tradeDateOverride !== expected) {
+        return { ok: false, runId: null, market, status: 'failed', candidatesCount: 0, error: 'invalid_catchup_trade_date' };
+      }
+      const timestamp = marketCloseSnapshotAt(tradeDateOverride, adapter.timeZone);
+      if (timestamp == null) return { ok: false, runId: null, market, status: 'failed', candidatesCount: 0, error: 'invalid_catchup_timestamp' };
+      asOf = { tradeDate: tradeDateOverride, timestamp };
+    }
 
     // dry_run 模式：不写 job/run/DB，直接扫描 limit 个股票返回结果（测试用）
     if (isDryRun) {
@@ -333,36 +422,39 @@ export async function runScanForMarket(adapter, trigger, scanMode, limit) {
         for (let i = 0; i < targets.length; i += BATCH_SIZE) {
           const snapshotBatch = targets.slice(i, i + BATCH_SIZE);
           const results = await runPool(snapshotBatch, (m) => scanOne(adapter, m, scanMode), DEFAULT_CONCURRENCY);
+          const snapshotSkipReasons = {};
           for (const r of results) {
             counts.attempted++;
             if (!r || r.error) { counts.failed++; continue; }
-            if (r.skipped) { counts.skipped++; continue; }
+            if (r.skipped) {
+              counts.skipped++;
+              snapshotSkipReasons[r.skipped] = (snapshotSkipReasons[r.skipped] || 0) + 1;
+              continue;
+            }
             if (typeof r.score === 'number') { counts.succeeded++; candidates.push(r); }
             else { counts.failed++; }
+          }
+          const snapshotSkipEntries = Object.entries(snapshotSkipReasons);
+          if (snapshotSkipEntries.length > 0) {
+            const dist = snapshotSkipEntries.map(([k, v]) => `${k}=${v}`).join(', ');
+            console.log(`[radar_v2] ${market} 快照 skip 分布: ${dist}`);
           }
           _activeRun.scanned = Math.min(_activeRun.total, _activeRun.scanned + snapshotBatch.length);
         }
 
         const ts = nowTs();
+        const persistedCandidates = [];
         for (const c of candidates) {
           try {
-            insertCandidate.run({
-              run_id: runId, market: c.market, symbol: c.symbol, name: c.name,
-              score: c.score, tier: c.tier, direction: c.direction,
-              metrics_json: JSON.stringify(c.metrics),
-              evidence_json: JSON.stringify(c.evidence),
-              created_at: ts,
-            });
-            updateCandidateScoringProvenance.run({
-              run_id: runId, market: c.market, symbol: c.symbol,
-              scoring_version: c.scoring?.version ?? null,
-              scoring_profile_name: c.scoring?.profileName ?? null,
-              scoring_weights_json: c.scoring?.weightsJson ?? null,
-            });
-          } catch {}
+            persistScoredCandidate(runId, c, ts);
+            persistedCandidates.push(c);
+          } catch (error) {
+            counts.succeeded--; counts.failed++;
+            console.error(`[radar_v2] ${market}:${c.symbol} 候选写入失败:`, error?.message || error);
+          }
         }
-        candidates.sort((a, b) => b.score - a.score);
-        const topCandidates = candidates.slice(0, DEFAULT_TOP_N);
+        persistedCandidates.sort((a, b) => b.score - a.score);
+        const topCandidates = persistedCandidates.slice(0, DEFAULT_TOP_N);
 
         const coverage = counts.attempted > 0 ? counts.succeeded / counts.attempted : 0;
         const finalStatus = counts.succeeded === 0 ? 'failed'
@@ -393,7 +485,7 @@ export async function runScanForMarket(adapter, trigger, scanMode, limit) {
     //   - run_id 在取得租约后、扫描前原子写入 job（重启不丢失 run 关联）
     //   - 按 symbol 稳定排序获取 pending items（不再依赖 offset cursor）
 
-    const tradeDate = dateInTz(adapter.timeZone, startedAt);
+    const tradeDate = tradeDateOverride || dateInTz(adapter.timeZone, startedAt);
 
     // a. 创建/获取当天的 job（total_symbols 只在首次 INSERT 时写入，续跑时冻结）
     let universe = loadUniverse(market);
@@ -544,6 +636,11 @@ export async function runScanForMarket(adapter, trigger, scanMode, limit) {
             ? (hasRetryBudget ? 'all symbols failed or skipped' : 'coverage below threshold, retry budget exhausted')
             : null,
         });
+        // 续跑/重启后经此分支终结的 job 同样要结算 outcome，否则该市场的
+        // outcome 队列会一直停在旧状态。
+        if (trigger === 'scheduled_daily') {
+          await settleOutcomesAfterRun(market, runId);
+        }
         return { ok: finalStatus !== 'failed', runId, market, status: finalStatus,
           candidatesCount: activeJob.candidates_count,
           attempted: attempted, succeeded, skipped, failed };
@@ -563,21 +660,40 @@ export async function runScanForMarket(adapter, trigger, scanMode, limit) {
         .reduce((sum, s) => sum + s.cnt, 0);
       _activeRun.total = totalSymbols;
 
-      const results = await runPool(batch, (m) => scanOne(adapter, m, scanMode), DEFAULT_CONCURRENCY);
+      const results = await runPool(batch, (m) => scanOne(adapter, m, scanMode, asOf), DEFAULT_CONCURRENCY);
 
       // g. 统计本批结果 + 更新 scan_items 状态
       const batchCounts = { attempted: results.length, succeeded: 0, skipped: 0, failed: 0 };
       const batchCandidates = [];
+      const skipReasons = {};
       for (let i = 0; i < results.length; i++) {
         const r = results[i];
         const itemId = batch[i]?._itemId;
         const itemUpdateTs = nowTs();
         if (!r) { batchCounts.failed++; if (itemId) try { updateScanItemStatus.run({ id: itemId, status: 'failed', updated_at: itemUpdateTs }); } catch {} continue; }
         if (r.error) { batchCounts.failed++; if (itemId) try { updateScanItemStatus.run({ id: itemId, status: 'failed', updated_at: itemUpdateTs }); } catch {} continue; }
-        if (r.skipped) { batchCounts.skipped++; if (itemId) try { updateScanItemStatus.run({ id: itemId, status: 'skipped', updated_at: itemUpdateTs }); } catch {} continue; }
+        if (r.skipped) {
+          batchCounts.skipped++;
+          skipReasons[r.skipped] = (skipReasons[r.skipped] || 0) + 1;
+          // 熔断计数：只有真正尝试过、且 provider 级故障（403 / 429 / 5xx /
+          // timeout / network）才计入。symbol 级空返回（代码不存在、无数据、
+          // 数据不足）是标的自身属性；东财冷却期内的 provider_cooldown 短路
+          // 并没有发出请求，也不能重复计数——否则一次冷却会让后续每个标的
+          // 各记一次失败，20 个标的就把整轮扫描熔断。
+          if (r.fetchFailure && shouldCountAsProviderFailure(r.fetchFailure)) {
+            const st = _consecutiveFetchFailures.get(activeJob.id) || { count: 0, lastFailure: null };
+            st.count += 1;
+            st.lastFailure = r.fetchFailure;
+            _consecutiveFetchFailures.set(activeJob.id, st);
+          } else {
+            _consecutiveFetchFailures.delete(activeJob.id);
+          }
+          if (itemId) try { updateScanItemStatus.run({ id: itemId, status: 'skipped', updated_at: itemUpdateTs }); } catch {} continue;
+        }
         if (typeof r.score === 'number') {
           batchCounts.succeeded++;
-          batchCandidates.push(r);
+          batchCandidates.push({ ...r, _itemId: itemId });
+          _consecutiveFetchFailures.delete(activeJob.id);
           if (itemId) try { updateScanItemStatus.run({ id: itemId, status: 'succeeded', updated_at: itemUpdateTs }); } catch {}
         } else {
           batchCounts.failed++;
@@ -585,25 +701,26 @@ export async function runScanForMarket(adapter, trigger, scanMode, limit) {
         }
       }
 
+      // 批次 skip 分布日志（mass-skip 可观测性）：一次即可分辨 throttled / 门槛 / 空 fetch
+      const skipEntries = Object.entries(skipReasons);
+      if (skipEntries.length > 0) {
+        const dist = skipEntries.map(([k, v]) => `${k}=${v}`).join(', ');
+        console.log(`[radar_v2] ${market} 批次 skip 分布: ${dist}`);
+      }
+
       // h. 写入本批候选
+      const persistedCandidates = [];
       if (batchCandidates.length > 0) {
         const ts = nowTs();
         for (const c of batchCandidates) {
           try {
-            insertCandidate.run({
-              run_id: runId, market: c.market, symbol: c.symbol, name: c.name,
-              score: c.score, tier: c.tier, direction: c.direction,
-              metrics_json: JSON.stringify(c.metrics),
-              evidence_json: JSON.stringify(c.evidence),
-              created_at: ts,
-            });
-            updateCandidateScoringProvenance.run({
-              run_id: runId, market: c.market, symbol: c.symbol,
-              scoring_version: c.scoring?.version ?? null,
-              scoring_profile_name: c.scoring?.profileName ?? null,
-              scoring_weights_json: c.scoring?.weightsJson ?? null,
-            });
-          } catch {}
+            persistScoredCandidate(runId, c, ts);
+            persistedCandidates.push(c);
+          } catch (error) {
+            batchCounts.succeeded--; batchCounts.failed++;
+            if (c._itemId) updateScanItemStatus.run({ id: c._itemId, status: 'failed', updated_at: nowTs() });
+            console.error(`[radar_v2] ${market}:${c.symbol} 候选写入失败:`, error?.message || error);
+          }
         }
       }
 
@@ -612,9 +729,49 @@ export async function runScanForMarket(adapter, trigger, scanMode, limit) {
         id: activeJob.id, processed_delta: batchCounts.attempted,
         attempted_delta: batchCounts.attempted, succeeded_delta: batchCounts.succeeded,
         skipped_delta: batchCounts.skipped, failed_delta: batchCounts.failed,
-        candidates_delta: batchCandidates.length, updated_at: nowTs(), lease_owner: PROCESS_ID,
+        candidates_delta: persistedCandidates.length, updated_at: nowTs(), lease_owner: PROCESS_ID,
       });
       if (advanced.changes !== 1) throw new Error('scan_lease_lost');
+
+      // i+. 上游熔断（部署环境 2026-09-10 mass-skip 护栏）。连续空 fetch 达到阈值 =
+      // 基础设施级故障（腾讯风控/断网/接口变更），立即终结本轮并退避重试，
+      // 不再慢速空跑剩余 pending；同时重置 item 重试预算，保证上游恢复后
+      // 以满预算自愈，而不是把整日扫描烧成永久终态。
+      const breaker = _consecutiveFetchFailures.get(activeJob.id);
+      if (breaker && breaker.count >= upstreamFailureBreakerThreshold) {
+        const jobNow = getScanJob.get(market, tradeDate, trigger);
+        const errText = `upstream kline unavailable: ${breaker.count} consecutive empty fetches, lastFailure=${JSON.stringify(breaker.lastFailure || {})}`.slice(0, 480);
+        console.error(`[radar_v2] ${market} 上游 K 线连续 ${breaker.count} 次空返回，熔断本轮扫描（${Math.round(UPSTREAM_FAILURE_RETRY_MS / 60000)} 分钟后自动重试）: ${errText}`);
+        try { resetItemRetryBudget.run({ job_id: activeJob.id, updated_at: nowTs() }); } catch {}
+        const finalized = finalizeScanJobOwned.run({
+          id: activeJob.id, status: 'failed', run_id: runId,
+          cursor_offset: totalSymbols,
+          attempted_count: jobNow.attempted_count, succeeded_count: jobNow.succeeded_count,
+          skipped_count: jobNow.skipped_count, failed_count: jobNow.failed_count,
+          candidates_count: jobNow.candidates_count,
+          retry_after: nowTs() + UPSTREAM_FAILURE_RETRY_MS, updated_at: nowTs(), lease_owner: PROCESS_ID,
+        });
+        if (finalized.changes !== 1) throw new Error('scan_lease_lost');
+        updateRunStatus.run({
+          id: runId, status: 'failed', completed_at: nowTs(),
+          candidates_count: jobNow.candidates_count,
+          attempted_count: jobNow.attempted_count, succeeded_count: jobNow.succeeded_count,
+          skipped_count: jobNow.skipped_count, failed_count: jobNow.failed_count,
+          error: errText,
+        });
+        _consecutiveFetchFailures.delete(activeJob.id);
+        if (trigger === 'scheduled_daily') {
+          await settleOutcomesAfterRun(market, runId);
+        }
+        _lastRun.set(market, { runId, completedAt: nowTs(), status: 'failed', candidatesCount: jobNow.candidates_count, error: errText });
+        return {
+          ok: false, runId, market, status: 'failed',
+          candidatesCount: jobNow.candidates_count,
+          attempted: jobNow.attempted_count, succeeded: jobNow.succeeded_count,
+          skipped: jobNow.skipped_count, failed: jobNow.failed_count,
+          circuitBroken: true, error: errText,
+        };
+      }
 
       // j. 检查是否还有 pending 标的（failed/skipped 不算，它们在退避到期后才会被重试）
       //    P0: pending=0 表示本轮全量扫描完成，可以判定最终状态
@@ -649,6 +806,7 @@ export async function runScanForMarket(adapter, trigger, scanMode, limit) {
           retry_after: retryAfter, updated_at: nowTs(), lease_owner: PROCESS_ID,
         });
         if (finalized.changes !== 1) throw new Error('scan_lease_lost');
+        _consecutiveFetchFailures.delete(activeJob.id);
         updateRunStatus.run({
           id: runId, status: finalStatus, completed_at: nowTs(),
           candidates_count: finalJob.candidates_count,
@@ -656,10 +814,48 @@ export async function runScanForMarket(adapter, trigger, scanMode, limit) {
           skipped_count: skipped, failed_count: failed,
           error: finalStatus === 'failed' ? 'all symbols failed or skipped' : null,
         });
-        if (finalStatus !== 'failed') {
-          setImmediate(() => {
-            try { backfillPendingOutcomes(DEFAULT_TOP_N); } catch {}
-            try { updateMaturedOutcomes(DEFAULT_TOP_N); } catch {}
+        // outcome 结算（DB-only）必须在扫描终态同步执行：日扫 finishing 后进程若重启，
+        // 旧的 setImmediate 维护会整块丢失。部署环境 实测 CN updated_at 停在 2026-09-13、
+        // HK 停在 2026-09-27，而 US 保持每日推进，说明 fire-and-forget 路径不可依赖。
+        // 结算只读 K 线缓存 + 更新 outcome，不发起网络请求，通常在秒级至数十秒完成。
+        if (trigger === 'scheduled_daily') {
+          await settleOutcomesAfterRun(market, runId);
+        }
+        if (finalStatus !== 'failed' && trigger === 'scheduled_daily' && _postScanMaintenanceEnabled) {
+          setImmediate(async () => {
+            // 基准行情：优先走扫描器统一缓存；失败时改用基准模块（腾讯 + 东财兜底），
+            // 避免基准停更导致所有 entry 的 5/20/60 日超额收益永久为空。
+            try {
+              const benchmarkBars = await loadDailyBars(adapter, adapter.kline.benchmark, asOf ? { asOfDate: tradeDate } : {});
+              if (benchmarkBars.rows.length < 60 || benchmarkBars.stale) throw new Error(`benchmark unavailable or stale: ${JSON.stringify(benchmarkBars.lastFailure || {})}`);
+            } catch (error) {
+              console.error(`[radar_v2] ${market} run=${runId} 基准行情更新失败，尝试东财兜底:`, error?.message || error);
+              try {
+                const fallback = await refreshBenchmarkForMarket(market);
+                if (!fallback.ok) console.error(`[radar_v2] ${market} run=${runId} 基准兜底仍失败:`, JSON.stringify(fallback));
+                else console.log(`[radar_v2] ${market} run=${runId} 基准兜底成功: ${fallback.rows} 根`);
+              } catch (fallbackError) {
+                console.error(`[radar_v2] ${market} run=${runId} 基准兜底异常:`, fallbackError?.message || fallbackError);
+              }
+            }
+
+            // 定向刷新未成熟 outcome 的标的 K 线：离开 universe 的标的不会再有扫描更新，
+            // 缺少 entry+5 的 bar 会让 matured 永久停在 0。最多 120 只 / 3 分钟预算，
+            // 按最老 entry 优先，避免最新标的每天重复占用窗口。
+            try {
+              const pendingSymbols = getPendingOutcomeSymbols(market, 120);
+              const deadline = Date.now() + 3 * 60 * 1000;
+              let refreshed = 0;
+              for (const item of pendingSymbols) {
+                if (Date.now() > deadline) break;
+                try { await loadDailyBars(adapter, item.symbol); refreshed += 1; } catch { /* 单票失败不影响其它 */ }
+              }
+              if (pendingSymbols.length) console.log(`[radar_v2] ${market} run=${runId} 定向刷新未成熟标的 K 线 ${refreshed}/${pendingSymbols.length}`);
+              // 刷新后再结算一次：新补齐的 entry+5/20/60 bar 本轮即可成熟。
+              await settleOutcomesAfterRun(market, runId);
+            } catch (error) {
+              console.error(`[radar_v2] ${market} run=${runId} 未成熟标的刷新失败:`, error?.message || error);
+            }
           });
         }
       } else {
@@ -728,7 +924,7 @@ export async function runScanForMarket(adapter, trigger, scanMode, limit) {
  * @param {number} [opts.limit] - 限制每市场扫描股票数（测试用）
  * @returns {Promise<{ok, runId, market, candidatesCount, error?}>}
  */
-export async function runScan({ market = null, trigger = 'manual', scanMode = 'official', limit } = {}) {
+export async function runScan({ market = null, trigger = 'manual', scanMode = 'official', limit, tradeDate = null } = {}) {
   const adapters = market ? [adapterFor(market)] : getAllAdapters();
   const valid = adapters.filter(Boolean);
   if (valid.length === 0) {
@@ -737,7 +933,7 @@ export async function runScan({ market = null, trigger = 'manual', scanMode = 'o
 
   // 单市场：直接返回该市场结果
   if (valid.length === 1) {
-    const result = await runScanForMarket(valid[0], trigger, scanMode, limit);
+    const result = await runScanForMarket(valid[0], trigger, scanMode, limit, tradeDate);
     return { ...result, market: valid[0].market };
   }
 
@@ -752,7 +948,7 @@ export async function runScan({ market = null, trigger = 'manual', scanMode = 'o
   let anyFailed = false;
   for (const adapter of valid) {
     try {
-      const r = await runScanForMarket(adapter, trigger, scanMode, limit);
+      const r = await runScanForMarket(adapter, trigger, scanMode, limit, tradeDate);
       perMarket.push({ market: adapter.market, status: r.status, ok: r.ok, runId: r.runId });
       if (!r.ok) {
         summary.errors.push({ market: adapter.market, error: r.error });
@@ -896,10 +1092,15 @@ export function reconcileNonTradingDayScanJobs() {
  * @returns {{active: object|null, inFlightMarkets: string[], lastRuns: object}}
  */
 export function getScanStatus() {
+  return { ...getScanRuntimeStatus(), ...readScanDiagnostics(getRadarDb()) };
+}
+
+// These fields describe this scanner process, not a query worker or persisted run.
+export function getScanRuntimeStatus() {
   return {
     active: _activeRun ? { ..._activeRun } : null,
     inFlightMarkets: Array.from(_inFlight.keys()),
-    lastRuns: Object.fromEntries(_lastRun),
+    lastRuns: Object.fromEntries([..._lastRun].map(([market,run])=>[market,{...run}])),
   };
 }
 
@@ -909,4 +1110,6 @@ export function getScanStatus() {
 export function resetThrottleForTest() {
   _klineFetchedAt.clear();
   _inFlight.clear();
+  // 测试隔离：冷却状态是跨用例保留的进程级状态，必须与节流一起重置。
+  resetEastmoneyStateForTest();
 }

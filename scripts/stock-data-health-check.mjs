@@ -47,10 +47,11 @@ check(fresh.markets.CN.status === 'fresh' && fresh.markets.CN.label === '交易�
 
 const stockUi = readFileSync(new URL('../app/stock.js', import.meta.url), 'utf8');
 const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
-check(stockUi.includes("health.status==='error'?'error':'amber'"), 'stock header must render data health over the calendar state');
-check(stockUi.includes('recheckDataHealth()'), 'stock header must expose the manual recheck action');
+// C6: Match current DashboardMarketStatus wiring in app/stock.js.
+check(stockUi.includes("['error','degraded'].includes(health?.status)") && stockUi.includes('problem ? health.label : st.label'), 'stock header must render data health over the calendar state');
+check(stockUi.includes('recheckDataHealth'), 'stock header must expose the manual recheck action');
 check(stockUi.includes('controller.abort()') && stockUi.includes('dataHealthReadFailed=true'), 'hung health requests must time out and release the polling loop');
-check(stockUi.includes("readProblem?'状态检测失败'"), 'health-read failures must not retain a stale provider diagnosis');
+check(stockUi.includes("readFailed ? '状态检测失败'"), 'health-read failures must not retain a stale provider diagnosis');
 check(stockUi.includes("String(item.key || '') !== 'data_gate'"), 'decision basis must exclude infrastructure data-gate blockers');
 check(server.includes("p === '/data/health/recheck' && req.method === 'POST'"), 'server must expose the data-source recheck endpoint');
 

@@ -476,3 +476,76 @@ export function buildFundamentalDossierEnrichment({ changeType, direction, metri
     evaluation_window_days: FUNDAMENTAL_EVALUATION_WINDOW_DAYS,
   };
 }
+
+// === screener 榜单通道（52周新高 / 20日动量 / 量能异动） ===
+
+const SCREENER_VERIFICATION_VERSION = 'screener_v1';
+const SCREENER_EVALUATION_WINDOW_DAYS = 10;
+
+/**
+ * 生成 screener dossier 的规则化字段。
+ * 确认/失效条件必须都给值：getActiveDossiersWithConditions 要求两者非 NULL 且至少一个
+ * 非空数组，否则 5 分钟评估循环不接管；失效条件（价格否定）是榜单票掉榜退出的最快路径。
+ *
+ * @param {object} params
+ * @param {string} params.type - w52_high / momentum_20d / volume_surge
+ * @param {object} params.metrics - 信号日指标快照
+ *   - w52_high:      { close, high52w }
+ *   - momentum_20d:  { close, close20dAgo }
+ *   - volume_surge:  { close, low20d }
+ * @param {number} [params.now]
+ * @returns {{priority_level, priority_components_json, confirmation_json, invalidation_json, next_review_at, verification_version, evaluation_window_days}}
+ */
+export function buildScreenerDossierEnrichment({ type, metrics = {}, now = Date.now() }) {
+  const close = metrics.close ?? null;
+  const confirmation = [];
+  const invalidation = [];
+
+  if (type === 'w52_high' && close != null && metrics.high52w != null) {
+    const confirmLevel = metrics.high52w * 0.95;
+    const invalidLevel = metrics.high52w * 0.90;
+    confirmation.push(condition({
+      data_source: DS, indicator: 'close', comparator: '>', threshold: 'fixed', threshold_value: confirmLevel,
+      duration_days: 1, evaluation_time: EVAL, status: 'pending',
+      description: `收盘价保持在 52 周最高(${metrics.high52w.toFixed(2)}) 的 95% 以上（>${confirmLevel.toFixed(2)}）`,
+    }));
+    invalidation.push(condition({
+      data_source: DS, indicator: 'close', comparator: '<', threshold: 'fixed', threshold_value: invalidLevel,
+      duration_days: 1, evaluation_time: EVAL, status: 'pending',
+      description: `收盘价跌破 52 周最高的 90%（<${invalidLevel.toFixed(2)}）——近新高动能失效`,
+    }));
+  } else if (type === 'momentum_20d' && metrics.close20dAgo != null) {
+    confirmation.push(condition({
+      data_source: DS, indicator: 'close', comparator: '>', threshold: 'fixed', threshold_value: metrics.close20dAgo,
+      duration_days: 1, evaluation_time: EVAL, status: 'pending',
+      description: `收盘价高于 20 日前收盘(${metrics.close20dAgo.toFixed(2)})——动量未回吐`,
+    }));
+    invalidation.push(condition({
+      data_source: DS, indicator: 'close', comparator: '<', threshold: 'fixed', threshold_value: metrics.close20dAgo,
+      duration_days: 1, evaluation_time: EVAL, status: 'pending',
+      description: `收盘价跌破 20 日前收盘(${metrics.close20dAgo.toFixed(2)})——20 日动量回吐`,
+    }));
+  } else if (type === 'volume_surge' && metrics.low20d != null) {
+    confirmation.push(condition({
+      data_source: DS, indicator: 'close', comparator: '>', threshold: 'fixed', threshold_value: close,
+      duration_days: 1, evaluation_time: EVAL, status: 'pending',
+      description: `收盘价高于信号日收盘(${close != null ? close.toFixed(2) : '—'})——放量后未回落`,
+    }));
+    invalidation.push(condition({
+      data_source: DS, indicator: 'close', comparator: '<', threshold: 'fixed', threshold_value: metrics.low20d,
+      duration_days: 1, evaluation_time: EVAL, status: 'pending',
+      description: `收盘价跌破信号日 20 日最低(${metrics.low20d.toFixed(2)})——放量成为出货`,
+    }));
+  }
+
+  return {
+    priority_level: type === 'volume_surge' ? 'low' : 'medium',
+    priority_components_json: JSON.stringify({ impact: 0.5, time_sensitivity: 0.5, credibility: 0.6, executability: 0.6 }),
+    confirmation_json: JSON.stringify(confirmation),
+    invalidation_json: JSON.stringify(invalidation),
+    // 7d：与 CHANNEL_HALF_LIFE_DAYS.screener 对齐；到期转 needs_review 自然老化
+    next_review_at: calculateNextReviewAt(7, now),
+    verification_version: SCREENER_VERIFICATION_VERSION,
+    evaluation_window_days: SCREENER_EVALUATION_WINDOW_DAYS,
+  };
+}

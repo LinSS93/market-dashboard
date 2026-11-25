@@ -393,7 +393,9 @@ function parseLLMResponse(rawResponse) {
   }
 }
 
-export async function callLLM({ provider, apiKey, baseUrl, messages, model, maxTokens = 400, temperature = 0.2, timeoutMs = API_TIMEOUT_MS, maxRetries = API_MAX_RETRIES }) {
+// 默认 1200：deepseek-v4-flash 是推理模型，reasoning 先消耗 ~300 tokens，
+// 默认值必须覆盖 思考 + JSON 正文；旧默认 400 必然截断导致 JSON 解析失败。
+export async function callLLM({ provider, apiKey, baseUrl, messages, model, maxTokens = 1200, temperature = 0.2, timeoutMs = API_TIMEOUT_MS, maxRetries = API_MAX_RETRIES }) {
   const url = `${String(baseUrl || '').replace(/\/$/, '')}/chat/completions`;
   const body = {
     model: model || 'deepseek-v4-flash',

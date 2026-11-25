@@ -10,13 +10,13 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { setRadarDbForTest, clearRadarDbForTest } from '../radar_schema.mjs';
+import { setRadarDbForTest, clearRadarDbForTest, getRunTopCandidatesNeedingOutcomes } from '../radar_schema.mjs';
 import { loadUniverse, getUniverseStats } from '../radar_universe.mjs';
-import { adapterFor, getAllAdapters, loadDailyBars, setNowFnForTest, resetNowFnForTest } from '../radar_market.mjs';
+import { adapterFor, getAllAdapters, loadDailyBars, setNowFnForTest, resetNowFnForTest, setDailySourceForTest } from '../radar_market.mjs';
 import { marketKlineParams } from '../market_adapter.mjs';
 import { scoreCandidate, scoreUniverse, fetchEventFacts, SCORING_PROFILE_VERSION, invalidateLiquidityAnchorCache } from '../radar_scoring.mjs';
-import { runScan, getScanStatus, resetThrottleForTest } from '../radar_scanner.mjs';
-import { backfillOutcome, updateMaturedOutcomes } from '../radar_outcomes.mjs';
+import { runScan, getScanStatus, resetThrottleForTest, setUpstreamBreakerThresholdForTest, setPostScanMaintenanceEnabledForTest } from '../radar_scanner.mjs';
+import { backfillOutcome, updateMaturedOutcomes, getPendingOutcomeSymbols } from '../radar_outcomes.mjs';
 import { getTopCandidates, getRunHistory, getScanStats, getCandidateDetail } from '../radar_query_api.mjs';
 import { scheduleRadar, stopRadar, getSchedulerState, resetSchedulerStateForTest, executeScanForTest, getRoundRobinStartForTest, advanceRoundRobinForTest, isQueueRunningForTest, processDailyQueueForTest, setMarketStatusOverrideForTest, setIsAfterCloseOverrideForTest, inBackoffForTest, hasResumableJobForTest } from '../radar_scheduler.mjs';
 import { resetRateLimiterForTest, getRateLimiterState, acquireToken, setNoDelayForTest } from '../radar_rate_limiter.mjs';
@@ -58,6 +58,11 @@ db.pragma('foreign_keys = ON');
 
 // 注入临时 DB（会触发 schema 创建 radar_v2_* 表）
 setRadarDbForTest(db);
+// Legacy scanner fixtures exercise Tencent parsing; production uses the
+// separately checked Eastmoney/Yahoo route and never bulk-fetches Tencent.
+setDailySourceForTest('tencent');
+// 测试隔离：扫描完成后的异步维护会写 K 线缓存，导致后续用例读到上一用例的 bar。
+setPostScanMaintenanceEnabledForTest(false);
 
 const now = Date.now();
 
@@ -163,7 +168,11 @@ const TRADING_DAYS = generateTradingDays(120, new Date());
 //   - US（UTC-4）05:00 当地，未收盘 → lastCompletedTradingDate = 上一交易日 < 数据最新日 ✓
 // 三市场缓存均有效，不触发真实 fetch。测试库只含真实交易日行情，不污染指标/收益计算。
 const LAST_TRADING_DATE = TRADING_DAYS[TRADING_DAYS.length - 1];
-const LAST_TRADING_MS = new Date(LAST_TRADING_DATE + 'T09:00:00Z').getTime();
+// mock K 线固定以“昨天”为最后一根（循环里 120-i 的偏移），因此注入时钟也取
+// 倒数第二个交易日，避免 HK/CN 在“今天已收盘”的时点把 mock 判成 stale。
+// 该值只用于 loadDailyBars 的新鲜度基线，不参与任何收益或评分计算。
+const CLOCK_TRADING_DATE = TRADING_DAYS[TRADING_DAYS.length - 2] || LAST_TRADING_DATE;
+const LAST_TRADING_MS = new Date(CLOCK_TRADING_DATE + 'T09:00:00Z').getTime();
 setNowFnForTest(() => LAST_TRADING_MS);
 
 // 1. 宇宙数据：三市场各 5 只股票
@@ -1184,6 +1193,9 @@ console.log('\n[21] 201+ 标的首批全失败（失败项不阻塞 pending）')
   };
 
   try {
+    // 本用例验证批次机制（失败项不阻塞 pending），不是上游故障场景：
+    // 全部 fetch 返回空会触发上游熔断（连续 200 次），注入超高阈值禁用熔断。
+    setUpstreamBreakerThresholdForTest(9999);
     // 第一批：BATCH_SIZE=200，处理 200 个 pending 标的（全部 skipped）
     const firstResult = await runScan({ market: 'US', trigger: 'manual', scanMode: 'official', limit: 206 });
     assert(firstResult.ok === true || firstResult.status === 'partial', `首批返回 ok/partial（ok=${firstResult.ok}, status=${firstResult.status}）`);
@@ -1223,6 +1235,7 @@ console.log('\n[21] 201+ 标的首批全失败（失败项不阻塞 pending）')
   } finally {
     global.fetch = _origFetch21;
     setNoDelayForTest(false);  // 恢复正常限速
+    setUpstreamBreakerThresholdForTest(null);  // 恢复熔断阈值
     // 清理额外标的
     db.prepare("DELETE FROM radar_universe_members WHERE symbol LIKE 'TST%'").run();
   }
@@ -1646,6 +1659,111 @@ console.log('\n[25] trigger 隔离回归（manual=partial 不影响 scheduled_da
   } finally {
     global.fetch = _origFetch25;
     setNoDelayForTest(false);
+  }
+}
+
+// === [25b] 终态 failed 语义回归（部署环境 2026-09-10 永动机事故） ===
+// 事故：hasResumableJob 把 retry_after==NULL 的 failed job 当"未设退避"→ 可续跑，
+// 而 scanner 用 NULL 表示终态（重试预算耗尽/僵尸回收/非交易日隔离，不再重试）。
+// 语义相反导致 scheduler 满速重复派发终态 job（每次 iteration 重复 finalize +
+// 全表扫 scan_items），CPU 满核、事件循环饿死、HTTP 全超时。
+// 修复后：partial/failed 只有在 retry_after 非空且到期时才可续跑；NULL = 终态。
+{
+  console.log('\n[25b] 终态 failed 语义回归（retry_after=NULL 不可续跑）');
+  db.prepare("DELETE FROM radar_v2_scan_jobs WHERE market = 'CN'").run();
+
+  const cnTradeDate = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date());
+  const now26b = Date.now();
+
+  try {
+    // 终态 failed + retry_after=NULL（scanner 终态 finalize 的写法）
+    db.prepare(`INSERT INTO radar_v2_scan_jobs
+      (market, trade_date, trigger, scan_mode, status, cursor_offset, total_symbols,
+       attempted_count, succeeded_count, failed_count, skipped_count, retry_after, lease_owner, created_at, updated_at)
+      VALUES ('CN', ?, 'scheduled_daily', 'official', 'failed', 0, 10, 10, 0, 0, 10, NULL, NULL, ?, ?)`)
+      .run(cnTradeDate, now26b, now26b);
+
+    const terminalResumable = hasResumableJobForTest('CN', cnTradeDate, now26b, 'scheduled_daily');
+    assert(terminalResumable === false, `终态 failed（retry_after=NULL）不可续跑（got ${terminalResumable}）`);
+
+    // 退避中的 failed（retry_after 在未来）→ 不可续跑
+    db.prepare("UPDATE radar_v2_scan_jobs SET retry_after = ? WHERE market = 'CN' AND trade_date = ?")
+      .run(now26b + 60_000, cnTradeDate);
+    const backoffResumable = hasResumableJobForTest('CN', cnTradeDate, now26b, 'scheduled_daily');
+    assert(backoffResumable === false, `failed 退避未到期不可续跑（got ${backoffResumable}）`);
+
+    // 退避到期的 failed → 可续跑（正常重试路径不受影响）
+    const expiredResumable = hasResumableJobForTest('CN', cnTradeDate, now26b + 120_000, 'scheduled_daily');
+    assert(expiredResumable === true, `failed 退避到期后可续跑（got ${expiredResumable}）`);
+
+    // 终态 partial + retry_after=NULL（防御性：不应存在，但出现时按终态处理）
+    db.prepare("UPDATE radar_v2_scan_jobs SET status = 'partial', retry_after = NULL WHERE market = 'CN' AND trade_date = ?")
+      .run(cnTradeDate);
+    const partialNullResumable = hasResumableJobForTest('CN', cnTradeDate, now26b, 'scheduled_daily');
+    assert(partialNullResumable === false, `partial（retry_after=NULL）不可续跑（got ${partialNullResumable}）`);
+  } finally {
+    db.prepare("DELETE FROM radar_v2_scan_jobs WHERE market = 'CN'").run();
+  }
+}
+
+// === [25c] 上游熔断回归（部署环境 2026-09-10 mass-skip 护栏） ===
+// 场景：腾讯 fqkline 对高频访问触发风控 → 全部 fetch 返回非 200 →
+// 所有标的 fetch 失败。断言：
+//   1. 连续空 fetch 达到阈值后熔断，不再慢速空跑全部 pending
+//   2. job = failed 且 retry_after 非空（30 分钟退避后自愈，非永久终态）
+//   3. run.error 记录 'upstream kline unavailable' + 最后失败原因
+//   4. 熔断时重置 item 重试预算（skipped items retry_count 归零）
+{
+  console.log('\n[25c] 上游熔断回归（连续空 fetch → failed + 30 分钟退避 + 预算重置）');
+  db.prepare("DELETE FROM radar_v2_scan_jobs WHERE market = 'CN'").run();
+  db.prepare("DELETE FROM radar_v2_runs WHERE market = 'CN'").run();
+  db.prepare("DELETE FROM radar_v2_scan_items WHERE market = 'CN'").run();
+  db.prepare("DELETE FROM radar_v2_bars WHERE market = 'CN'").run();
+
+  const _origFetch25c = global.fetch;
+  // 模拟上游风控：所有请求返回 403
+  global.fetch = async () => ({ ok: false, status: 403 });
+  // 测试宇宙仅 5 只标的：注入低熔断阈值；清掉前面用例的单标的节流标记，
+  // 否则全部走 throttled 路径到不了 fetch 层。
+  setUpstreamBreakerThresholdForTest(3);
+  resetThrottleForTest();
+
+  try {
+    const result = await runScan({ market: 'CN', trigger: 'scheduled_daily', scanMode: 'official', limit: 25 });
+    assert(result.circuitBroken === true, `触发熔断（circuitBroken=${result.circuitBroken}）`);
+    assert(result.status === 'failed', `熔断后 job 状态 failed（${result.status}）`);
+    assert(String(result.error || '').includes('upstream kline unavailable'), `error 记录上游不可用（${String(result.error).slice(0, 80)}）`);
+    assert(String(result.error || '').includes('http_403'), `error 含最后失败原因 http_403（${String(result.error).slice(0, 120)}）`);
+
+    const cnTradeDate25c = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(new Date());
+    const job = db.prepare("SELECT * FROM radar_v2_scan_jobs WHERE market = 'CN' AND trigger = 'scheduled_daily'").get();
+    assert(job != null, 'job 已创建');
+    assert(job.status === 'failed', `job 状态 failed（${job.status}）`);
+    assert(job.retry_after != null && job.retry_after > Date.now(), `retry_after 设在未来（30 分钟退避自愈，got ${job.retry_after}）`);
+    assert(job.retry_after - job.updated_at <= 31 * 60 * 1000, `退避约 30 分钟（got ${Math.round((job.retry_after - job.updated_at) / 60000)} 分钟）`);
+
+    const run = db.prepare("SELECT * FROM radar_v2_runs WHERE id = ?").get(result.runId);
+    assert(run != null && String(run.error || '').includes('upstream kline unavailable'), 'run.error 记录上游不可用');
+
+    // 熔断时重置 item 重试预算：skipped items 的 retry_count 应为 0
+    // （首次标记本会 +1，熔断重置后归零 → 上游恢复后重试预算满格）
+    const budgetRows = db.prepare("SELECT retry_count FROM radar_v2_scan_items WHERE market = 'CN' AND job_id = ? AND status = 'skipped'").all(job.id);
+    assert(budgetRows.length > 0, `存在 skipped items（${budgetRows.length}）`);
+    assert(budgetRows.every((r) => r.retry_count === 0), `熔断已重置重试预算（all rc=0, got ${JSON.stringify([...new Set(budgetRows.map((r) => r.retry_count))])}）`);
+
+    // 退避期内调度器不可续跑（修复后的 hasResumableJob 语义）
+    const resumableNow = hasResumableJobForTest('CN', cnTradeDate25c, Date.now(), 'scheduled_daily');
+    assert(resumableNow === false, `退避期内不可续跑（got ${resumableNow}）`);
+  } finally {
+    global.fetch = _origFetch25c;
+    setUpstreamBreakerThresholdForTest(null);
+    db.prepare("DELETE FROM radar_v2_scan_jobs WHERE market = 'CN'").run();
+    db.prepare("DELETE FROM radar_v2_runs WHERE market = 'CN'").run();
+    db.prepare("DELETE FROM radar_v2_scan_items WHERE market = 'CN'").run();
   }
 }
 
@@ -3160,6 +3278,60 @@ console.log('\n[25] trigger 隔离回归（manual=partial 不影响 scheduled_da
 
   // 清理
   db.exec(`DELETE FROM radar_v2_dossier_observations; DELETE FROM radar_v2_dossier_source_refs; DELETE FROM radar_v2_dossiers; DELETE FROM radar_v2_candidates; DELETE FROM radar_v2_runs;`);
+}
+
+// === 前列收益记录重试：已有 outcome 不得让第 51 名挤入 ===
+console.log('\n[36] 近期 run 前 50 名收益重试');
+{
+  const runId = Number(db.prepare(`INSERT INTO radar_v2_runs (market, trigger, status, started_at)
+    VALUES ('US', 'scheduled_daily', 'complete', ?)`).run(Date.now()).lastInsertRowid);
+  const insert = db.prepare(`INSERT INTO radar_v2_candidates
+    (run_id, market, symbol, score, tier, direction, metrics_json, created_at)
+    VALUES (?, 'US', ?, ?, 'high', 'positive', '{}', ?)`);
+  const ids = [];
+  for (let rank = 1; rank <= 51; rank++) {
+    ids.push(Number(insert.run(runId, `RANK${rank}`, 100 - rank, Date.now()).lastInsertRowid));
+  }
+  db.prepare(`INSERT INTO radar_v2_outcomes
+    (candidate_id, run_id, market, symbol, entry_date, matured, updated_at)
+    VALUES (?, ?, 'US', 'RANK1', '2026-01-02', 0, ?)`).run(ids[0], runId, Date.now());
+  const pendingTop = getRunTopCandidatesNeedingOutcomes.all({ run_id: runId, market: 'US', limit: 50 });
+  assert(pendingTop.length === 49, `已入账的前 1 名剔除，剩余 49 名（${pendingTop.length}）`);
+  assert(!pendingTop.some(row => row.symbol === 'RANK51'), '第 51 名不能挤进前 50 名收益账本');
+  db.prepare('DELETE FROM radar_v2_runs WHERE id = ?').run(runId);
+}
+
+// === [37] 未成熟 outcome 标的筛选（CN 积压修复）===
+console.log('\n[37] 未成熟 outcome 标的筛选（120 天窗口 + 24 小时冷却）');
+{
+  const runId = Number(db.prepare(`INSERT INTO radar_v2_runs (market, trigger, status, started_at)
+    VALUES ('CN', 'scheduled_daily', 'complete', ?)`).run(Date.now()).lastInsertRowid);
+  const insertCandidate = db.prepare(`INSERT INTO radar_v2_candidates
+    (run_id, market, symbol, score, tier, direction, metrics_json, created_at)
+    VALUES (?, 'CN', ?, 50, 'high', 'positive', '{}', ?)`);
+  const candidateId = symbol => Number(insertCandidate.run(runId, symbol, Date.now()).lastInsertRowid);
+  const insert = db.prepare(`INSERT OR REPLACE INTO radar_v2_outcomes
+    (candidate_id, run_id, market, symbol, entry_date, entry_price, benchmark_entry, matured, updated_at)
+    VALUES (?, ?, 'CN', ?, ?, 10, 100, ?, ?)`);
+  const nowMs = Date.now();
+  const recentEntry = new Date(nowMs - 3 * 86400000).toISOString().slice(0, 10);
+  // 1) 近期 entry + 两天前更新 → 应进入修复队列
+  insert.run(candidateId('REPAIRRECENT'), runId, 'REPAIRRECENT', recentEntry, 0, nowMs - 2 * 86400000);
+  // 2) 最新更新（24h 内）→ 不应被重复抓取
+  insert.run(candidateId('REPAIRFRESH'), runId, 'REPAIRFRESH', recentEntry, 0, nowMs);
+  // 3) entry 超过 120 天 → 视为 stale，不占修复预算
+  insert.run(candidateId('REPAIRSTALE'), runId, 'REPAIRSTALE', '2026-01-02', 0, nowMs - 2 * 86400000);
+  // 4) 已成熟 → 不进入队列
+  insert.run(candidateId('REPAIRDONE'), runId, 'REPAIRDONE', recentEntry, 3, nowMs - 2 * 86400000);
+
+  const pending = getPendingOutcomeSymbols('CN', 40, nowMs - 86400000);
+  assert(pending.some(row => row.symbol === 'REPAIRRECENT'), '近期未成熟标的进入修复队列');
+  assert(!pending.some(row => row.symbol === 'REPAIRFRESH'), '24 小时内更新过的标的不重复抓取');
+  assert(!pending.some(row => row.symbol === 'REPAIRSTALE'), '超过 120 天的积压不占修复预算');
+  assert(!pending.some(row => row.symbol === 'REPAIRDONE'), '已成熟标的不进入修复队列');
+  db.prepare("DELETE FROM radar_v2_outcomes WHERE symbol LIKE 'REPAIR%'").run();
+  db.prepare("DELETE FROM radar_v2_candidates WHERE symbol LIKE 'REPAIR%'").run();
+  db.prepare('DELETE FROM radar_v2_runs WHERE id = ?').run(runId);
 }
 
 // === 汇总 ===

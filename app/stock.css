@@ -80,7 +80,7 @@
   .charts { display: flex; gap: 12px; flex-wrap: wrap; }
   .chart { flex: 1 1 280px; height: 200px; }
   .banner { margin: 10px 0; padding: 10px 14px; border-radius: 8px; font-size: 14px; font-weight: 600; }
-  .swing-plan { display:none; margin:8px 0 12px; padding:12px 14px; border:1px solid var(--ws-line); border-left:4px solid var(--ws-blue); background:var(--ws-surface-alt); border-radius:6px; }
+  .swing-plan { display:none; margin:8px 0 12px; padding:12px 14px; border:1px solid var(--ws-line); background:var(--ws-surface-alt); border-radius:6px; }
   .swing-plan .swing-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; }
   .swing-plan .swing-summary { font-size:13px; font-weight:600; color:var(--ws-ink-soft); }
   .swing-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px 14px; }
@@ -241,7 +241,7 @@
     .stock-grid-table th:nth-child(8), .stock-grid-table td:nth-child(8) { display:none; }
   }
   /* .list-card tbody tr.sel 已收拢到 workspace-theme.css（P1 风格统一第 7 步） */
-  .detail.card { padding:0; overflow:hidden; }
+
   /* detail-head 视觉样式（padding/border/background）统一在下方 Visual refinement 区定义，此处不再重复 */
   .detail-head h2 { font-size:18px; font-weight:700 !important; color:var(--ink) !important; }
   /* === 三段式常驻标题栏 === */
@@ -273,6 +273,7 @@
   .signals-panel { display:flex; flex-direction:column; gap:10px; }
   .signals-header { display:flex; align-items:baseline; gap:10px; }
   .signals-header h3 { margin:0; font-size:var(--ws-font-xl); font-weight:600; }
+  .signals-positioning { margin:0; padding:8px 10px; background:var(--ws-surface-soft); border-radius:4px; font-size:12px; line-height:1.6; color:var(--ws-muted); }
   .signals-list { overflow-x:auto; }
   .sig-table { display:flex; flex-direction:column; gap:1px; min-width:680px; }
   .sig-row { display:grid; grid-template-columns:84px 70px 56px 56px 56px 56px 1fr; gap:8px; align-items:center; padding:6px 8px; background:var(--ws-surface); border-radius:4px; font-size:12px; line-height:1.5; }
@@ -303,9 +304,9 @@
   .swing-plan { margin:0 0 12px; }
   .charts { display:block; }
   .chart { min-width:0; height:240px; border-top:1px solid var(--line); }
-  .riskbox { border-left:3px solid var(--red); border-radius:6px; }
+  .riskbox { border-radius:6px; }
   .research-stack > * { margin:0 0 10px !important; }
-  .research-intro { padding:10px 12px; margin-bottom:10px; color:var(--ws-muted); background:var(--ws-surface-soft); border-left:3px solid var(--blue); font-size:12px; line-height:1.55; }
+  .research-intro { padding:10px 12px; margin-bottom:10px; color:var(--ws-muted); background:var(--ws-surface-soft); font-size:12px; line-height:1.55; }
   .evidence-group { margin-bottom:14px; }
   .evidence-group-title { margin:0 0 8px; color:var(--ws-ink-soft); font-size:12px; font-weight:700; text-transform:uppercase; }
   .personal-review, .reasons { border-radius:6px; }
@@ -341,16 +342,16 @@
   .list-card tbody tr.tr-open .stock-name::before { content:''; display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--ws-green); margin-right:5px; vertical-align:middle; box-shadow:0 0 0 2px rgba(16,185,129,.20); }
   /* .list-card tbody tr.sel 已收拢到 workspace-theme.css（P1 风格统一第 7 步） */
   /* .badge 颜色定义已收拢到 workspace-theme.css（P1 风格统一第 4 步） */
-  .detail.card { background:var(--ws-surface); box-shadow:0 8px 24px rgba(31,42,55,.07); }
+
   .detail-head { position:relative; padding:16px 18px 12px; background:var(--ws-canvas); border-bottom:1px solid var(--ws-line); }
-  .detail-head::after { content:""; position:absolute; left:0; top:0; bottom:0; width:4px; background:var(--ws-blue); }
+
   /* 常驻标题栏内部样式对齐主题色 */
   .head-name { color:var(--ws-ink); }
   .head-code { color:var(--ws-muted-soft); }
   .head-price { color:var(--ws-ink); }
   .head-banner { background:var(--ws-surface-soft); color:var(--ws-muted); }
   .detail .banner { border:1px solid rgba(12,92,171,.14); }
-  .swing-plan { background:var(--ws-surface-soft); border-color:#d9e4f5; border-left-width:4px; box-shadow:none; }
+  .swing-plan { background:var(--ws-surface-soft); border-color:#d9e4f5; box-shadow:none; }
   .swing-more { margin-top:8px; border-top:1px solid var(--ws-line); }
   .swing-more summary { padding:8px 0 0; color:var(--ws-muted); font-size:11px; font-weight:600; cursor:pointer; }
   .swing-more .swing-grid { margin-top:8px; }
@@ -385,7 +386,7 @@
   .fold:has(#d_opt[style*="display:none"]), .fold:has(#d_opt[style*="display: none"]),
   .fold:has(#d_short[style*="display:none"]), .fold:has(#d_short[style*="display: none"]) { display:none; }
   .research-stack { background:var(--ws-surface-soft); }
-  .research-stack .research-intro { background:#eaf1ff; border-left-color:var(--ws-blue); color:var(--ws-ink-soft); }
+  .research-stack .research-intro { background:#eaf1ff; color:var(--ws-ink-soft); }
   .evidence-group { margin:0; }
   .evidence-group-title { display:none; }
   input { border:1px solid var(--ws-line-strong); border-radius:var(--ws-radius-sm); background:var(--ws-surface); color:var(--ws-ink); }
@@ -471,7 +472,7 @@
 
   .signal-brief-card { margin:0 0 16px; padding:16px; border:1px solid var(--ws-line); border-radius:var(--ws-radius-sm); background:var(--ws-surface); }
   .signal-brief-card .sb-row { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; }
-  .signal-brief-card .sb-item { }
+
   .signal-brief-card .sb-k { font-size:var(--ws-font-xs); color:var(--ws-muted-soft); margin-bottom:4px; text-transform:uppercase; font-weight:600; letter-spacing:0.02em; }
   .signal-brief-card .sb-v { font-size:var(--ws-font-md); color:var(--ws-ink); font-weight:600; }
   .signal-brief-card .sb-foot { margin-top:8px; padding-top:8px; border-top:1px dashed var(--ws-line); font-size:var(--ws-font-xs); color:var(--ws-muted); line-height:1.5; }
@@ -521,25 +522,25 @@
      ======================================================================== */
 
   /* === 层 1：决策与执行卡 dc-* === */
-  .decision-card { margin:0 0 var(--ws-space-3); padding:var(--ws-card-pad); border:1px solid var(--ws-line); border-left:4px solid var(--ws-blue); background:var(--ws-surface-alt); border-radius:var(--ws-radius-sm); }
-  .decision-card.tone-bull { border-left-color:var(--ws-green); background:var(--ws-green-soft); }
-  .decision-card.tone-bear { border-left-color:var(--ws-red); background:var(--ws-red-soft); }
-  .decision-card.tone-hot { border-left-color:var(--ws-amber); background:var(--ws-amber-soft); }
-  .decision-card.tone-watch { border-left-color:var(--ws-blue); background:var(--ws-blue-soft); }
-  .decision-card.tone-amber { border-left-color:var(--stock-decision-amber); background:#fff8db; }
-  .decision-card.tone-neutral { border-left-color:#5a606b; background:#f3f6fa; }
-  .decision-card.state-data-unavailable { border-left-color:var(--stock-state-data-unavailable); background:#f3f4f6; }
-  .decision-card.state-waiting { border-left-color:var(--stock-state-waiting); background:#f1f5f9; }
-  .decision-card.state-forming { border-left-color:var(--stock-state-forming); background:#ecfeff; }
-  .decision-card.state-confirming { border-left-color:var(--stock-state-confirming); background:#f5f3ff; }
-  .decision-card.state-blocked { border-left-color:var(--stock-state-blocked); background:#fffbeb; }
-  .decision-card.state-probe { border-left-color:var(--stock-state-probe); background:#ecfdf5; }
-  .decision-card.state-add { border-left-color:var(--stock-state-add); background:#e8f7f0; }
-  .decision-card.state-hold { border-left-color:var(--stock-state-hold); background:#eff6ff; }
-  .decision-card.state-trim { border-left-color:var(--stock-state-trim); background:#fff7ed; }
-  .decision-card.state-exit { border-left-color:var(--stock-state-exit); background:#fef2f2; }
-  .decision-card.state-avoid { border-left-color:var(--stock-state-avoid); background:#fff1f2; }
-  .decision-card.state-exit-pending { border-left:4px dashed var(--stock-state-exit-pending); background:#fff7ed; }
+  .decision-card { margin:0 0 var(--ws-space-3); padding:var(--ws-card-pad); border:1px solid var(--ws-line); background:var(--ws-surface-alt); border-radius:var(--ws-radius-sm); }
+  .decision-card.tone-bull { background:var(--ws-green-soft); }
+  .decision-card.tone-bear { background:var(--ws-red-soft); }
+  .decision-card.tone-hot { background:var(--ws-amber-soft); }
+  .decision-card.tone-watch { background:var(--ws-blue-soft); }
+  .decision-card.tone-amber { background:#fff8db; }
+  .decision-card.tone-neutral { background:#f3f6fa; }
+  .decision-card.state-data-unavailable { background:#f3f4f6; }
+  .decision-card.state-waiting { background:#f1f5f9; }
+  .decision-card.state-forming { background:#ecfeff; }
+  .decision-card.state-confirming { background:#f5f3ff; }
+  .decision-card.state-blocked { background:#fffbeb; }
+  .decision-card.state-probe { background:#ecfdf5; }
+  .decision-card.state-add { background:#e8f7f0; }
+  .decision-card.state-hold { background:#eff6ff; }
+  .decision-card.state-trim { background:#fff7ed; }
+  .decision-card.state-exit { background:#fef2f2; }
+  .decision-card.state-avoid { background:#fff1f2; }
+  .decision-card.state-exit-pending { background:#fff7ed; }
 
   /* 决策结论行只保留当前人格的正式执行状态 */
   .dc-conclusion { display:flex; align-items:center; flex-wrap:wrap; gap:8px 14px; margin-bottom:10px; }
@@ -582,21 +583,21 @@
   .dc-decision-why-row span { color:#8a5c00; font-weight:700; }
   .dc-decision-why-row p { margin:0; color:var(--ws-muted); }
   .dc-decision-why-row.next span { color:var(--ws-blue); }
-  .dc-key-plan { margin:0 0 10px; padding:9px 10px; border:1px solid var(--ws-line); border-left:3px solid var(--ws-green); border-radius:var(--ws-radius-sm); background:var(--ws-surface); }
+  .dc-key-plan { margin:0 0 10px; padding:9px 10px; border:1px solid var(--ws-line); border-radius:var(--ws-radius-sm); background:var(--ws-surface); }
   .dc-key-plan-head { display:flex; align-items:baseline; flex-wrap:wrap; gap:6px 10px; margin-bottom:8px; }
   .dc-key-plan-head > span { color:var(--ws-ink); font-size:12px; font-weight:750; }
   .dc-key-plan-head b { color:var(--ws-blue); font-size:12px; }
   .dc-key-plan-head small,.dc-key-plan-valid { color:var(--ws-muted-soft); font-size:10.5px; }
   .dc-key-plan-valid { margin-top:7px; }
   /* 三个人格输出同一管线的最终判断；只有带“当前策略”的一项是正式信号。 */
-  .dc-persona-verdicts { margin:-2px 0 10px; padding:9px 10px; border:1px solid var(--ws-line); border-left:3px solid var(--ws-blue); background:var(--ws-surface); border-radius:var(--ws-radius-sm); }
+  .dc-persona-verdicts { margin:-2px 0 10px; padding:9px 10px; border:1px solid var(--ws-line); background:var(--ws-surface); border-radius:var(--ws-radius-sm); }
   .dc-persona-title { color:var(--ws-ink); font-size:12px; font-weight:750; }
   .dc-persona-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:7px; margin-top:8px; }
-  .dc-persona-verdict { min-width:0; padding:8px 9px; border:1px solid var(--ws-line); border-left:3px solid #7d8795; border-radius:5px; background:var(--ws-surface-soft); }
-  .dc-persona-verdict.tone-bull { border-left-color:var(--ws-green); }
-  .dc-persona-verdict.tone-bear { border-left-color:var(--ws-red); }
-  .dc-persona-verdict.tone-watch { border-left-color:var(--ws-blue); }
-  .dc-persona-verdict.tone-amber,.dc-persona-verdict.tone-hot { border-left-color:var(--stock-state-blocked); }
+  .dc-persona-verdict { min-width:0; padding:8px 9px; border:1px solid var(--ws-line); border-radius:5px; background:var(--ws-surface-soft); }
+
+
+
+
   .dc-persona-verdict-head { display:flex; align-items:center; justify-content:space-between; gap:6px; }
   .dc-persona-name { color:var(--ws-muted); font-size:11px; font-weight:650; }
   .dc-persona-verdict-head em { padding:1px 5px; border:1px solid var(--ws-blue); border-radius:var(--ws-radius-pill); color:var(--ws-blue); font-size:9.5px; font-style:normal; font-weight:700; }
@@ -611,9 +612,9 @@
   .stock-signal-cell { display:inline-flex; flex-direction:column; align-items:flex-start; gap:3px; }
   .stock-signal-cell small { color:var(--ws-muted-soft); font-size:9.5px; line-height:1.25; white-space:nowrap; }
   /* 独立的 RSI6 均值回归观察，不使用正式动作的绿色/红色语义。 */
-  .dc-mean-reversion { margin:-2px 0 10px; padding:8px 10px; border:1px solid #c9d9ee; border-left:3px solid var(--ws-blue); background:#f6f9fd; font-size:12px; line-height:1.5; }
-  .dc-mean-reversion.candidate { border-color:#f0d89a; border-left-color:#d4a017; background:#fffaf0; }
-  .dc-mean-reversion.confirmed { border-left-color:var(--ws-blue); background:#f3f8ff; }
+  .dc-mean-reversion { margin:-2px 0 10px; padding:8px 10px; border:1px solid #c9d9ee; background:#f6f9fd; font-size:12px; line-height:1.5; }
+  .dc-mean-reversion.candidate { border-color:#f0d89a; background:#fffaf0; }
+  .dc-mean-reversion.confirmed { background:#f3f8ff; }
   .dc-mean-reversion-head { display:flex; align-items:center; gap:8px; }
   .dc-mean-reversion-title { color:var(--ws-ink); font-size:12px; font-weight:750; }
   .dc-mean-reversion-badge { padding:1px 6px; border:1px solid currentColor; border-radius:var(--ws-radius-pill); color:#8a5c00; font-size:10.5px; font-weight:700; }
@@ -684,9 +685,9 @@
   .dc-price-structure-head span { color:var(--ws-ink); font-size:12px; font-weight:750; }
   .dc-price-structure-head small,.dc-price-structure-head time { color:var(--ws-muted-soft); font-size:10.5px; font-style:normal; }
   .dc-structure-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-top:8px; }
-  .dc-structure-item { min-width:0; padding:9px 10px; border:1px solid var(--ws-line); border-left:3px solid var(--ws-line-strong); border-radius:6px; background:var(--ws-surface-alt); }
-  .dc-structure-item.above { border-left-color:var(--ws-amber); }
-  .dc-structure-item.below { border-left-color:var(--ws-blue); }
+  .dc-structure-item { min-width:0; padding:9px 10px; border:1px solid var(--ws-line); border-radius:6px; background:var(--ws-surface-alt); }
+
+
   .dc-structure-title { display:flex; align-items:baseline; justify-content:space-between; gap:8px; }
   .dc-structure-title span { min-width:0; color:var(--ws-ink-soft); font-size:11px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .dc-structure-title em { flex:0 0 auto; color:var(--ws-muted-soft); font-size:10px; font-style:normal; }
@@ -716,9 +717,9 @@
   }
 
   /* === 层 2：关键风险卡 rc-* === */
-  .risk-card { margin:0 0 var(--ws-space-3); padding:var(--ws-card-pad-sm); border:1px solid var(--ws-line); border-top:3px solid var(--ws-line-strong); border-radius:var(--ws-radius-sm); background:var(--ws-surface); }
-  .risk-card.rc-has-risk { border-top-color:var(--ws-amber); }
-  .risk-card.rc-has-high { border-top-color:var(--ws-red); }
+  .risk-card { margin:0 0 var(--ws-space-3); padding:var(--ws-card-pad-sm); border:1px solid var(--ws-line); border-radius:var(--ws-radius-sm); background:var(--ws-surface); }
+
+
   .rc-title { font-size:12px; color:var(--ws-muted-soft); font-weight:600; margin-bottom:8px; letter-spacing:0.04em; text-transform:uppercase; }
   .rc-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:8px; }
   .rc-item { padding:8px 11px; border-radius:5px; background:var(--ws-surface-alt); border:1px solid var(--ws-line); }
@@ -791,7 +792,7 @@
 
   /* 门控检查内的 alert 块（4 状态：pass/warn/danger/disabled/conflict）
      字号遵循统一层级：标题 L2 12px、正文 L3 11.5px、badge L4 10.5px */
-  .basis-alert { margin-top:6px; padding:8px 10px; border-radius:var(--ws-radius-sm); line-height:1.55; border-left:3px solid var(--ws-muted-soft); }
+  .basis-alert { margin-top:6px; padding:8px 10px; border-radius:var(--ws-radius-sm); line-height:1.55; }
   .basis-alert:first-child { margin-top:4px; }
   .basis-alert-head { display:flex; align-items:center; gap:6px; margin-bottom:2px; }
   .basis-alert-title { font-size:12px; font-weight:700; color:var(--ws-ink-soft); }
@@ -800,23 +801,23 @@
   .basis-alert-note { color:var(--ws-muted-soft); font-size:11.5px; margin-top:2px; }
   .basis-alert b { font-weight:700; }
   /* 通过（绿色） */
-  .basis-alert-pass { background:var(--ws-green-soft); border-left-color:var(--ws-green); }
+  .basis-alert-pass { background:var(--ws-green-soft); }
   .basis-alert-pass .basis-alert-title { color:var(--ws-green); }
   .basis-alert-pass .basis-alert-badge { background:var(--ws-green-soft); color:var(--ws-green); }
   /* 警告（黄色） */
-  .basis-alert-warn { background:var(--ws-amber-soft); border-left-color:var(--ws-amber); }
+  .basis-alert-warn { background:var(--ws-amber-soft); }
   .basis-alert-warn .basis-alert-title { color:#92400e; }
   .basis-alert-warn .basis-alert-badge { background:var(--ws-amber-soft); color:var(--ws-amber); }
   /* 危险（红色） */
-  .basis-alert-danger { background:var(--ws-red-soft); border-left-color:var(--ws-red); }
+  .basis-alert-danger { background:var(--ws-red-soft); }
   .basis-alert-danger .basis-alert-title { color:var(--ws-red); }
   .basis-alert-danger .basis-alert-badge { background:var(--ws-red-soft); color:var(--ws-red); }
   /* 禁用（灰色） */
-  .basis-alert-disabled { background:var(--ws-surface-alt); border-left-color:var(--ws-line-strong); }
+  .basis-alert-disabled { background:var(--ws-surface-alt); }
   .basis-alert-disabled .basis-alert-title { color:var(--ws-muted-soft); }
   .basis-alert-disabled .basis-alert-badge { background:var(--ws-surface); color:var(--ws-muted-soft); }
   /* 冲突（蓝色） */
-  .basis-alert-conflict { background:var(--ws-blue-soft); border-left-color:var(--ws-blue); }
+  .basis-alert-conflict { background:var(--ws-blue-soft); }
   .basis-alert-conflict .basis-alert-title { color:#1e40af; }
   .basis-alert-conflict .basis-alert-badge { background:var(--ws-blue-soft); color:#1e40af; }
 
@@ -842,7 +843,7 @@
   .intel-action { margin-left:auto; padding:2px 8px; font-size:11.5px; }
   .intel-body { font-size:12.5px; line-height:1.6; color:var(--ws-ink-soft); min-width:0; max-width:100%; }
   .intel-body.optflow { padding:0; }
-  .intel-warn { margin-top:6px; padding:5px 8px; background:var(--ws-red-soft); border-left:3px solid var(--ws-red); border-radius:3px; font-size:12px; color:var(--ws-red); font-weight:600; }
+  .intel-warn { margin-top:6px; padding:5px 8px; background:var(--ws-red-soft); border-radius:3px; font-size:12px; color:var(--ws-red); font-weight:600; }
 
   /* === 子板块：风险明细 rd-* === */
   .rd-list { margin:0; padding:0; list-style:none; }

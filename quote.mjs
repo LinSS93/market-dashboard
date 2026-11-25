@@ -22,9 +22,21 @@ function _store(key, data) {
   if (data != null) _cache.set(key, { ts: Date.now(), data });
 }
 
+// 行情源的名称字段可能滞后于代码复用：INT 在美股主/备源仍映射到已更名的
+// World Fuel Services（原代码 INT，现 WKC），而该代码现为 Corgi 2x Long INTC ETF。
+// 仅修正美股受影响的名称，行情数值与其它市场、其它标的保持不变。
+const US_NAME_OVERRIDES = { INT: 'Corgi 每日 2 倍做多 INTC 主动型 ETF' };
+export function resolveQuoteName(market, code, providerName) {
+  const mkt = String(market || '').trim().toUpperCase();
+  const sym = String(code || '').trim().toUpperCase();
+  if (mkt === 'US' && US_NAME_OVERRIDES[sym]) return US_NAME_OVERRIDES[sym];
+  return providerName || sym;
+}
+
 // 通用 HTTP GET：腾讯 gtimg 返回 GBK，其它(新浪/雅虎/Naver) 返回 UTF-8，按 URL 自动选择解码。
 // 同时被 K 线等活代码复用（stock_engine 的 fetchKline* / fetchSinaUS）。
-export function httpGet(url, extraHeaders = {}, retries = 1) {
+// encoding 显式指定时覆盖 URL 自动判断（如 vip.stock.finance.sina.com.cn 的 GBK 板块接口）。
+export function httpGet(url, extraHeaders = {}, retries = 1, encoding = null) {
   return new Promise((resolve, reject) => {
     const headers = Object.assign({ "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Referer": "https://gu.qq.com/" }, extraHeaders);
     const attempt = (n) => {
@@ -34,7 +46,7 @@ export function httpGet(url, extraHeaders = {}, retries = 1) {
         res.on("end", () => {
           if (res.statusCode >= 300) { reject(new Error("HTTP " + res.statusCode)); return; }
           const buf = Buffer.concat(chunks);
-          const isGbk = url.includes("qt.gtimg.cn") || url.includes("hq.sinajs.cn");
+          const isGbk = encoding === "gbk" || (!encoding && (url.includes("qt.gtimg.cn") || url.includes("hq.sinajs.cn")));
           const text = isGbk ? new TextDecoder("gbk").decode(buf) : new TextDecoder("utf-8").decode(buf);
           resolve(text);
         });
@@ -53,8 +65,9 @@ function parseTencentKR(raw) { const m = raw.match(/v_kr\d{6}="([^"]+)"/); if (!
 function parseTencentUS(raw) {
   const m = raw.match(/v_us\w+="([^"]+)"/); if (!m) return null;
   const f = m[1].split("~"); if (f.length < 10) return null;
+  const code = f[2].replace(".OQ","").replace(".N","");
   return {
-    name: f[1], code: f[2].replace(".OQ","").replace(".N",""),
+    name: resolveQuoteName('US', code, f[1]), code,
     price: parseFloat(f[3]) || null,
     prevClose: parseFloat(f[4]) || null,
     open: parseFloat(f[5]) || null,
@@ -169,7 +182,7 @@ function parseSinaUS(raw, code) {
   const rawTime = (f[3] || "").trim();
   const providerTime = rawTime ? rawTime.replace(" ", "T") + "+08:00" : "";
   return {
-    name: f[0] || code, code, price, prevClose: Number.isFinite(prevClose) ? prevClose : null,
+    name: resolveQuoteName('US', code, f[0]), code, price, prevClose: Number.isFinite(prevClose) ? prevClose : null,
     open: parseFloat(f[5]) || null, high: parseFloat(f[6]) || null, low: parseFloat(f[7]) || null,
     volume: parseFloat(f[10]) || null,
     changePct: (prevClose && Number.isFinite(prevClose)) ? (price - prevClose) / prevClose * 100 : null,

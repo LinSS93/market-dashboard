@@ -65,7 +65,8 @@ const API_TIMEOUT_MS = 30_000;                               // thesis 需要更
 const API_MAX_RETRIES = 1;
 const MAX_POINTS_PER_CATEGORY = 3;
 const MAX_DOSSIERS_PER_BATCH = 20;
-const MAX_TOKENS = 800;
+// 1200：推理模型 reasoning 先耗 ~300 tokens，800 会在长正文时截断 JSON。
+const MAX_TOKENS = 1200;
 
 // === feature flag ===
 

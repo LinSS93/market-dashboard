@@ -698,6 +698,17 @@ db.prepare(`
   ) VALUES ('US', 'scheduled_daily', 'official', ?, 'complete', 10, 10, ?, ?, ?)
 `).run(staleTradeDate, staleRunInfo.lastInsertRowid, NOW, NOW);
 
+// C1/C5. The discovery list must apply membership before the limit, including when price history is unavailable.
+db.exec(`CREATE TABLE stock_watchlist(market TEXT,symbol TEXT);
+  CREATE TABLE stock_kline(market TEXT,symbol TEXT,date TEXT,close REAL);
+  CREATE TABLE IF NOT EXISTS radar_daily_bars(market TEXT,symbol TEXT,date TEXT,close REAL);`);
+db.prepare('UPDATE radar_v2_runs SET started_at=? WHERE id=?').run(NOW-1000,staleRunInfo.lastInsertRowid);
+const discovery = listResearchQueue({market:'US',search:'CROSS',limit:1,discovery:true});
+assert(discovery.ok && discovery.data.items[0]?.symbol==='CROSS', '自选外双证据普通股在缺少大盘价格时仍可研究');
+db.prepare('INSERT INTO stock_watchlist VALUES(?,?)').run('US','CROSS');
+const watched = listResearchQueue({market:'US',search:'CROSS',limit:1,discovery:true});
+assert(watched.ok && watched.data.total===0, '加入自选后从雷达总数与列表一并移除');
+db.prepare('UPDATE radar_v2_runs SET started_at=? WHERE id=?').run(NOW+3600000,staleRunInfo.lastInsertRowid);
 const staleResult = listResearchQueue({ market: 'US', limit: 30 });
 const staleCross = staleResult.data.items.find((i) => i.symbol === 'CROSS');
 assert(staleCross != null, '评分过期后 CROSS 仍在候选池（分数准入不受影响）');
@@ -716,6 +727,19 @@ assert(staleAsOf.scan_status === 'complete',
   'queue_as_of.US.scan_status=complete（应到交易日正式 job 已完成）');
 assert(staleResult.data.items[0].bucket === 'risk_review',
   '评分过期不影响 risk_review 置顶');
+
+// 完整扫描停留在旧交易日时，即使评分晚于该次扫描，也必须按应到交易日标旧。
+const olderTradeDate = new Date(Date.parse(`${staleTradeDate}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
+db.prepare('UPDATE radar_v2_scan_jobs SET trade_date = ? WHERE run_id = ?').run(olderTradeDate, staleRunInfo.lastInsertRowid);
+db.prepare('UPDATE radar_v2_runs SET started_at = ? WHERE id = ?').run(NOW - 3600000, staleRunInfo.lastInsertRowid);
+const missedScan = listResearchQueue({ market: 'US', limit: 30 });
+const missedCross = missedScan.data.items.find((i) => i.symbol === 'CROSS');
+assert(missedScan.data.queue_as_of.US.last_complete_date === olderTradeDate,
+  '最后完整日扫停留在旧交易日');
+assert(missedCross?.coverage.score_stale === true,
+  '漏扫后旧评分仍标记数据待更新');
+assert(missedCross?.bucket === 'new_signal',
+  '漏扫后旧评分退出高置信分桶');
 
 // --- 审计修正：channel_latest 物化表（触发器维护）+ 详情 summary 瘦身 ---
 console.log('\n--- 审计修正：channel_latest 物化 + 详情 summary 瘦身 ---');
@@ -812,7 +836,7 @@ assert(fcRisky != null && fcRisky.fundamental_coverage === 'negative',
 // 7. 自动资产审计（审计修正 P1：证据路径 + 市场规则路径双通道自动分类）
 console.log('\n--- 审计修正：自动资产审计（证据 + 市场规则双通道） ---');
 // 清除 score_stale fixture，恢复评分新鲜度
-db.prepare('DELETE FROM radar_v2_scan_jobs WHERE trade_date = ?').run(staleTradeDate);
+db.prepare('DELETE FROM radar_v2_scan_jobs WHERE run_id = ?').run(staleRunInfo.lastInsertRowid);
 
 // event_fact 插入辅助（V2 schema 已建表，含 link_status）
 function insertEventFact(market, symbol, source, opts = {}) {

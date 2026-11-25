@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { mkdirSync, readdirSync, unlinkSync, statSync, existsSync, copyFileSync, renameSync } from "node:fs";
 import { join, dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRuntimeMetricsStore } from "./runtime_metrics.mjs";
 import Database from "better-sqlite3";
 import { db, DB_PATH, computeAllPositionsFromEvents } from "./stock_engine.mjs";
 
@@ -58,30 +59,11 @@ export function getAlertAudit({ type = '', symbol = '', pairId = 0, limit = 200 
 }
 
 // ----- 运行时指标 -----
-export function recordRuntimeMetric(row = {}) {
-  const endpoint = String(row.endpoint || '').slice(0, 120);
-  if (!endpoint) return;
-  db.prepare('INSERT INTO runtime_metrics(ts,endpoint,duration_ms,status_code,detail) VALUES(?,?,?,?,?)')
-    .run(Number(row.ts) || Date.now(), endpoint, Math.max(0, Math.round(Number(row.durationMs) || 0)), Number(row.statusCode) || null, row.detail ? String(row.detail).slice(0, 300) : null);
-  if (Math.random() < 0.01) db.prepare('DELETE FROM runtime_metrics WHERE ts < ?').run(Date.now() - 14 * 86400000);
-}
-
-export function getRuntimeMetrics({ hours = 24, limit = 10000 } = {}) {
-  const since = Date.now() - Math.max(1, Math.min(24 * 30, Number(hours) || 24)) * 3600000;
-  const rows = db.prepare('SELECT endpoint,duration_ms,status_code,ts FROM runtime_metrics WHERE ts>=? ORDER BY ts DESC LIMIT ?')
-    .all(since, Math.min(20000, Math.max(1, Number(limit) || 10000)));
-  const byEndpoint = new Map();
-  for (const row of rows) {
-    const list = byEndpoint.get(row.endpoint) || []; list.push(row); byEndpoint.set(row.endpoint, list);
-  }
-  const endpoints = [...byEndpoint.entries()].map(([endpoint, list]) => {
-    const durations = list.map(row => Number(row.duration_ms) || 0).sort((a, b) => a - b);
-    const p95 = durations[Math.min(durations.length - 1, Math.floor((durations.length - 1) * .95))] || 0;
-    const failed = list.filter(row => Number(row.status_code) >= 400).length;
-    return { endpoint, count: list.length, avgMs: Math.round(durations.reduce((sum, n) => sum + n, 0) / durations.length), p95Ms: p95, maxMs: durations.at(-1) || 0, failed, lastTs: Math.max(...list.map(row => Number(row.ts) || 0)) };
-  }).sort((a, b) => b.p95Ms - a.p95Ms);
-  return { since, samples: rows.length, endpoints };
-}
+let runtimeMetricsStore;
+function metricsStore() { return runtimeMetricsStore ||= createRuntimeMetricsStore(db); }
+export function recordRuntimeMetric(row) { return metricsStore().recordRuntimeMetric(row); }
+export function getRuntimeMetrics(options) { return metricsStore().getRuntimeMetrics(options); }
+export function startRuntimeMetricsMaintenance() { metricsStore().startMaintenance(); }
 
 // ----- 系统设置 -----
 export function getSystemSetting(key, fallback = null) {

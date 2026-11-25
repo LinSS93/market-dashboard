@@ -15,4 +15,5 @@ Use this directory only for images that are safe to publish. Screenshots are opt
 - `radar-archive.png`: fictional Radar research archive. / 虚构数据的研究档案库。
 - `home-local-first.png`: public local-first home page. / 公开版的本地优先首页。
 - `stock-monitoring.png`: fictional stock-monitoring detail view. / 虚构数据的股票监控详情页。
+- `stock-review.png`: fictional 30-day signal review. / 虚构数据的 30 天信号复盘。
 - `leveraged-etf-tracking.png`: fictional leveraged ETF tracking view. / 虚构数据的杠杆 ETF 追踪页。

@@ -203,7 +203,7 @@ small {
   background:var(--ws-surface); border-bottom:1px solid var(--ws-line);
   overflow-x:auto; scrollbar-width:thin;
   position: sticky;
-  top: 52px;
+  top: var(--ws-header-height);
   z-index: 99;
 }
 .global-index-bar::-webkit-scrollbar { height:3px; }

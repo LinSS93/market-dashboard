@@ -6,7 +6,11 @@ Market Dashboard separates three runtime classes:
 - **Shadow:** research producers, replay, and validation that may observe evidence but cannot create trades or alter live risk actions.
 - **兼容 (compatibility):** one-time migrations and historical readers isolated from the active decision path.
 
-Radar / 机会雷达 is always a research-priority layer. Its queue, dossiers, evaluations, feedback experiments, and LLM thesis material do not generate orders and cannot override a risk exit. A fact must be known at its recorded available time before it can be used in validation.
+雷达候选池按研究优先级排序，档案保留原始证据和数据可得时间。雷达交易计划使用独立的价格与风险规则。成交由用户在外部执行并登记，随后进入股票成交账本；股票监控继续负责持仓信号和风险退出。
+
+## 3.9 股票监控同股时机评估边界
+
+同股入场时机评估使用只读历史观察记录，在命令行中重放并比较信号与匹配样本。正式动作继续由股票监控的决策管线提供。
 
 ## Stage prices and chart studies / 阶段价位与图表研究归属
 

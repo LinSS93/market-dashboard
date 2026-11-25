@@ -233,7 +233,9 @@ async function generateCompanyProfileInner({ safeMarket, safeSymbol, safeName, r
     const llm = await deps.callLLM({
       provider: keyEntry.provider, apiKey: keyEntry.apiKey, baseUrl: keyEntry.baseUrl,
       messages: buildCompanyProfileMessages({ market: safeMarket, symbol: safeSymbol, companyName: safeName, sourceRefs: refs }),
-      model: 'deepseek-v4-flash', maxTokens: 450, temperature: 0.15,
+      // deepseek-v4-flash 为推理模型：reasoning 占 300+ tokens 后才输出正文，
+      // max_tokens 必须同时覆盖思考+JSON 正文，450 会截断导致 JSON 解析失败。
+      model: 'deepseek-v4-flash', maxTokens: 1000, temperature: 0.15,
     });
     // 记录 token 用量
     deps.recordLLMTokenUsage({

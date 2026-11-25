@@ -8,8 +8,8 @@ Market Dashboard is a local research tool. It does not place orders, synchronize
 Start the public release with `npm start`, then open http://127.0.0.1:8080 directly. The public release starts with no personal data and with all network-backed background producers disabled.
 使用 `npm start` 启动公开版，再直接打开 http://127.0.0.1:8080。公开版不附带个人数据，且默认关闭所有需要联网的后台生产器。
 
-Windows users can instead download the convenient ZIP and double-click `Start-Market-Dashboard.cmd`. See [Windows quick start](windows-quick-start.md).
-Windows 用户也可下载便捷 ZIP，双击 `Start-Market-Dashboard.cmd`。详见 [Windows 快速使用](windows-quick-start.md)。
+Windows users can double-click `Start-Market-Dashboard.cmd` in the current source checkout. See [Windows quick start](windows-quick-start.md).
+Windows 用户可在当前源码目录双击 `Start-Market-Dashboard.cmd`。详见 [Windows 快速使用](windows-quick-start.md)。
 
 ## Optional fictional demo / 可选虚构演示
 
@@ -30,7 +30,7 @@ To remove only the records created by that script, run `$env:MARKET_DASHBOARD_DE
 | --- | --- | --- |
 | Stock monitor / 股票监控 | Follow your own watchlist and positions, inspect technical and risk context. / 跟踪自己的自选股和持仓，查看技术面与风险上下文。 | It is decision support, not an execution system. / 仅辅助决策，不执行交易。 |
 | Tracker / ETF 跟踪 | Review leveraged ETF premium against its underlying: current premium, history percentile, NAV quality, and close-price distribution. / 以溢折价为中心查看杠杆 ETF：当前溢价、历史分位、NAV 质量与收盘溢价分布。 | Verify currency, listing market, and source freshness yourself. / 请自行核验币种、上市市场与数据新鲜度。 |
-| Radar / 机会雷达 | Prioritize companies or changes worth researching across event, trend, and fundamental channels. / 按事件、趋势和基本面通道排出值得研究的公司或变化。 | A priority score is not a forecast, target price, or buy/sell instruction. / 研究优先级不是预测、目标价或买卖指令。 |
+| Radar / 机会雷达 | Review evidence and trade plans for eligible Hong Kong and U.S. stocks. / 查看港美普通股的研究证据、建议买区、止损和建议股数。 | Place trades through your broker and record fills in the dashboard. / 在券商成交后，可在看板登记买入。 |
 | Laboratory / 实验室 | Review replay, evidence, and shadow-validation health. / 查看回放、证据与影子验证健康度。 | It is read-only and cannot alter live risk settings. / 只读，不能修改正式风险设置。 |
 
 ## A safe Radar workflow / 安全使用机会雷达
@@ -43,8 +43,8 @@ To remove only the records created by that script, run `$env:MARKET_DASHBOARD_DE
    **查看确认与失效条件。** 条件是需要持续核验的问题，不是自动交易动作。
 4. **Compare with the stock monitor.** Check current technical/risk context separately. Radar cannot weaken an existing `REDUCE` or `CLOSE` risk condition.
    **再对照股票监控。** 单独查看技术面和风险上下文；机会雷达不能弱化既有的 `REDUCE` 或 `CLOSE` 风险条件。
-5. **Record your own decision elsewhere.** The public release does not connect to a broker or execute trades.
-   **自行记录决策。** 公开版不连接券商，也不会执行交易。
+5. **Record a fill.** After buying through your broker, record the fill from the Radar trade plan to add the stock to your watchlist and positions.
+   **登记成交。** 在券商买入后，回到雷达的交易计划填写成交股数和成交价，点击「记录买入并归入持仓」。
 
 ## Reading the Radar queue / 解读机会候选池
 

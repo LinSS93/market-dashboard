@@ -54,6 +54,10 @@ export function getRadarDb() {
   _db.pragma('journal_mode = WAL');
   _db.pragma('foreign_keys = ON');
   execSchema(_db);
+  _db.exec(`CREATE TABLE IF NOT EXISTS radar_daily_bars (
+    market TEXT NOT NULL, symbol TEXT NOT NULL, date TEXT NOT NULL,
+    open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL, close REAL NOT NULL,
+    volume REAL, source TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(market,symbol,date))`);
   return _db;
 }
 
@@ -369,6 +373,7 @@ function execSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_v2_candidates_market_symbol
       ON radar_v2_candidates(market, symbol);
 
+
     -- === 独立 outcome 账本 ===
     -- 与 candidates 解耦，避免主表膨胀。成熟后（1/3/5/20/60 日）回填。
     -- 连续成熟制：matured 0=未成熟 1=5日 2=20日 3=60日
@@ -389,6 +394,20 @@ function execSchema(db) {
       ON radar_v2_outcomes(matured, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_v2_outcomes_symbol
       ON radar_v2_outcomes(market, symbol, entry_date DESC);
+
+    -- === 回测/效果报告落库 ===
+    -- 与 scripts/backtest-v2-trend.mjs L530 的显式列 INSERT 兼容（alerts_json 占位 '[]'）。
+    -- radar_weekly_report.mjs 的候选池质量周报也写入此表（args_json.type='radar_weekly_quality'）。
+    CREATE TABLE IF NOT EXISTS radar_backtest_reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_at INTEGER NOT NULL,
+      args_json TEXT,
+      report_json TEXT,
+      summary_json TEXT,
+      alerts_json TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_backtest_reports_run_at
+      ON radar_backtest_reports(run_at DESC);
 
     -- === 独立K线缓存 ===
     -- 记录复权类型（adjust_type）和数据质量（data_suspect），
@@ -749,6 +768,10 @@ function execSchema(db) {
   try { db.exec(`ALTER TABLE radar_v2_candidates ADD COLUMN scoring_version TEXT`); } catch (e) { reportMigrationError(e); }
   try { db.exec(`ALTER TABLE radar_v2_candidates ADD COLUMN scoring_profile_name TEXT`); } catch (e) { reportMigrationError(e); }
   try { db.exec(`ALTER TABLE radar_v2_candidates ADD COLUMN scoring_weights_json TEXT`); } catch (e) { reportMigrationError(e); }
+  // Build only after legacy candidate tables acquire scoring_version.
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_v2_candidates_latest_score
+    ON radar_v2_candidates(market, symbol, scoring_version, created_at DESC, id DESC,
+      run_id, scoring_profile_name, scoring_weights_json, score)`);
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_v2_candidates_provenance
     ON radar_v2_candidates(scoring_version, scoring_profile_name)`); } catch (e) { reportMigrationError(e); }
   // trend_states migration: 补充 overheat_exit_streak / recovery_streak / below_breakout_streak 列。
@@ -950,7 +973,7 @@ function execSchema(db) {
     })();
   } catch (e) { reportMigrationError(e); }
 
-  // 旧大写 taxonomy 必须在运行库内实际迁移，不能依赖一个可能尚未执行过的
+  // 旧大写 taxonomy 必须在运行库内实际迁移，不能依赖一个可能未在 部署环境 执行过的
   // 手动清理脚本。该迁移保留原始事实与 dossier/outcome，只规范已知类型，或将
   // 无法可靠分类的 ROUTINE_DISCLOSURE 撤回并归档。
   normalizeLegacyEventTypes(db);
@@ -1003,7 +1026,7 @@ function execSchema(db) {
   // 每行 = 某 (market, symbol, channel) 的最新一条非 archived dossier。
   // 由 radar_v2_dossiers 上的 INSERT/UPDATE/DELETE 触发器增量维护（所有 producer
   // 与迁移路径自动覆盖，无需逐个改造写入口），候选池查询不再每次用窗口函数
-  // 重算全量 dossier（实测 /radar/queue 4.3s 的主要重算成本）。
+  // 重算全量 dossier（部署环境 实测 /radar/queue 4.3s 的主要重算成本）。
   // 启动时全量重建一次：幂等且可自愈（即使历史库触发器缺失/旧数据也能对齐）。
   db.exec(`
     CREATE TABLE IF NOT EXISTS radar_v2_channel_latest (
@@ -1241,6 +1264,13 @@ export const getOutcomesNeedingUpdate = lazyStmt(`
   LIMIT ?
 `);
 
+export const getMarketOutcomesNeedingUpdate = lazyStmt(`
+  SELECT * FROM radar_v2_outcomes
+  WHERE market = ? AND matured < 3 AND entry_date IS NOT NULL
+  ORDER BY updated_at ASC
+  LIMIT ?
+`);
+
 // 已过冷却期但尚未建立 outcome 的 candidate（次交易日开盘价回填入口）。
 // v2 以 candidate 为实体（无 dossier 概念），故名为 getCandidatesNeedingOutcomes。
 export const getCandidatesNeedingOutcomes = lazyStmt(`
@@ -1251,6 +1281,21 @@ export const getCandidatesNeedingOutcomes = lazyStmt(`
     AND c.created_at < ?
   ORDER BY c.created_at ASC
   LIMIT ?
+`);
+
+// 按 run 回填队列（效果账本饥饿修复）：只取本 run topN by score 中尚无 outcome 的行。
+// 全局 ASC 队列（上条）在 universe 扩容后日增 ~2600/run 的背景下永远饥饿，已弃用于主链路。
+export const getRunTopCandidatesNeedingOutcomes = lazyStmt(`
+  SELECT ranked.id, ranked.run_id, ranked.market, ranked.symbol, ranked.created_at
+  FROM (
+    SELECT c.id, c.run_id, c.market, c.symbol, c.created_at,
+           ROW_NUMBER() OVER (ORDER BY c.score DESC, c.id ASC) AS rank
+    FROM radar_v2_candidates c
+    WHERE c.run_id = @run_id AND c.market = @market
+  ) AS ranked
+  LEFT JOIN radar_v2_outcomes o ON ranked.id = o.candidate_id
+  WHERE ranked.rank <= @limit AND o.candidate_id IS NULL
+  ORDER BY ranked.rank
 `);
 
 // === K线缓存 ===
@@ -1646,6 +1691,16 @@ export const resetFailedItems = lazyStmt(`
   WHERE job_id = @job_id AND status IN ('failed', 'skipped') AND retry_count < @max_retries
 `);
 
+// 上游熔断时重置 item 重试预算（部署环境 2026-09-10 mass-skip 护栏）。
+// 熔断 = 确认是基础设施级故障（连续空 fetch），此时段产生的 skipped/failed
+// 不能消耗单标的重试预算，否则上游长时间故障会烧光预算，恢复后整日扫描
+// 永久终态、无法自愈。重置后 30 分钟退避到期的重试以满预算重新开始。
+export const resetItemRetryBudget = lazyStmt(`
+  UPDATE radar_v2_scan_items
+  SET retry_count = 0, updated_at = @updated_at
+  WHERE job_id = @job_id AND status IN ('failed', 'skipped')
+`);
+
 // === Dossier 管理（第二期：规则化字段 + 复核调度） ===
 
 // INSERT OR IGNORE：重跑不重复（change_key UNIQUE）。命中已存在行时不更新，
@@ -1730,6 +1785,37 @@ export const getDossierById = lazyStmt(`
 
 export const getDossierByChangeKey = lazyStmt(`
   SELECT * FROM radar_v2_dossiers WHERE change_key = ?
+`);
+
+// === screener 榜单通道（radar_screener_producer.mjs 专用） ===
+
+// screener universe：enabled universe 的 active equity（与 listResearchQueue 的
+// eligible_universe 同语义：asset_audit 普通股过滤在 JS 侧做，名称正则兜底走 classifyByNameFallback）
+export const screenerUniverseStmt = lazyStmt(`
+  SELECT DISTINCT m.market, m.symbol, m.name,
+         aa.asset_category AS audit_category
+  FROM radar_universe_members m
+  JOIN radar_universes u ON u.id = m.universe_id
+  LEFT JOIN radar_v2_asset_audit aa ON aa.market = m.market AND aa.symbol = m.symbol
+  WHERE u.enabled = 1
+    AND m.active = 1
+    AND m.instrument_type = 'equity'
+    AND m.market = @market
+`);
+
+// 单票近 N 根日 K（倒序取再反转）：52 周新高需 ≤252 根，动量/量比需 ≥21 根
+export const screenerBarsStmt = lazyStmt(`
+  SELECT date, open, high, low, close, volume, data_suspect
+  FROM radar_v2_bars
+  WHERE market = @market AND symbol = @symbol
+  ORDER BY date DESC
+  LIMIT @limit
+`);
+
+// 幂等短路：该市场该交易日是否已有 screener dossier
+export const screenerDossierCountForDateStmt = lazyStmt(`
+  SELECT COUNT(*) AS n FROM radar_v2_dossiers
+  WHERE channel = 'screener' AND market = @market AND change_key LIKE @date_pattern
 `);
 
 // 列表查询（按 status / market / channel 过滤，按 created_at DESC）

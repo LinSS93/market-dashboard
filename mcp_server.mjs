@@ -308,7 +308,7 @@ export async function registerMcpRoutes(req, res, p, u, readBody, deps) {
           const raw = await tool.handler(params.arguments || {});
           const text = typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify(jsonRpcResult(id, { content: [{ type: 'text', text }], isError: false })));
+          res.end(JSON.stringify(jsonRpcResult(id, { content: [{ type: 'text', text }], isError: raw?.ok === false })));
         } catch (e) {
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end(JSON.stringify(jsonRpcResult(id, {
