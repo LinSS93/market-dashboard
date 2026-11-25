@@ -31,14 +31,14 @@ import {
   insertDossier, getDossierByChangeKey, insertDossierSourceRef,
   getSourceRefsByDossier, getThesisCacheByDossier, upsertThesisCache,
   updateDossierThesis, getDossiersNeedingThesis, pruneThesisCacheStmt,
-} from '../radar_schema.mjs';
+} from '../src/radar_schema.mjs';
 import {
   THESIS_PROMPT_VERSION,
   buildThesisMessages, parseThesisResponse,
   generateThesisForDossier, produceThesesForDossiers,
   pruneThesisCache, getThesisStatus, isThesisEnabled,
   setApiKeyResolverForTest,
-} from '../radar_thesis_producer.mjs';
+} from '../src/radar_thesis_producer.mjs';
 
 let pass = 0, fail = 0;
 function assert(cond, msg) {

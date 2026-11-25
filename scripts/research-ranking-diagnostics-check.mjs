@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { summarizeResearchRankingFactors } from '../signal_scoring.mjs';
+import { summarizeResearchRankingFactors } from '../src/signal_scoring.mjs';
 
 let passed = 0;
 function equal(actual, expected, message) {

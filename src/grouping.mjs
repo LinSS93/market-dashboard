@@ -9,15 +9,13 @@
 // 缓存：随 LLM 解读 7 天 TTL 自然过期；PROMPT_VERSION 升级后旧版本不再被读取。
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
+import { MARKET_DB_PATH } from './project_paths.mjs';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const dataDir = join(__dirname, 'data');
 // A clean clone has no runtime database directory yet. Create it before the
 // module opens SQLite so both the server and isolated checks remain portable.
-mkdirSync(dataDir, { recursive: true });
-const db = new Database(join(dataDir, 'market_data.db'));
+mkdirSync(dirname(MARKET_DB_PATH), { recursive: true });
+const db = new Database(MARKET_DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('busy_timeout = 5000');
 

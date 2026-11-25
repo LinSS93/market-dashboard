@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { getGroupNewsRisk } from '../grouping.mjs';
+import { getGroupNewsRisk } from '../src/grouping.mjs';
 
 const unconfigured = getGroupNewsRisk({ market: 'US', symbol: 'TEST' });
 assert.equal(unconfigured.level, 'unavailable', 'missing group configuration must not be reported as normal risk');

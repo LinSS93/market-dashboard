@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { evaluateMeanReversionObservation } from '../stock_mean_reversion.mjs';
-import { accrueMeanReversionOutcomes, initializeMeanReversionLedger, recordMeanReversionObservations } from '../stock_mean_reversion_ledger.mjs';
+import { evaluateMeanReversionObservation } from '../src/stock_mean_reversion.mjs';
+import { accrueMeanReversionOutcomes, initializeMeanReversionLedger, recordMeanReversionObservations } from '../src/stock_mean_reversion_ledger.mjs';
 
 function analysis(overrides = {}) {
   return {

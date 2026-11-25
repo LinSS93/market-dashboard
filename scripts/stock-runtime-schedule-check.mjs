@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { getAllMarketStatus, getMarketStatus, nextMarketOpenAt, isTradingDate, lastCompletedTradingDate } from '../market_calendar.mjs';
+import { getAllMarketStatus, getMarketStatus, nextMarketOpenAt, isTradingDate, lastCompletedTradingDate } from '../src/market_calendar.mjs';
 import {
   nextStockMarketWakeDelay,
   shouldRunStockAnalysis,
   STOCK_MARKET_WAKE_MAX_MS,
   STOCK_QUOTE_POLL_ACTIVE_MS,
-} from '../stock_runtime_schedule.mjs';
+} from '../src/stock_runtime_schedule.mjs';
 
 let passed=0;
 function check(condition,message){assert.ok(condition,message);passed+=1;}

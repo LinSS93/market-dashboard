@@ -1,7 +1,9 @@
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { PROJECT_ROOT } from './project_paths.mjs';
 async function readLocalJson(name, fallback) {
   try {
-    return JSON.parse(await readFile(new URL('./data/' + name, import.meta.url), 'utf8'));
+    return JSON.parse(await readFile(join(PROJECT_ROOT, 'data', name), 'utf8'));
   } catch (error) {
     if (error.code === 'ENOENT') return fallback;
     throw error;

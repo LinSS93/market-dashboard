@@ -7,7 +7,7 @@ import {
   buildStockOpportunityAssessment,
   evaluateOpportunityFacts,
   opportunityPolicyEvaluation,
-} from '../stock_opportunity_model.mjs';
+} from '../src/stock_opportunity_model.mjs';
 
 let passed = 0;
 function equal(actual, expected, message) {
@@ -91,8 +91,8 @@ equal(evaluation.status, 'trend_continuation', 'ledger status preserves opportun
 
 // Runtime wiring contracts: a healthy model is useless if the stock DTO drops
 // it, and the weekly drift task must import the function it invokes.
-const stockEngineSource = readFileSync(resolve('stock_engine.mjs'), 'utf8');
-const serverSource = readFileSync(resolve('server.mjs'), 'utf8');
+const stockEngineSource = readFileSync(resolve('src/stock_engine.mjs'), 'utf8');
+const serverSource = readFileSync(resolve('src/server.mjs'), 'utf8');
 check(stockEngineSource.includes('opportunityModel: a.opportunityModel'), 'daily analysis DTO exposes the opportunity model to the stock UI');
 check(/import \{[^}]*refreshSignalDriftReport[^}]*\} from '\.\/stock_engine\.mjs';/s.test(serverSource), 'server imports the scheduled signal-drift refresh function');
 

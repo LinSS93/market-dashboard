@@ -20,13 +20,12 @@
 // 解算为有效实例），不会在模块加载阶段访问 db，安全。
 
 import { readFileSync, existsSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { PROJECT_ROOT } from './project_paths.mjs';
 import { httpGet } from "./quote.mjs";
 import { getMarketProfile, marketKlineParams, marketQuoteCode } from "./market_adapter.mjs";
 import { db, marketLocalToday, benchmarkFor } from "./stock_engine.mjs";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // lazyStmt(sql): 返回一个 Proxy，把方法调用转发到底层 prepared statement（首次访问时 prepare）。
 // 调用方仍可写 `insertKline.run(...)`、`getKline.all(...)`，与原顶级 const 模式完全兼容。
@@ -319,7 +318,7 @@ async function fetchKlineYahoo(symbol, market) {
 // tracked even when both Tencent and Yahoo are unavailable/rate-limited. Stores raw Yahoo
 // arrays; timestamps are converted to UTC dates at load time.
 function loadSeedKline(symbol) {
-  const p = join(__dirname, "data", "kline_seed", symbol + ".json");
+  const p = join(PROJECT_ROOT, "data", "kline_seed", symbol + ".json");
   if (!existsSync(p)) return null;
   try {
     const s = JSON.parse(readFileSync(p, "utf8"));

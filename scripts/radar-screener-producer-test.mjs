@@ -6,11 +6,11 @@ import Database from 'better-sqlite3';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setRadarDbForTest, clearRadarDbForTest } from '../radar_schema.mjs';
-import { produceScreenerDossiersForRun, isScreenerEnabledForMarket } from '../radar_screener_producer.mjs';
-import { lastCompletedTradingDate } from '../market_calendar.mjs';
-import { computeCompositeScore } from '../radar_query_api.mjs';
-import { buildScreenerDossierEnrichment } from '../radar_dossier_enrichment.mjs';
+import { setRadarDbForTest, clearRadarDbForTest } from '../src/radar_schema.mjs';
+import { produceScreenerDossiersForRun, isScreenerEnabledForMarket } from '../src/radar_screener_producer.mjs';
+import { lastCompletedTradingDate } from '../src/market_calendar.mjs';
+import { computeCompositeScore } from '../src/radar_query_api.mjs';
+import { buildScreenerDossierEnrichment } from '../src/radar_dossier_enrichment.mjs';
 
 let passed = 0;
 function ok(cond, name) { assert.ok(cond, name); passed += 1; console.log(`  PASS ${name}`); }

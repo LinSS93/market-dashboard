@@ -6,8 +6,8 @@
 import {
   computeTransition, createInitialState, buildChangeKey,
   STATES, THRESHOLDS, STATE_MACHINE_VERSION
-} from '../radar_trend_state_machine.mjs';
-import { rsi, extractCloses } from '../radar_indicators.mjs';
+} from '../src/radar_trend_state_machine.mjs';
+import { rsi, extractCloses } from '../src/radar_indicators.mjs';
 
 let pass = 0, fail = 0;
 function assert(cond, msg) {

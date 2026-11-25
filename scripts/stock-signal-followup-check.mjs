@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { buildSignalCloseFollowup, STOCK_SIGNAL_FOLLOWUP_HORIZONS } from '../stock_signal_followup.mjs';
+import { buildSignalCloseFollowup, STOCK_SIGNAL_FOLLOWUP_HORIZONS } from '../src/stock_signal_followup.mjs';
 
 let passed = 0;
 function equal(actual, expected, message) {

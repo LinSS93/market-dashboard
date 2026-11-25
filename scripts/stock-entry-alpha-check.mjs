@@ -6,12 +6,12 @@ import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
-import { initializeWatchlistHistory, reconcileCurrentWatchlist, addWatchlistMember, removeWatchlistMember } from '../stock_watchlist_history.mjs';
-import { initializeEntryObservationSchema, freezeEntryObservation, captureEntryPrices } from '../stock_entry_observation.mjs';
-import { calculateFrozenEntryOutcome, expectedTradingSessions, buildSameStockPairs, postCloseEvidenceAdmitted } from '../stock_entry_alpha.mjs';
-import { summarizeEntryAlpha, clusteredBootstrap, walkForwardMonthly } from '../stock_entry_alpha_statistics.mjs';
-import { capacityForEntryObservation } from '../stock_position_capacity.mjs';
-import { isTradingDate } from '../market_calendar.mjs';
+import { initializeWatchlistHistory, reconcileCurrentWatchlist, addWatchlistMember, removeWatchlistMember } from '../src/stock_watchlist_history.mjs';
+import { initializeEntryObservationSchema, freezeEntryObservation, captureEntryPrices } from '../src/stock_entry_observation.mjs';
+import { calculateFrozenEntryOutcome, expectedTradingSessions, buildSameStockPairs, postCloseEvidenceAdmitted } from '../src/stock_entry_alpha.mjs';
+import { summarizeEntryAlpha, clusteredBootstrap, walkForwardMonthly } from '../src/stock_entry_alpha_statistics.mjs';
+import { capacityForEntryObservation } from '../src/stock_position_capacity.mjs';
+import { isTradingDate } from '../src/market_calendar.mjs';
 
 const dir=mkdtempSync(join(tmpdir(),'stock-entry-alpha-'));
 const db=new Database(join(dir,'test.db'));

@@ -1,10 +1,10 @@
 // Network-free regression tests for Radar V2 fundamental research dossiers.
 
 import Database from 'better-sqlite3';
-import { setRadarDbForTest, clearRadarDbForTest, getDossierByChangeKey } from '../radar_schema.mjs';
-import { ensureRadarFinancialStore, upsertV2FinancialFact } from '../radar_financial_store.mjs';
-import { classifyFundamentalChange, createFundamentalDossier, produceFundamentalDossiers } from '../radar_fundamental_producer.mjs';
-import { FUNDAMENTAL_VERIFICATION_VERSION } from '../radar_dossier_enrichment.mjs';
+import { setRadarDbForTest, clearRadarDbForTest, getDossierByChangeKey } from '../src/radar_schema.mjs';
+import { ensureRadarFinancialStore, upsertV2FinancialFact } from '../src/radar_financial_store.mjs';
+import { classifyFundamentalChange, createFundamentalDossier, produceFundamentalDossiers } from '../src/radar_fundamental_producer.mjs';
+import { FUNDAMENTAL_VERIFICATION_VERSION } from '../src/radar_dossier_enrichment.mjs';
 
 let passed = 0, failed = 0;
 function assert(condition, message) {

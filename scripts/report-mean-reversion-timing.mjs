@@ -22,8 +22,8 @@ import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { calculateForwardOutcomes, OUTCOME_CONTRACT_VERSION } from '../outcome_contract.mjs';
-import { estimateRoundTripCostPct, STOCK_EXECUTION_COST_VERSION } from '../stock_execution_cost.mjs';
+import { calculateForwardOutcomes, OUTCOME_CONTRACT_VERSION } from '../src/outcome_contract.mjs';
+import { estimateRoundTripCostPct, STOCK_EXECUTION_COST_VERSION } from '../src/stock_execution_cost.mjs';
 
 const HORIZONS = [5, 10, 20];
 const PRIMARY_HORIZON = 10;

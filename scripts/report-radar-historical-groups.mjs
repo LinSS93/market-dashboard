@@ -4,7 +4,7 @@
 import Database from 'better-sqlite3';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { summarizeHistoricalResearchGroups } from '../radar_historical_validation.mjs';
+import { summarizeHistoricalResearchGroups } from '../src/radar_historical_validation.mjs';
 
 const marketArg = process.argv.find(arg => arg.startsWith('--market='));
 const market = marketArg?.slice('--market='.length)?.trim().toUpperCase() || null;

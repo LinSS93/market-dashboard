@@ -10,16 +10,16 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { setRadarDbForTest, clearRadarDbForTest, getRunTopCandidatesNeedingOutcomes } from '../radar_schema.mjs';
-import { loadUniverse, getUniverseStats } from '../radar_universe.mjs';
-import { adapterFor, getAllAdapters, loadDailyBars, setNowFnForTest, resetNowFnForTest, setDailySourceForTest } from '../radar_market.mjs';
-import { marketKlineParams } from '../market_adapter.mjs';
-import { scoreCandidate, scoreUniverse, fetchEventFacts, SCORING_PROFILE_VERSION, invalidateLiquidityAnchorCache } from '../radar_scoring.mjs';
-import { runScan, getScanStatus, resetThrottleForTest, setUpstreamBreakerThresholdForTest, setPostScanMaintenanceEnabledForTest } from '../radar_scanner.mjs';
-import { backfillOutcome, updateMaturedOutcomes, getPendingOutcomeSymbols } from '../radar_outcomes.mjs';
-import { getTopCandidates, getRunHistory, getScanStats, getCandidateDetail } from '../radar_query_api.mjs';
-import { scheduleRadar, stopRadar, getSchedulerState, resetSchedulerStateForTest, executeScanForTest, getRoundRobinStartForTest, advanceRoundRobinForTest, isQueueRunningForTest, processDailyQueueForTest, setMarketStatusOverrideForTest, setIsAfterCloseOverrideForTest, inBackoffForTest, hasResumableJobForTest } from '../radar_scheduler.mjs';
-import { resetRateLimiterForTest, getRateLimiterState, acquireToken, setNoDelayForTest } from '../radar_rate_limiter.mjs';
+import { setRadarDbForTest, clearRadarDbForTest, getRunTopCandidatesNeedingOutcomes } from '../src/radar_schema.mjs';
+import { loadUniverse, getUniverseStats } from '../src/radar_universe.mjs';
+import { adapterFor, getAllAdapters, loadDailyBars, setNowFnForTest, resetNowFnForTest, setDailySourceForTest } from '../src/radar_market.mjs';
+import { marketKlineParams } from '../src/market_adapter.mjs';
+import { scoreCandidate, scoreUniverse, fetchEventFacts, SCORING_PROFILE_VERSION, invalidateLiquidityAnchorCache } from '../src/radar_scoring.mjs';
+import { runScan, getScanStatus, resetThrottleForTest, setUpstreamBreakerThresholdForTest, setPostScanMaintenanceEnabledForTest } from '../src/radar_scanner.mjs';
+import { backfillOutcome, updateMaturedOutcomes, getPendingOutcomeSymbols } from '../src/radar_outcomes.mjs';
+import { getTopCandidates, getRunHistory, getScanStats, getCandidateDetail } from '../src/radar_query_api.mjs';
+import { scheduleRadar, stopRadar, getSchedulerState, resetSchedulerStateForTest, executeScanForTest, getRoundRobinStartForTest, advanceRoundRobinForTest, isQueueRunningForTest, processDailyQueueForTest, setMarketStatusOverrideForTest, setIsAfterCloseOverrideForTest, inBackoffForTest, hasResumableJobForTest } from '../src/radar_scheduler.mjs';
+import { resetRateLimiterForTest, getRateLimiterState, acquireToken, setNoDelayForTest } from '../src/radar_rate_limiter.mjs';
 
 // === 测试基础设施 ===
 
@@ -1794,8 +1794,8 @@ console.log('\n[25] trigger 隔离回归（manual=partial 不影响 scheduled_da
     resetLinkWatermarkForTest,
     fetchOfficialEvents,
     computeEventTiming,
-  } = await import('../radar_dossier_producer.mjs');
-  const { listDossiers, getDossierDetail } = await import('../radar_query_api.mjs');
+  } = await import('../src/radar_dossier_producer.mjs');
+  const { listDossiers, getDossierDetail } = await import('../src/radar_query_api.mjs');
 
   // 清空 dossier 表（防之前测试残留）
   db.exec(`DELETE FROM radar_v2_dossier_observations; DELETE FROM radar_v2_dossier_source_refs; DELETE FROM radar_v2_dossiers;`);
@@ -2809,7 +2809,7 @@ console.log('\n[25] trigger 隔离回归（manual=partial 不影响 scheduled_da
     assert(idx != null, `idx_v2_runs_link_pending 索引已创建（migration 后）`);
 
     // 验证 reconcilePendingRuns 能处理历史 pending run（空 candidate，标记 complete）
-    const { reconcilePendingRuns } = await import('../radar_dossier_producer.mjs');
+    const { reconcilePendingRuns } = await import('../src/radar_dossier_producer.mjs');
     const reconResult = reconcilePendingRuns({ limit: 10 });
     assert(reconResult.runs_processed === 1, `reconcilePendingRuns 处理历史 run（实际 ${reconResult.runs_processed}）`);
     const histRunAfter = migDb.prepare(`SELECT dossier_link_status FROM radar_v2_runs WHERE id = 1`).get();
@@ -2847,7 +2847,7 @@ console.log('\n[25] trigger 隔离回归（manual=partial 不影响 scheduled_da
     `).run(now - 60000, now - 30000).lastInsertRowid;
 
     // 验证：getPendingLinkRuns 排序优先未尝试任务，新 run 必须在前 500 内被选中
-    const { getPendingLinkRuns } = await import('../radar_schema.mjs');
+    const { getPendingLinkRuns } = await import('../src/radar_schema.mjs');
     const selected = getPendingLinkRuns.all(now, 500);
     const selectedIds = new Set(selected.map(r => r.id));
     assert(selected.length === 500, `本轮选中 500 条（实际 ${selected.length}）`);
@@ -2882,7 +2882,7 @@ console.log('\n[25] trigger 隔离回归（manual=partial 不影响 scheduled_da
 //       旧 ROUTINE_DISCLOSURE 特殊处理已移除（类型已废弃）。
 {
   console.log('\n[27] 事件 direction 原样保留回归');
-  const { createDossierFromEvent } = await import('../radar_dossier_producer.mjs');
+  const { createDossierFromEvent } = await import('../src/radar_dossier_producer.mjs');
 
   // 清空 dossier 表
   db.exec(`DELETE FROM radar_v2_dossier_observations; DELETE FROM radar_v2_dossier_source_refs; DELETE FROM radar_v2_dossiers;`);
@@ -2929,7 +2929,7 @@ console.log('\n[25] trigger 隔离回归（manual=partial 不影响 scheduled_da
 //       不出现在 /opportunities 列表中（INNER JOIN 门槛）。
 {
   console.log('\n[28] 无 candidate observation 不进入确认列表');
-  const { listOpportunities } = await import('../radar_query_api.mjs');
+  const { listOpportunities } = await import('../src/radar_query_api.mjs');
 
   // 清空表
   db.exec(`DELETE FROM radar_v2_dossier_observations; DELETE FROM radar_v2_dossier_source_refs; DELETE FROM radar_v2_dossiers; DELETE FROM radar_v2_candidates; DELETE FROM radar_v2_runs;`);
@@ -2982,7 +2982,7 @@ console.log('\n[25] trigger 隔离回归（manual=partial 不影响 scheduled_da
 // 前端 "全部状态" 改为并行拉取各 status 合并，依赖后端按 status 精确过滤。
 {
   console.log('\n[30] 研究档案 status 服务端筛选回归（200 active + 更早 confirmed/invalidated 可筛出）');
-  const { listDossiers } = await import('../radar_query_api.mjs');
+  const { listDossiers } = await import('../src/radar_query_api.mjs');
 
   // 清空 dossier 表
   db.exec(`DELETE FROM radar_v2_dossier_observations; DELETE FROM radar_v2_dossier_source_refs; DELETE FROM radar_v2_dossiers;`);
@@ -3058,7 +3058,7 @@ console.log('\n[25] trigger 隔离回归（manual=partial 不影响 scheduled_da
 // 临时回放、缓存重建等 run 即使有 candidate，也不能污染 dossier 的 observation 时间线。
 {
   console.log('\n[31] 非正式 trigger 不写入 dossier observation');
-  const { linkObservationsForRun, linkObservationsForMarket, resetLinkWatermarkForTest } = await import('../radar_dossier_producer.mjs');
+  const { linkObservationsForRun, linkObservationsForMarket, resetLinkWatermarkForTest } = await import('../src/radar_dossier_producer.mjs');
   const replayRunId = db.prepare(`INSERT INTO radar_v2_runs
     (market, trigger, status, started_at, completed_at, candidates_count)
     VALUES ('US', 'replay_preview', 'complete', ?, ?, 1)`)
@@ -3087,7 +3087,7 @@ console.log('\n[25] trigger 隔离回归（manual=partial 不影响 scheduled_da
 // 验证：distinct symbol 列表、通道分组、评分回退、行动标签为 positive/watch/risk（非 buy/avoid）
 {
   console.log('\n[32] 按股票聚合 API 回归');
-  const { listSymbolsAcrossChannels, getDossiersBySymbol } = await import('../radar_query_api.mjs');
+  const { listSymbolsAcrossChannels, getDossiersBySymbol } = await import('../src/radar_query_api.mjs');
 
   // 清空
   db.exec(`DELETE FROM radar_v2_dossier_observations; DELETE FROM radar_v2_dossier_source_refs; DELETE FROM radar_v2_dossiers; DELETE FROM radar_v2_candidates; DELETE FROM radar_v2_runs;`);
@@ -3147,7 +3147,7 @@ console.log('\n[25] trigger 隔离回归（manual=partial 不影响 scheduled_da
 // 验证：getV2Kline 从 radar_v2_bars 读取 OHLCV；listSparklines 批量返回收盘价
 {
   console.log('\n[33] V2 kline + sparkline API 回归');
-  const { getV2Kline, listSparklines } = await import('../radar_query_api.mjs');
+  const { getV2Kline, listSparklines } = await import('../src/radar_query_api.mjs');
 
   // 插入 5 条 V2 bars
   const insertBar = db.prepare(`INSERT INTO radar_v2_bars (market, symbol, date, open, high, low, close, volume, adjust_type, data_suspect, suspect_note, source, updated_at) VALUES ('US', 'KLINETEST', ?, ?, ?, ?, ?, ?, 'qfq', 0, NULL, 'test', ?)`);
@@ -3181,7 +3181,7 @@ console.log('\n[25] trigger 隔离回归（manual=partial 不影响 scheduled_da
 // 验证：listSymbolsAcrossChannels 按 available_at（非 created_at）判断最新
 {
   console.log('\n[34] available_at 排序回归');
-  const { listSymbolsAcrossChannels } = await import('../radar_query_api.mjs');
+  const { listSymbolsAcrossChannels } = await import('../src/radar_query_api.mjs');
 
   db.exec(`DELETE FROM radar_v2_dossier_observations; DELETE FROM radar_v2_dossier_source_refs; DELETE FROM radar_v2_dossiers;`);
 
@@ -3211,7 +3211,7 @@ console.log('\n[25] trigger 隔离回归（manual=partial 不影响 scheduled_da
 //   P1: 最新 dossier 无 observation 时，同通道旧 dossier 的有效评分会回退
 {
   console.log('\n[35] 评分 provenance + 同通道评分回退');
-  const { listSymbolsAcrossChannels } = await import('../radar_query_api.mjs');
+  const { listSymbolsAcrossChannels } = await import('../src/radar_query_api.mjs');
 
   db.exec(`DELETE FROM radar_v2_dossier_observations; DELETE FROM radar_v2_dossier_source_refs; DELETE FROM radar_v2_dossiers; DELETE FROM radar_v2_candidates; DELETE FROM radar_v2_runs;`);
 

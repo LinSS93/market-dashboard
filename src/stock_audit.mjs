@@ -4,15 +4,14 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdirSync, readdirSync, unlinkSync, statSync, existsSync, copyFileSync, renameSync } from "node:fs";
-import { join, dirname, isAbsolute } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, isAbsolute } from "node:path";
+import { PROJECT_ROOT } from './project_paths.mjs';
 import { createRuntimeMetricsStore } from "./runtime_metrics.mjs";
 import Database from "better-sqlite3";
 import { db, DB_PATH, computeAllPositionsFromEvents } from "./stock_engine.mjs";
 
 const execFileAsync = promisify(execFile);
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const BACKUP_DIR = join(__dirname, "backups");
+const BACKUP_DIR = join(PROJECT_ROOT, "backups");
 
 let lastBackupVerification = { status: 'unverified', file: null, checkedAt: null, error: null };
 
@@ -101,7 +100,7 @@ export async function verifyDatabaseBackup(file = null) {
   try {
     // 把全库 verification 放在子进程里跑，避免阻塞 HTTP。
     const script = "const Database=require('better-sqlite3');const db=new Database(process.argv[1],{readonly:true,fileMustExist:true});const result=db.pragma('quick_check',{simple:true});db.close();process.stdout.write(String(result));";
-    const { stdout } = await execFileAsync(process.execPath, ['-e', script, target], { cwd: __dirname, timeout: 120000, windowsHide: true });
+    const { stdout } = await execFileAsync(process.execPath, ['-e', script, target], { cwd: PROJECT_ROOT, timeout: 120000, windowsHide: true });
     const integrity = String(stdout || '').trim();
     lastBackupVerification = { status: String(integrity).toLowerCase() === 'ok' ? 'verified' : 'invalid', file: selected, checkedAt: Date.now(), error: String(integrity).toLowerCase() === 'ok' ? null : String(integrity) };
   } catch (error) { lastBackupVerification = { status: 'invalid', file: selected, checkedAt: Date.now(), error: String(error?.message || error) }; }
@@ -147,7 +146,7 @@ function resolveBackupPath(backupPath) {
   // 接受绝对路径或相对项目根的相对路径；纯文件名则默认在 backups/ 下
   let p = backupPath;
   if (!isAbsolute(p)) {
-    const candidate = join(__dirname, p);
+    const candidate = join(PROJECT_ROOT, p);
     p = existsSync(candidate) ? candidate : join(BACKUP_DIR, p);
   }
   if (!p.endsWith('.db') || !existsSync(p)) return null;

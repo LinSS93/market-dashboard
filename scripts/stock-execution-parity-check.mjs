@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-import { computeCompositeScore } from '../signal_scoring.mjs';
-import { arbitrateStockDecision, buildStockDecisionExplanation } from '../stock_decision_arbiter.mjs';
-import { computeV21StateForPosition, estimateRoundTripCostPct as backtestCost } from '../stock_backtest.mjs';
-import { estimateRoundTripCostPct as sharedCost } from '../stock_execution_cost.mjs';
-import { calculatePositionCapacity, capacityForEntryObservation } from '../stock_position_capacity.mjs';
-import { buildSwingDecisionContext, SIGNAL_ENGINE_VERSION, COMPATIBLE_SIGNAL_ENGINE_VERSIONS } from '../stock_engine.mjs';
+import { computeCompositeScore } from '../src/signal_scoring.mjs';
+import { arbitrateStockDecision, buildStockDecisionExplanation } from '../src/stock_decision_arbiter.mjs';
+import { computeV21StateForPosition, estimateRoundTripCostPct as backtestCost } from '../src/stock_backtest.mjs';
+import { estimateRoundTripCostPct as sharedCost } from '../src/stock_execution_cost.mjs';
+import { calculatePositionCapacity, capacityForEntryObservation } from '../src/stock_position_capacity.mjs';
+import { buildSwingDecisionContext, SIGNAL_ENGINE_VERSION, COMPATIBLE_SIGNAL_ENGINE_VERSIONS } from '../src/stock_engine.mjs';
 
 const failures = [];
 function check(condition, message) {

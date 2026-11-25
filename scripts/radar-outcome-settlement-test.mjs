@@ -14,12 +14,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { setRadarDbForTest } from '../radar_schema.mjs';
+import { setRadarDbForTest } from '../src/radar_schema.mjs';
 import {
   settleOutcomesForMarket,
   updateMaturedOutcomes,
   getPendingOutcomeSymbols,
-} from '../radar_outcomes.mjs';
+} from '../src/radar_outcomes.mjs';
 
 const tmpDir = mkdtempSync(join(tmpdir(), 'radar-outcome-settle-'));
 const db = new Database(join(tmpDir, 'test.db'));

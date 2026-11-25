@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { buildSignalProfileChartStudies, computeSignalProfileBundle } from '../stock_signal_profiles.mjs';
-import { buildStockStagePricePlan } from '../stock_stage_price_plan.mjs';
+import { buildSignalProfileChartStudies, computeSignalProfileBundle } from '../src/stock_signal_profiles.mjs';
+import { buildStockStagePricePlan } from '../src/stock_stage_price_plan.mjs';
 
 let passed = 0;
 const check = (condition, message) => { assert.ok(condition, message); passed += 1; };

@@ -17,7 +17,7 @@ import {
   computeEventPriority,
   generateEventVerification,
   buildEventDossierEnrichment,
-} from '../radar_dossier_enrichment.mjs';
+} from '../src/radar_dossier_enrichment.mjs';
 
 let pass = 0, fail = 0;
 function assert(cond, msg) {

@@ -13,17 +13,17 @@
 import {
   setRadarDbForTest, clearRadarDbForTest, insertDossier, getDossierByChangeKey, upsertBar,
   getActiveDossiersWithConditions, markDossierNeedsReview,
-} from '../radar_schema.mjs';
+} from '../src/radar_schema.mjs';
 import {
   computeMetricsAt,
   evaluateCondition,
   evaluateDossierConditions,
   processDossierEvaluations,
   findEntryIndex,
-} from '../radar_dossier_evaluator.mjs';
-import { processDueDossierReviews } from '../radar_dossier_outcomes.mjs';
-import { buildTrendDossierEnrichment } from '../radar_dossier_enrichment.mjs';
-import { createDossierFromEvent } from '../radar_dossier_producer.mjs';
+} from '../src/radar_dossier_evaluator.mjs';
+import { processDueDossierReviews } from '../src/radar_dossier_outcomes.mjs';
+import { buildTrendDossierEnrichment } from '../src/radar_dossier_enrichment.mjs';
+import { createDossierFromEvent } from '../src/radar_dossier_producer.mjs';
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';

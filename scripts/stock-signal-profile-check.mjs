@@ -12,8 +12,8 @@ import {
   profileSelectorEnabled,
   resolveSignalProfileSelection,
   signalForProfileScore,
-} from '../stock_signal_profiles.mjs';
-import { buildStockProfileStrategy } from '../stock_profile_strategy.mjs';
+} from '../src/stock_signal_profiles.mjs';
+import { buildStockProfileStrategy } from '../src/stock_profile_strategy.mjs';
 
 let assertions = 0;
 function check(value, message) {
@@ -181,9 +181,9 @@ equal(sharpRecoveryStrategy.timingAssessment.status, 'extended', 'a bullish SNXX
 equal(sharpRecoveryStrategy.setup.key, 'extended', 'the personality strategy itself owns the extended setup classification');
 equal(sharpRecoveryStrategy.action, 'WATCH', 'an extended bullish move is watched rather than promoted to an entry');
 
-const profileSource = readFileSync(resolve('stock_signal_profiles.mjs'), 'utf8');
-const strategySource = readFileSync(resolve('stock_profile_strategy.mjs'), 'utf8');
-const engineSource = readFileSync(resolve('stock_engine.mjs'), 'utf8');
+const profileSource = readFileSync(resolve('src/stock_signal_profiles.mjs'), 'utf8');
+const strategySource = readFileSync(resolve('src/stock_profile_strategy.mjs'), 'utf8');
+const engineSource = readFileSync(resolve('src/stock_engine.mjs'), 'utf8');
 const uiSource = readFileSync(resolve('app/stock.js'), 'utf8');
 equal(profileSource.includes('formalBalancedProfile'), false, 'balanced no longer bypasses the shared profile calculator');
 equal(strategySource.includes('balancedStrategy'), false, 'balanced no longer bypasses the shared strategy compiler');

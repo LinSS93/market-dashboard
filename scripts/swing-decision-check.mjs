@@ -5,9 +5,9 @@ import {
   applyCriticalDataGate,
   applyEventExecutionOverlay,
   buildSignalDriftReport,
-} from '../stock_engine.mjs';
-import { computeCompositeScore } from '../signal_scoring.mjs';
-import { arbitrateStockDecision, buildStockDecisionExplanation } from '../stock_decision_arbiter.mjs';
+} from '../src/stock_engine.mjs';
+import { computeCompositeScore } from '../src/signal_scoring.mjs';
+import { arbitrateStockDecision, buildStockDecisionExplanation } from '../src/stock_decision_arbiter.mjs';
 
 const failures = [];
 function check(condition, label) {

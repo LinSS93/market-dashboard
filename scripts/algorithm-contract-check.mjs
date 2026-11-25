@@ -1,7 +1,7 @@
-import { OUTCOME_CONTRACT_VERSION, calculateForwardOutcomes, resolveNextSessionExecution } from '../outcome_contract.mjs';
-import { buildCrossSectionalIcAudit } from '../signal_validation.mjs';
-import { resolveReplayStatus } from '../stock_engine.mjs';
-import { balancedVolumePriceVote } from '../stock_signal_profiles.mjs';
+import { OUTCOME_CONTRACT_VERSION, calculateForwardOutcomes, resolveNextSessionExecution } from '../src/outcome_contract.mjs';
+import { buildCrossSectionalIcAudit } from '../src/signal_validation.mjs';
+import { resolveReplayStatus } from '../src/stock_engine.mjs';
+import { balancedVolumePriceVote } from '../src/stock_signal_profiles.mjs';
 
 function assert(condition, message) {
   if (!condition) throw new Error(`algorithm-contract-check: ${message}`);

@@ -7,7 +7,7 @@ import {
   buildFundamentalPointInTimeSignals,
   evaluateFundamentalSignal,
   summarizeFundamentalValidation,
-} from '../radar_fundamental_validation.mjs';
+} from '../src/radar_fundamental_validation.mjs';
 
 const marketArg = process.argv.find(arg => arg.startsWith('--market='));
 const market = marketArg?.slice('--market='.length)?.trim().toUpperCase() || null;

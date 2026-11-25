@@ -1,4 +1,4 @@
-import { spearmanCorrelation, summarizeHistoricalCandidateRows, summarizeHistoricalResearchGroups } from '../radar_historical_validation.mjs';
+import { spearmanCorrelation, summarizeHistoricalCandidateRows, summarizeHistoricalResearchGroups } from '../src/radar_historical_validation.mjs';
 
 let pass = 0;
 let fail = 0;

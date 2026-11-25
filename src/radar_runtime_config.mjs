@@ -12,11 +12,10 @@
 //     keep working without any on-host edit.
 
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import { PROJECT_ROOT } from './project_paths.mjs';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DEFAULT_CONFIG_PATH = join(__dirname, 'config', 'market-dashboard.runtime.env');
+const DEFAULT_CONFIG_PATH = join(PROJECT_ROOT, 'config', 'market-dashboard.runtime.env');
 const LEGACY_ENV_PREFIX = 'RADAR_V2_';
 const ENV_PREFIX = 'RADAR_';
 const ALLOWED_KEYS = new Set([

@@ -23,14 +23,14 @@ import {
   getDossierOutcomesNeedingInit, getDossierOutcomesNeedingUpdate,
   getTrendDossiersMissingOutcomes,
   getDossiersDueForReview, markDossierNeedsReview, updateDossierStatus,
-} from '../radar_schema.mjs';
+} from '../src/radar_schema.mjs';
 import {
   backfillDossierOutcome,
   backfillPendingDossierOutcomes,
   updateMaturedDossierOutcomes,
   backfillMissingDossierOutcomes,
   processDueDossierReviews,
-} from '../radar_dossier_outcomes.mjs';
+} from '../src/radar_dossier_outcomes.mjs';
 
 let pass = 0, fail = 0;
 function assert(cond, msg) {

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { evaluateTrackerSignal, premiumSignal, providerDate, resolveUnderlyingDecision } from '../tracker_signal.mjs';
-import { resolveRegisteredTrackerProduct, registeredTrackerProductCount } from '../tracker_product_registry.mjs';
+import { evaluateTrackerSignal, premiumSignal, providerDate, resolveUnderlyingDecision } from '../src/tracker_signal.mjs';
+import { resolveRegisteredTrackerProduct, registeredTrackerProductCount } from '../src/tracker_product_registry.mjs';
 
 const failures=[];
 function check(cond,msg){if(cond)console.log('[PASS] '+msg);else{failures.push(msg);console.error('[FAIL] '+msg)}}

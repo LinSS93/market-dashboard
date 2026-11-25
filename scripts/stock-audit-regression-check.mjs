@@ -16,7 +16,10 @@ if (!process.argv.includes('--isolated-fixture')) {
   const fixture = mkdtempSync(join(tempRoot, 'stock-audit-regression-'));
   assert.equal(dirname(resolve(fixture)), tempRoot);
   try {
-    for (const name of readdirSync(root)) if (name.endsWith('.mjs')) copyFileSync(join(root, name), join(fixture, name));
+    mkdirSync(join(fixture, 'src'));
+    for (const name of readdirSync(join(root, 'src'))) {
+      if (name.endsWith('.mjs')) copyFileSync(join(root, 'src', name), join(fixture, 'src', name));
+    }
     mkdirSync(join(fixture, 'app'));
     for (const name of readdirSync(join(root, 'app'))) if (name.endsWith('.cjs')) copyFileSync(join(root, 'app', name), join(fixture, 'app', name));
     mkdirSync(join(fixture, 'scripts'));
@@ -34,12 +37,12 @@ if (!process.argv.includes('--isolated-fixture')) {
     rmSync(fixture, { recursive:true, force:true });
   }
 } else {
-  const engine = await import('../stock_engine.mjs');
-  const backtest = await import('../stock_backtest.mjs');
-  const { resolveBarExit } = await import('../outcome_contract.mjs');
-  const { createStockProfileStateStore } = await import('../stock_profile_state.mjs');
-  const { getTrackerPositions } = await import('../tracker_engine.mjs');
-  const { importTradesCsv } = await import('../personal_calibration.mjs');
+  const engine = await import('../src/stock_engine.mjs');
+  const backtest = await import('../src/stock_backtest.mjs');
+  const { resolveBarExit } = await import('../src/outcome_contract.mjs');
+  const { createStockProfileStateStore } = await import('../src/stock_profile_state.mjs');
+  const { getTrackerPositions } = await import('../src/tracker_engine.mjs');
+  const { importTradesCsv } = await import('../src/personal_calibration.mjs');
   const { db } = engine;
   const errors = [];
   const originalError = console.error;
@@ -88,7 +91,7 @@ if (!process.argv.includes('--isolated-fixture')) {
   const store=createStockProfileStateStore({db,getSystemSetting:engine.getSystemSetting,setSystemSetting:engine.setSystemSetting});
   store.retainInvalidation('AUDITLEDGER',{profileId:'balanced',invalidation:125,asOfDate:'2026-09-04'});
   const restored=spawnSync(process.execPath,['--input-type=module','-e',
-    "import {db} from './stock_engine.mjs'; console.log(db.prepare(\"SELECT invalidation_price FROM stock_position_profile_bindings WHERE symbol='AUDITLEDGER' AND ended_at IS NULL\").get().invalidation_price);"],{cwd:root,encoding:'utf8',timeout:10000});
+    "import {db} from './src/stock_engine.mjs'; console.log(db.prepare(\"SELECT invalidation_price FROM stock_position_profile_bindings WHERE symbol='AUDITLEDGER' AND ended_at IS NULL\").get().invalidation_price);"],{cwd:root,encoding:'utf8',timeout:10000});
   check(restored.status===0 && Number(restored.stdout.trim())>=125,'a fresh process reads the saved position stop');
   insertBar.run('AUDITLEDGER','CN','2026-09-07',100,101,99,100,1000000);
   await engine.analyzeAll();

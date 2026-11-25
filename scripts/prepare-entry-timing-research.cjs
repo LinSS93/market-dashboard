@@ -12,8 +12,9 @@ if (!/^runtime-[a-z0-9-]+$/.test(name || '') || !fs.existsSync(source)) {
 const target = path.join(researchRoot, name);
 if (fs.existsSync(target)) throw new Error(`runtime already exists: ${target}`);
 fs.mkdirSync(path.join(target, 'scripts'), { recursive: true });
-for (const name of fs.readdirSync(root).filter(value => value.endsWith('.mjs'))) {
-  fs.copyFileSync(path.join(root, name), path.join(target, name));
+fs.mkdirSync(path.join(target, 'src'));
+for (const name of fs.readdirSync(path.join(root, 'src')).filter(value => value.endsWith('.mjs'))) {
+  fs.copyFileSync(path.join(root, 'src', name), path.join(target, 'src', name));
 }
 for (const name of ['research-stock-entry-timing.mjs', 'compare-stock-entry-candidate.mjs',
   'check-entry-timing-research-runtime.mjs']) {

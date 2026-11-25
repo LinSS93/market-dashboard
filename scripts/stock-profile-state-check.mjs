@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { createStockProfileStateStore, initializeStockProfileStateSchema } from '../stock_profile_state.mjs';
+import { createStockProfileStateStore, initializeStockProfileStateSchema } from '../src/stock_profile_state.mjs';
 
 let passed = 0;
 function equal(actual, expected, message) {

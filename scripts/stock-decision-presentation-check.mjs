@@ -4,7 +4,7 @@ import {
   STOCK_DISPLAY_STATES,
   attachStockDecisionPresentation,
   resolveStockDecisionPresentation,
-} from '../stock_decision_presentation.mjs';
+} from '../src/stock_decision_presentation.mjs';
 
 let passed=0;
 function check(condition,message){assert.ok(condition,message);passed+=1;}

@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { initializeWatchlistHistory, reconcileCurrentWatchlist, addWatchlistMember, removeWatchlistMember, membershipAt } from '../stock_watchlist_history.mjs';
+import { initializeWatchlistHistory, reconcileCurrentWatchlist, addWatchlistMember, removeWatchlistMember, membershipAt } from '../src/stock_watchlist_history.mjs';
 
 const dir=mkdtempSync(join(tmpdir(),'stock-watchlist-history-'));
 const db=new Database(join(dir,'test.db'));

@@ -8,19 +8,19 @@ if (!runtime.replaceAll('\\', '/').includes('/outputs/entry-timing-research/runt
     !fs.existsSync(path.join(runtime, 'data', 'market_data.db'))) {
   throw new Error('candidate comparison must use isolated runtime');
 }
-const { db } = await import('../stock_engine.mjs');
-const { buildBacktestSeriesWithV21 } = await import('../stock_backtest.mjs');
-const { simulateEntryPath, priceObservation, hypotheticalEntryQuantity } = await import('../stock_entry_research.mjs');
-const { longestOutcomeStatus, entryOutcomeExclusion } = await import('../stock_entry_research_eligibility.mjs');
-const { ENTRY_CANDIDATES, ENTRY_CANDIDATE_VERSION } = await import('../stock_entry_candidate.mjs');
-const { evaluateShadowGate } = await import('../stock_entry_candidate_gate.mjs');
-const { estimateRoundTripCostPct } = await import('../stock_execution_cost.mjs');
+const { db } = await import('../src/stock_engine.mjs');
+const { buildBacktestSeriesWithV21 } = await import('../src/stock_backtest.mjs');
+const { simulateEntryPath, priceObservation, hypotheticalEntryQuantity } = await import('../src/stock_entry_research.mjs');
+const { longestOutcomeStatus, entryOutcomeExclusion } = await import('../src/stock_entry_research_eligibility.mjs');
+const { ENTRY_CANDIDATES, ENTRY_CANDIDATE_VERSION } = await import('../src/stock_entry_candidate.mjs');
+const { evaluateShadowGate } = await import('../src/stock_entry_candidate_gate.mjs');
+const { estimateRoundTripCostPct } = await import('../src/stock_execution_cost.mjs');
 const baselineReport = JSON.parse(fs.readFileSync(path.resolve(runtime, '..', 'baseline-2026-09-27.json')));
 const digest = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 if (baselineReport.version !== 'entry-timing-baseline-v1' ||
     baselineReport.source.sha256 !== digest(path.resolve(runtime, '..', '部署环境-source-2026-09-27.json.gz')) ||
-    baselineReport.code.engineSha256 !== digest(path.join(runtime, 'stock_engine.mjs')) ||
-    baselineReport.code.backtestSha256 !== digest(path.join(runtime, 'stock_backtest.mjs'))) {
+    baselineReport.code.engineSha256 !== digest(path.join(runtime, 'src', 'stock_engine.mjs')) ||
+    baselineReport.code.backtestSha256 !== digest(path.join(runtime, 'src', 'stock_backtest.mjs'))) {
   throw new Error('baseline source or engine identity changed; rerun the baseline first');
 }
 const candidate = ENTRY_CANDIDATES.pullback_confirmation_04;

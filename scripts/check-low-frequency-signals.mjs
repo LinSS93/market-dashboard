@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { createForwardReview } from '../low_frequency_review.mjs';
+import { createForwardReview } from '../src/low_frequency_review.mjs';
 import {
   computeLeaderMetrics,
   entryBlock,
@@ -8,9 +8,9 @@ import {
   isCommonEquityCandidate,
   selectTopDailyBuySymbols,
   strengthReader,
-} from '../low_frequency_signals.mjs';
-import { buildRadarTradePlan } from '../radar_trade_plan.mjs';
-import { isTradingDate } from '../market_calendar.mjs';
+} from '../src/low_frequency_signals.mjs';
+import { buildRadarTradePlan } from '../src/radar_trade_plan.mjs';
+import { isTradingDate } from '../src/market_calendar.mjs';
 
 // C1: Common-stock universe filter excludes 2x/3x ETFs and non-US/HK markets.
 assert.equal(isCommonEquityCandidate({ symbol: 'NVDA', market: 'US', name: 'NVIDIA Corp' }), true);

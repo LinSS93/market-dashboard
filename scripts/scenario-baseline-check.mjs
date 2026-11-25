@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { auditScenarioHistoricalBaseline } from '../scenario_baseline.mjs';
+import { auditScenarioHistoricalBaseline } from '../src/scenario_baseline.mjs';
 
 const failures = [];
 function check(condition, label) {

@@ -1,7 +1,7 @@
 // Explicit, bounded fundamental research producer.
 // Example: node scripts/produce-radar-fundamentals.mjs --market=US --lookback-days=45
 
-import { produceFundamentalDossiers } from '../radar_fundamental_producer.mjs';
+import { produceFundamentalDossiers } from '../src/radar_fundamental_producer.mjs';
 
 function option(name, fallback = null) {
   const value = process.argv.find(arg => arg.startsWith(`--${name}=`));

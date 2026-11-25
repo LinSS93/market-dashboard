@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import path from 'node:path';
-import { importTradesCsv, rebuildPersonalData, getPersonalOverview } from '../personal_calibration.mjs';
-import { getHistoricalAnalysisForDate, backfillPersonalSymbols, SIGNAL_ENGINE_VERSION } from '../stock_engine.mjs';
+import { importTradesCsv, rebuildPersonalData, getPersonalOverview } from '../src/personal_calibration.mjs';
+import { getHistoricalAnalysisForDate, backfillPersonalSymbols, SIGNAL_ENGINE_VERSION } from '../src/stock_engine.mjs';
 
 const arg = process.argv.find(x => x.startsWith('--file='));
 const file = path.resolve(arg ? arg.slice(7) : 'data/imports/user_trades_20260711.csv');

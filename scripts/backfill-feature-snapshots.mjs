@@ -1,6 +1,6 @@
-import { db, getWatchlist, getKline } from '../stock_engine.mjs';
-import { accrueFeatureSnapshotOutcomes, backfillHistoricalFeatureSnapshots } from '../stock_feature_snapshot_ledger.mjs';
-import { benchmarkFor } from '../market_adapter.mjs';
+import { db, getWatchlist, getKline } from '../src/stock_engine.mjs';
+import { accrueFeatureSnapshotOutcomes, backfillHistoricalFeatureSnapshots } from '../src/stock_feature_snapshot_ledger.mjs';
+import { benchmarkFor } from '../src/market_adapter.mjs';
 
 const args = Object.fromEntries(process.argv.slice(2).map(value => {
   const [key, raw = ''] = value.replace(/^--/, '').split('=', 2);

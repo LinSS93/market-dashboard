@@ -8,7 +8,7 @@ import {
   isCurrentSignalDriftReport,
   needsSignalDriftRefresh,
   selectInitialLiveDriftBaseline,
-} from '../stock_engine.mjs';
+} from '../src/stock_engine.mjs';
 
 const failures = [];
 function check(condition, message) {

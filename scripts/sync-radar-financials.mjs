@@ -1,7 +1,7 @@
 // Explicit one-way import of the retired financial archive into Radar V2.
 // It is deliberately a migration command, not a page-render side effect.
 
-import { importRetiredFinancialArchive, getV2FinancialStoreCoverage } from '../radar_financial_store.mjs';
+import { importRetiredFinancialArchive, getV2FinancialStoreCoverage } from '../src/radar_financial_store.mjs';
 
 const marketArg = process.argv.find(arg => arg.startsWith('--market='));
 const market = marketArg?.split('=')[1] || null;

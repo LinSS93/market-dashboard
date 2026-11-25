@@ -7,15 +7,15 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { setRadarDbForTest, clearRadarDbForTest } from '../radar_schema.mjs';
+import { setRadarDbForTest, clearRadarDbForTest } from '../src/radar_schema.mjs';
 import {
   backfillHistoricalMarketDay,
   backfillHistoricalCandidateOutcomes,
   getHistoricalTradingDates,
   marketCloseSnapshotAt,
-} from '../radar_history_backfill.mjs';
-import { fetchEventFactsAsOf } from '../radar_scoring.mjs';
-import { getDossierDetail } from '../radar_query_api.mjs';
+} from '../src/radar_history_backfill.mjs';
+import { fetchEventFactsAsOf } from '../src/radar_scoring.mjs';
+import { getDossierDetail } from '../src/radar_query_api.mjs';
 
 let pass = 0;
 let fail = 0;

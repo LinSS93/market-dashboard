@@ -42,10 +42,10 @@ const MIN_BARS = 65;  // 状态机要求的最小 K 线数
 const STEP_BARS = Math.max(args.minBars, MIN_BARS);
 
 // 延迟 import 避免循环依赖
-const { computeTransition, createInitialState, STATE_MACHINE_VERSION } = await import('../radar_trend_state_machine.mjs');
-const { buildTrendDossierEnrichment } = await import('../radar_dossier_enrichment.mjs');
-const { evaluateDossierConditions, computeMetricsAt } = await import('../radar_dossier_evaluator.mjs');
-const { getBarsForSymbol, getRadarDb } = await import('../radar_schema.mjs');
+const { computeTransition, createInitialState, STATE_MACHINE_VERSION } = await import('../src/radar_trend_state_machine.mjs');
+const { buildTrendDossierEnrichment } = await import('../src/radar_dossier_enrichment.mjs');
+const { evaluateDossierConditions, computeMetricsAt } = await import('../src/radar_dossier_evaluator.mjs');
+const { getBarsForSymbol, getRadarDb } = await import('../src/radar_schema.mjs');
 
 // 各市场基准（与 radar_dossier_outcomes.mjs BENCHMARK_SYMBOLS 一致）
 // HK symbol 用 5 位格式（与 radar_daily_bars 一致：'02800'）

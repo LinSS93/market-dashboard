@@ -10,12 +10,11 @@
 //   3) 前端列表提示（通过 /stock/economic-calendar 端点）
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
+import { MARKET_DB_PATH } from './project_paths.mjs';
 import { httpGet } from './quote.mjs';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DB_PATH = join(__dirname, 'data', 'market_data.db');
+const DB_PATH = MARKET_DB_PATH;
 mkdirSync(dirname(DB_PATH), { recursive: true });
 const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 小时
 const SCHEDULE_DEDUPE_KEY = 'economic-calendar:refresh';

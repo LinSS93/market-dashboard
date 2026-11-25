@@ -6,7 +6,7 @@ import {
   generateCompanyProfile,
   resetCompanyProfileDependenciesForTest,
   setCompanyProfileDependenciesForTest,
-} from '../llm_company_profile.mjs';
+} from '../src/llm_company_profile.mjs';
 
 let assertions = 0;
 function check(condition, message) {

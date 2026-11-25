@@ -4,7 +4,7 @@ import {
   migrateProfileShadowIdentity,
   migrateProfileShadowOutcomes,
   migrateStockSignalLogIdentity,
-} from '../stock_engine.mjs';
+} from '../src/stock_engine.mjs';
 
 const db = new Database(':memory:');
 

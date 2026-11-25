@@ -6,7 +6,7 @@
 import {
   clamp, safeNumber, sma, rsi, avgVolume, volumeRatio, maSlope,
   highestHigh, extractCloses, extractHighs, extractVolumes
-} from '../radar_indicators.mjs';
+} from '../src/radar_indicators.mjs';
 
 let pass = 0, fail = 0;
 function assert(cond, msg) {

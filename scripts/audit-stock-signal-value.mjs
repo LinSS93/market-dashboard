@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 只读审计：衡量股票监控的“状态变化”是否形成独立信息，不参与调参或写入正式决策。
 import Database from 'better-sqlite3';
-import { describeSignalTransition, snapshotFromStoredPayload } from '../stock_signal_transition.mjs';
+import { describeSignalTransition, snapshotFromStoredPayload } from '../src/stock_signal_transition.mjs';
 
 function option(name, fallback = null) {
   const prefix = `--${name}=`;

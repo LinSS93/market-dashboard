@@ -15,15 +15,15 @@ import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setRadarDbForTest, clearRadarDbForTest, releaseLeaseOwned } from '../radar_schema.mjs';
-import { setNowFnForTest, resetNowFnForTest } from '../radar_market.mjs';
-import { runScan, getScanRuntimeStatus, reconcileStaleScanJobs, reconcileNonTradingDayScanJobs, resetThrottleForTest } from '../radar_scanner.mjs';
-import { isTradingDate, lastCompletedTradingDate } from '../market_calendar.mjs';
+import { setRadarDbForTest, clearRadarDbForTest, releaseLeaseOwned } from '../src/radar_schema.mjs';
+import { setNowFnForTest, resetNowFnForTest } from '../src/radar_market.mjs';
+import { runScan, getScanRuntimeStatus, reconcileStaleScanJobs, reconcileNonTradingDayScanJobs, resetThrottleForTest } from '../src/radar_scanner.mjs';
+import { isTradingDate, lastCompletedTradingDate } from '../src/market_calendar.mjs';
 import {
   findNextDailyMarketForTest,
   resetSchedulerStateForTest,
   setMarketStatusOverrideForTest,
-} from '../radar_scheduler.mjs';
+} from '../src/radar_scheduler.mjs';
 
 let pass = 0, fail = 0;
 function assert(cond, msg) {

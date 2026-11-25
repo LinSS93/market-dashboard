@@ -1,6 +1,6 @@
 // Public-release safety default: opt in explicitly before any periodic
 // market/news collection, alerting, backup, or background analysis starts.
 if (String(process.env.MARKET_DASHBOARD_BACKGROUND_ENABLED ?? "").trim() === "") process.env.MARKET_DASHBOARD_BACKGROUND_ENABLED = "0";
-const { applyRadarRuntimeConfig } = await import("../radar_runtime_config.mjs");
+const { applyRadarRuntimeConfig } = await import("../src/radar_runtime_config.mjs");
 applyRadarRuntimeConfig();
-await import("../server.mjs");
+await import("../src/server.mjs");

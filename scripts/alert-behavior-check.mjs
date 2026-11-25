@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-import { advanceAlertState } from '../alert_logic.mjs';
-import { alertSignalLabel, normalizePersistedAlertSignal } from '../alert_engine.mjs';
+import { advanceAlertState } from '../src/alert_logic.mjs';
+import { alertSignalLabel, normalizePersistedAlertSignal } from '../src/alert_engine.mjs';
 
 const failures=[];
 function check(cond,msg){if(cond)console.log('[PASS] '+msg);else{failures.push(msg);console.error('[FAIL] '+msg)}}

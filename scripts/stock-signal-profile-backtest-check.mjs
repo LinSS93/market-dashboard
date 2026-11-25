@@ -4,7 +4,7 @@ import {
   profileStateSignature,
   selectNonOverlappingProfileEvents,
   shouldEmitProfileTransition,
-} from '../stock_signal_profile_backtest_utils.mjs';
+} from '../src/stock_signal_profile_backtest_utils.mjs';
 
 let passed = 0;
 function check(condition, message) {

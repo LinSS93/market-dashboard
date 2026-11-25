@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
-import { buildStockDataHealth } from '../stock_data_health.mjs';
+import { buildStockDataHealth } from '../src/stock_data_health.mjs';
 
 const failures = [];
 let assertions = 0;
@@ -46,7 +46,7 @@ const fresh = buildStockDataHealth({
 check(fresh.markets.CN.status === 'fresh' && fresh.markets.CN.label === '交易中', 'healthy open market must keep the calendar label');
 
 const stockUi = readFileSync(new URL('../app/stock.js', import.meta.url), 'utf8');
-const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+const server = readFileSync(new URL('../src/server.mjs', import.meta.url), 'utf8');
 // C6: Match current DashboardMarketStatus wiring in app/stock.js.
 check(stockUi.includes("['error','degraded'].includes(health?.status)") && stockUi.includes('problem ? health.label : st.label'), 'stock header must render data health over the calendar state');
 check(stockUi.includes('recheckDataHealth'), 'stock header must expose the manual recheck action');

@@ -23,11 +23,10 @@
 
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
+import { MARKET_DB_PATH } from './project_paths.mjs';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DB_PATH = join(__dirname, 'data', 'market_data.db');
+const DB_PATH = MARKET_DB_PATH;
 
 let _db = null;
 let _testDb = null;

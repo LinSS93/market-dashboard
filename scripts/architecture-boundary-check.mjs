@@ -17,22 +17,22 @@ const labClient = read('app/scenario-research.js');
 const stockJs = read('app/stock.js');
 const stockHtml = read('app/stock.html');
 const stockCss = read('app/stock.css');
-const server = read('server.mjs');
-const stockEngine = read('stock_engine.mjs');
-const entryAlpha = read('stock_entry_alpha.mjs');
-const entryStatistics = read('stock_entry_alpha_statistics.mjs');
+const server = read('src/server.mjs');
+const stockEngine = read('src/stock_engine.mjs');
+const entryAlpha = read('src/stock_entry_alpha.mjs');
+const entryStatistics = read('src/stock_entry_alpha_statistics.mjs');
 const entryCli = read('scripts/audit-stock-entry-alpha.mjs');
-const entryCost = read('stock_execution_cost.mjs');
-const stockDecisionArbiter = read('stock_decision_arbiter.mjs');
-const stockDecisionPresentation = read('stock_decision_presentation.mjs');
-const stockStagePricePlan = read('stock_stage_price_plan.mjs');
-const stockSignalProfiles = read('stock_signal_profiles.mjs');
+const entryCost = read('src/stock_execution_cost.mjs');
+const stockDecisionArbiter = read('src/stock_decision_arbiter.mjs');
+const stockDecisionPresentation = read('src/stock_decision_presentation.mjs');
+const stockStagePricePlan = read('src/stock_stage_price_plan.mjs');
+const stockSignalProfiles = read('src/stock_signal_profiles.mjs');
 const profileReviewCli = read('scripts/report-stock-profile-review.mjs');
 const radarIcCli = read('scripts/report-radar-cross-section-ic.mjs');
-const stockSignalContract = read('stock_signal_contract.mjs');
-const signalScoring = read('signal_scoring.mjs');
-const trackerSignal = read('tracker_signal.mjs');
-const trackerEngine = read('tracker_engine.mjs');
+const stockSignalContract = read('src/stock_signal_contract.mjs');
+const signalScoring = read('src/signal_scoring.mjs');
+const trackerSignal = read('src/tracker_signal.mjs');
+const trackerEngine = read('src/tracker_engine.mjs');
 const trackerClient = read('app/tracker.js');
 const boundaryDoc = read('docs/architecture-boundaries.md');
 const decisionSystemDoc = read('docs/decision-system.md');
@@ -47,17 +47,17 @@ assert(entryCapture.includes('executionAction:decision?.executionAction') &&
   !entryCapture.includes('executionAction:log?.execution_action'),
   'daily observation passes the current decision action separately from the preserved first log');
 assert(!entryAlpha.includes("from './stock_engine.mjs'") &&
-  !entryStatistics.includes('stock_engine.mjs') && !entryCli.includes("from '../stock_engine.mjs'") &&
+  !entryStatistics.includes('stock_engine.mjs') && !entryCli.includes("from '../src/stock_engine.mjs'") &&
   !entryCost.includes('stock_engine.mjs') && !entryCost.includes('better-sqlite3'),
   'read-only entry-alpha evaluation and shared costs do not import the production engine');
 assert(!server.includes("p === '/stock/entry-alpha'") &&
   boundaryDoc.includes('## 3.9 股票监控同股时机评估边界'),
   'entry-alpha remains offline research without a trading API');
-assert(!profileReviewCli.includes("from '../stock_engine.mjs'") && !profileReviewCli.includes('better-sqlite3')
+assert(!profileReviewCli.includes("from '../src/stock_engine.mjs'") && !profileReviewCli.includes('better-sqlite3')
   && profileReviewCli.includes('/stock/scenario-research/dashboard'),
   'profile-review CLI consumes the laboratory panel over read-only HTTP without importing the engine or opening a database');
 assert(radarIcCli.includes("{ readonly: true, fileMustExist: true }")
-  && !radarIcCli.includes("from '../stock_engine.mjs'") && !radarIcCli.includes('radar_scanner.mjs')
+  && !radarIcCli.includes("from '../src/stock_engine.mjs'") && !radarIcCli.includes('radar_scanner.mjs')
   && !radarIcCli.includes('radar_query_api.mjs'),
   'radar IC CLI opens the database read-only and never imports the production radar pipeline');
 const signalLifecycleEnd = stockEngine.indexOf('if (url.pathname === "/stock/signal-transition")', signalLifecycleStart);

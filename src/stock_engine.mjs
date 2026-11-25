@@ -3,7 +3,7 @@ import { readFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, statSync 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import Database from "better-sqlite3";
-import { fileURLToPath } from "node:url";
+import { MARKET_DB_PATH, PROJECT_ROOT } from './project_paths.mjs';
 import { dirname, join } from "node:path";
 import { httpGet, fetchQuote } from "./quote.mjs";
 import { getMarketStatus, lastCompletedTradingDate, nextMarketOpenAt } from "./market_calendar.mjs";
@@ -144,9 +144,8 @@ import {
   recordScenarioShadowSnapshots,
 } from "./scenario_shadow_ledger.mjs";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DB_PATH = join(__dirname, "data", "market_data.db");
-const BACKUP_DIR = join(__dirname, "backups");
+const DB_PATH = MARKET_DB_PATH;
+const BACKUP_DIR = join(PROJECT_ROOT, "backups");
 // A clean installation has no runtime directory.  Create it before any module
 // opens SQLite so first-run setup never depends on a pre-created data folder.
 mkdirSync(dirname(DB_PATH), { recursive: true });
@@ -4746,7 +4745,7 @@ export function stockHandler(req, res) {
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
   if (new URL(req.url, "http://localhost").pathname === "/vendor/echarts.min.js") {
-    const ef = join(__dirname, "vendor", "echarts.min.js");
+    const ef = join(PROJECT_ROOT, "vendor", "echarts.min.js");
     if (existsSync(ef)) { res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "public, max-age=86400" }); res.end(readFileSync(ef)); }
     else { res.writeHead(404); res.end("not found"); }
     return;
@@ -4834,7 +4833,7 @@ export function stockHandler(req, res) {
   }
 
   if (url.pathname === "/stock" || url.pathname === "/semiconductor") {
-    const semiFile = join(__dirname, "dashboard-semi.html");
+    const semiFile = join(PROJECT_ROOT, "dashboard-semi.html");
     if (existsSync(semiFile)) { const html = readFileSync(semiFile, "utf-8"); res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }); res.end(html); }
     else { res.writeHead(404); res.end("semi dashboard not found"); }
     return;
@@ -5768,7 +5767,7 @@ function importLegacyWatchlist() {
   try {
     const cnt = db.prepare("SELECT COUNT(*) c FROM stock_watchlist").get().c;
     if (cnt > 0) return;
-    for (const f of [join(__dirname, "app", "stock_watchlist.json"), join(__dirname, "app", "semi_watchlist.json")]) {
+    for (const f of [join(PROJECT_ROOT, "app", "stock_watchlist.json"), join(PROJECT_ROOT, "app", "semi_watchlist.json")]) {
       if (!existsSync(f)) continue;
       const arr = JSON.parse(readFileSync(f, "utf-8"));
       if (!Array.isArray(arr) || !arr.length) continue;

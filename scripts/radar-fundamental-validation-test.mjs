@@ -2,7 +2,7 @@ import {
   buildFundamentalPointInTimeSignals,
   evaluateFundamentalSignal,
   summarizeFundamentalValidation,
-} from '../radar_fundamental_validation.mjs';
+} from '../src/radar_fundamental_validation.mjs';
 
 let pass = 0;
 let fail = 0;

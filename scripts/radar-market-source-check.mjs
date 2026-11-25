@@ -3,8 +3,8 @@ import {
   adapterFor, loadDailyBars, setDailySourceForTest, classifyKlineFailure, resetEastmoneyStateForTest,
   normalizeHkSymbol, eastmoneySecids, yahooTicker, shouldCountAsProviderFailure,
   getEastmoneyStateForTest,
-} from '../radar_market.mjs';
-import { setNoDelayForTest, resetRateLimiterForTest } from '../radar_rate_limiter.mjs';
+} from '../src/radar_market.mjs';
+import { setNoDelayForTest, resetRateLimiterForTest } from '../src/radar_rate_limiter.mjs';
 
 const originalFetch = global.fetch;
 const urls = [];

@@ -12,7 +12,7 @@ import {
   migrateScenarioShadowLedger,
   recordScenarioCollectionRuns,
   recordScenarioShadowSnapshots,
-} from '../scenario_shadow_ledger.mjs';
+} from '../src/scenario_shadow_ledger.mjs';
 
 const failures = [];
 function check(condition, label) {

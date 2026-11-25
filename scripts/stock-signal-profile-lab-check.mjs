@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { db, evaluateProfileStrategyPath, getSignalProfileResearchDashboard, SIGNAL_ENGINE_VERSION } from '../stock_engine.mjs';
-import { OUTCOME_CONTRACT_VERSION } from '../outcome_contract.mjs';
-import { getSignalProfile } from '../stock_signal_profiles.mjs';
-import { STOCK_PROFILE_STRATEGY_VERSION } from '../stock_profile_strategy.mjs';
+import { db, evaluateProfileStrategyPath, getSignalProfileResearchDashboard, SIGNAL_ENGINE_VERSION } from '../src/stock_engine.mjs';
+import { OUTCOME_CONTRACT_VERSION } from '../src/outcome_contract.mjs';
+import { getSignalProfile } from '../src/stock_signal_profiles.mjs';
+import { STOCK_PROFILE_STRATEGY_VERSION } from '../src/stock_profile_strategy.mjs';
 
 let passed = 0;
 function check(value, message) {

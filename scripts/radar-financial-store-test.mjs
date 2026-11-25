@@ -1,14 +1,14 @@
 // Radar V2 financial timing/store regression tests.  Network-free by design.
 
 import Database from 'better-sqlite3';
-import { setRadarDbForTest, clearRadarDbForTest } from '../radar_schema.mjs';
+import { setRadarDbForTest, clearRadarDbForTest } from '../src/radar_schema.mjs';
 import {
   localDateTimeToEpoch, marketCloseOnDate, deriveFinancialAvailability,
-} from '../radar_financial_timing.mjs';
+} from '../src/radar_financial_timing.mjs';
 import {
   ensureRadarFinancialStore, importRetiredFinancialArchive,
   getV2FinancialHistory, getV2FinancialStoreCoverage,
-} from '../radar_financial_store.mjs';
+} from '../src/radar_financial_store.mjs';
 
 let passed = 0;
 let failed = 0;

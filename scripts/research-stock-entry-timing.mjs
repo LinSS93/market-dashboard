@@ -11,12 +11,12 @@ if (!runtime.replaceAll('\\', '/').includes('/outputs/entry-timing-research/runt
     !fs.existsSync(path.join(runtime, 'data', 'market_data.db'))) {
   throw new Error('research must run from an isolated runtime database');
 }
-const { db, SIGNAL_ENGINE_VERSION } = await import('../stock_engine.mjs');
-const { buildBacktestSeriesWithV21, simulatePolicySymbol } = await import('../stock_backtest.mjs');
-const { simulateEntryPath, priceObservation, hypotheticalEntryQuantity, RESEARCH_HORIZONS } = await import('../stock_entry_research.mjs');
-const { longestOutcomeStatus, entryOutcomeExclusion } = await import('../stock_entry_research_eligibility.mjs');
-const { ENTRY_CANDIDATES } = await import('../stock_entry_candidate.mjs');
-const { estimateRoundTripCostPct } = await import('../stock_execution_cost.mjs');
+const { db, SIGNAL_ENGINE_VERSION } = await import('../src/stock_engine.mjs');
+const { buildBacktestSeriesWithV21, simulatePolicySymbol } = await import('../src/stock_backtest.mjs');
+const { simulateEntryPath, priceObservation, hypotheticalEntryQuantity, RESEARCH_HORIZONS } = await import('../src/stock_entry_research.mjs');
+const { longestOutcomeStatus, entryOutcomeExclusion } = await import('../src/stock_entry_research_eligibility.mjs');
+const { ENTRY_CANDIDATES } = await import('../src/stock_entry_candidate.mjs');
+const { estimateRoundTripCostPct } = await import('../src/stock_execution_cost.mjs');
 
 const segments = [
   { id: 'development', from: '2024-09-01', to: '2025-09-30' },
@@ -157,8 +157,8 @@ const result = { version: 'entry-timing-baseline-v1', createdAt: new Date().toIS
   source: { path: sourcePath, sha256: hash(fs.readFileSync(sourcePath)),
     maxSignalId: 3105822, dataCutoff: '2026-09-25', watchlistMode: 'current_watchlist_historical_proxy' },
   code: { engineVersion: SIGNAL_ENGINE_VERSION,
-    engineSha256: hash(fs.readFileSync(path.join(runtime, 'stock_engine.mjs'))),
-    backtestSha256: hash(fs.readFileSync(path.join(runtime, 'stock_backtest.mjs'))),
+    engineSha256: hash(fs.readFileSync(path.join(runtime, 'src', 'stock_engine.mjs'))),
+    backtestSha256: hash(fs.readFileSync(path.join(runtime, 'src', 'stock_backtest.mjs'))),
     profileIdentities: [...profileIdentities].map(value => JSON.parse(value)) },
   assumptions: ['neutral historical news/quote/execution risk', 'simulated position, not actual holdings',
     'next valid session open required', 'current watchlist applied retrospectively', 'historical bars not corporate-action-verified'],

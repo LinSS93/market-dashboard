@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { FEATURE_SNAPSHOT_ORIGINS, buildDailyFeaturePayload, evaluateTechnicalResearchPolicy } from '../stock_feature_snapshot.mjs';
-import { accrueFeatureSnapshotOutcomes, backfillHistoricalFeatureSnapshots, initializeFeatureSnapshotLedger, recordLiveFeatureSnapshots } from '../stock_feature_snapshot_ledger.mjs';
+import { FEATURE_SNAPSHOT_ORIGINS, buildDailyFeaturePayload, evaluateTechnicalResearchPolicy } from '../src/stock_feature_snapshot.mjs';
+import { accrueFeatureSnapshotOutcomes, backfillHistoricalFeatureSnapshots, initializeFeatureSnapshotLedger, recordLiveFeatureSnapshots } from '../src/stock_feature_snapshot_ledger.mjs';
 
 function bars(count = 70, base = 100) {
   const firstDay = Date.UTC(2026, 4, 1);

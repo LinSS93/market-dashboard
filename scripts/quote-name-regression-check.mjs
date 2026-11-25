@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { resolveQuoteName } from '../quote.mjs';
+import { resolveQuoteName } from '../src/quote.mjs';
 
 // INT 在美股行情源仍返回旧代码 World Fuel Services 的名称；本地映射必须纠正为当前标的。
 const INT_NAME = 'Corgi 每日 2 倍做多 INTC 主动型 ETF';

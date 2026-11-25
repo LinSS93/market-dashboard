@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
-import { setRadarDbForTest, clearRadarDbForTest } from '../radar_schema.mjs';
-import { loadUniverse } from '../radar_universe.mjs';
+import { setRadarDbForTest, clearRadarDbForTest } from '../src/radar_schema.mjs';
+import { loadUniverse } from '../src/radar_universe.mjs';
 
 const db = new Database(':memory:');
 db.exec(`

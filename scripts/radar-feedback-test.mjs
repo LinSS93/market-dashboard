@@ -20,13 +20,13 @@ import {
   setRadarDbForTest, clearRadarDbForTest,
   insertRun, insertCandidate, insertOutcome, updateOutcomeReturns,
   getActiveScoringProfile, getAllScoringProfiles,
-} from '../radar_schema.mjs';
+} from '../src/radar_schema.mjs';
 import {
   suggestWeights, computeDimensionIc, computeCompositeIc,
   tryGenerateShadow, applyShadow, rollbackToDefault, getFeedbackStatus,
   collectFeedbackSamples,
-} from '../radar_feedback.mjs';
-import { getActiveWeights, invalidateActiveWeightsCache, DEFAULT_WEIGHTS } from '../radar_scoring.mjs';
+} from '../src/radar_feedback.mjs';
+import { getActiveWeights, invalidateActiveWeightsCache, DEFAULT_WEIGHTS } from '../src/radar_scoring.mjs';
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';

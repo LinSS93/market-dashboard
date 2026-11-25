@@ -2,8 +2,8 @@
  * Seeds a deliberately fictional, local-only Radar demonstration.
  * It never fetches a provider, calls an LLM, or reuses production data.
  */
-import { getRadarDb } from '../radar_schema.mjs';
-import { SCORING_PROFILE_VERSION } from '../radar_scoring.mjs';
+import { getRadarDb } from '../src/radar_schema.mjs';
+import { SCORING_PROFILE_VERSION } from '../src/radar_scoring.mjs';
 
 const DEMO_ENABLED = process.env.MARKET_DASHBOARD_DEMO === '1';
 const CLEAR_ONLY = process.argv.includes('--clear');

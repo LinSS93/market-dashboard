@@ -15,10 +15,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { setRadarDbForTest, clearRadarDbForTest } from '../radar_schema.mjs';
-import { produceEventFacts, normalizeEventTypeForV2 } from '../radar_event_facts_producer.mjs';
-import { produceEventDossiers, resetLinkWatermarkForTest } from '../radar_dossier_producer.mjs';
-import { fetchEventFacts } from '../radar_scoring.mjs';
+import { setRadarDbForTest, clearRadarDbForTest } from '../src/radar_schema.mjs';
+import { produceEventFacts, normalizeEventTypeForV2 } from '../src/radar_event_facts_producer.mjs';
+import { produceEventDossiers, resetLinkWatermarkForTest } from '../src/radar_dossier_producer.mjs';
+import { fetchEventFacts } from '../src/radar_scoring.mjs';
 
 // === 测试基础设施 ===
 

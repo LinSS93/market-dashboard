@@ -3,7 +3,7 @@ import {
   buildStockPricePlan,
   STOCK_PRICE_PLAN_VERSION,
   stockPricePlanPolicy,
-} from '../stock_price_plan.mjs';
+} from '../src/stock_price_plan.mjs';
 
 let passed = 0;
 const check = (condition, message) => { assert.ok(condition, message); passed += 1; };

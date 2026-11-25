@@ -1,13 +1,13 @@
 // Research-only comparison for the three fixed stock-signal profiles.
 // It never writes profile rows, formal signals, outcomes, or preferences.
-import { analyzeRowsForBacktest, benchmarkFor, db, getKline, getWatchlist } from '../stock_engine.mjs';
-import { calculateForwardOutcomes, OUTCOME_CONTRACT_VERSION } from '../outcome_contract.mjs';
-import { computeSignalProfileBundle } from '../stock_signal_profiles.mjs';
+import { analyzeRowsForBacktest, benchmarkFor, db, getKline, getWatchlist } from '../src/stock_engine.mjs';
+import { calculateForwardOutcomes, OUTCOME_CONTRACT_VERSION } from '../src/outcome_contract.mjs';
+import { computeSignalProfileBundle } from '../src/stock_signal_profiles.mjs';
 import {
   profileStateSignature,
   selectNonOverlappingProfileEvents,
   shouldEmitProfileTransition,
-} from '../stock_signal_profile_backtest_utils.mjs';
+} from '../src/stock_signal_profile_backtest_utils.mjs';
 
 const HORIZONS = [1, 3, 5, 10, 20];
 const PROFILE_IDS = ['responsive', 'balanced', 'confirmed'];

@@ -4,12 +4,11 @@
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { MARKET_DB_PATH } from './project_paths.mjs';
 import { httpGet } from './quote.mjs';
 import { readControlNewsStorage } from './control_status_read.mjs';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DB_PATH = join(__dirname, 'data', 'market_data.db');
+const DB_PATH = MARKET_DB_PATH;
 mkdirSync(dirname(DB_PATH), { recursive: true });
 const HKEX_ROOT = 'https://www1.hkexnews.hk';
 const HKEX_FEED_ROOT = `${HKEX_ROOT}/ncms/json/eds`;

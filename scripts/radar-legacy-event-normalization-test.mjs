@@ -2,7 +2,7 @@
 // event types without deleting historical facts, dossiers, or audit evidence.
 
 import Database from 'better-sqlite3';
-import { clearRadarDbForTest, setRadarDbForTest } from '../radar_schema.mjs';
+import { clearRadarDbForTest, setRadarDbForTest } from '../src/radar_schema.mjs';
 
 let passed = 0;
 function assert(condition, message) {

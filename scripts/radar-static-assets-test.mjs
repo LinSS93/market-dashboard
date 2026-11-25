@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const radarScriptPath = resolve(root, 'app', 'radar.js');
-const serverPath = resolve(root, 'server.mjs');
+const serverPath = resolve(root, 'src/server.mjs');
 const radarScript = readFileSync(radarScriptPath, 'utf8');
 const serverSource = readFileSync(serverPath, 'utf8');
 const servedRadarModulePattern = /^\/radar-[a-z0-9-]+\.mjs$/i;
@@ -32,7 +32,7 @@ for (const specifier of imports) {
   check(servedRadarModulePattern.test(`/${filename}`), `前端模块可被静态路由匹配：${filename}`);
 }
 
-check(!servedRadarModulePattern.test('/../server.mjs'), '静态模块路由不接受路径穿越');
+check(!servedRadarModulePattern.test('/../src/server.mjs'), '静态模块路由不接受路径穿越');
 check(!servedRadarModulePattern.test('/stock-signal.mjs'), '静态模块路由不暴露非 Radar V2 模块');
 
 console.log(`${assertions}/${assertions} assertions passed`);

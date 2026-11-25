@@ -21,15 +21,14 @@
 import Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
+import { MARKET_DB_PATH } from './project_paths.mjs';
 import { getApiKey } from './stock_engine.mjs';
 import { getGroupNewsRisk, NEWS_RISK_PROMPT_VERSION } from './grouping.mjs';
 
 export { getGroupNewsRisk };
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DB_PATH = join(__dirname, 'data', 'market_data.db');
+const DB_PATH = MARKET_DB_PATH;
 mkdirSync(dirname(DB_PATH), { recursive: true });
 
 const db = new Database(DB_PATH);

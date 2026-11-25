@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { computePositionFromEventRows, validateTradeDate } from '../stock_trade_ledger.mjs';
+import { computePositionFromEventRows, validateTradeDate } from '../src/stock_trade_ledger.mjs';
 
 const result = computePositionFromEventRows([
   { type:'buy', shares:100, price:10, fee:5, created_at:1000 },

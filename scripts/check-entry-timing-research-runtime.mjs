@@ -8,9 +8,9 @@ if (!runtime.replaceAll('\\', '/').includes('/outputs/entry-timing-research/runt
     !fs.existsSync(path.join(runtime, 'data', 'market_data.db'))) {
   throw new Error('runtime regression check requires an isolated research database');
 }
-const { buildBacktestSeriesWithV21 } = await import('../stock_backtest.mjs');
-const { simulateEntryPath, priceObservation } = await import('../stock_entry_research.mjs');
-const { entryOutcomeExclusion } = await import('../stock_entry_research_eligibility.mjs');
+const { buildBacktestSeriesWithV21 } = await import('../src/stock_backtest.mjs');
+const { simulateEntryPath, priceObservation } = await import('../src/stock_entry_research.mjs');
+const { entryOutcomeExclusion } = await import('../src/stock_entry_research_eligibility.mjs');
 
 const korean = buildBacktestSeriesWithV21('000660', 'KR', 600);
 const koreanPath = simulateEntryPath(korean);

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { ENTRY_CANDIDATES, entryCandidateDecision } from '../stock_entry_candidate.mjs';
-import { evaluateShadowGate } from '../stock_entry_candidate_gate.mjs';
-import { calculateForwardOutcomes } from '../outcome_contract.mjs';
-import { entryBuyQuantity } from '../stock_entry_research_fill.mjs';
-import { longestOutcomeStatus, entryOutcomeExclusion, filledEntry } from '../stock_entry_research_eligibility.mjs';
+import { ENTRY_CANDIDATES, entryCandidateDecision } from '../src/stock_entry_candidate.mjs';
+import { evaluateShadowGate } from '../src/stock_entry_candidate_gate.mjs';
+import { calculateForwardOutcomes } from '../src/outcome_contract.mjs';
+import { entryBuyQuantity } from '../src/stock_entry_research_fill.mjs';
+import { longestOutcomeStatus, entryOutcomeExclusion, filledEntry } from '../src/stock_entry_research_eligibility.mjs';
 
 const analysis = { signalProfiles: { profiles: { balanced: { strategy: { setup: { key: 'trend_pullback' } } } } } };
 const finalDecision = { executionAction: 'OPEN', profileId: 'balanced', chaseGate: { extension: .2 } };

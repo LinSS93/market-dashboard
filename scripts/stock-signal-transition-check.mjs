@@ -1,4 +1,4 @@
-import { describeSignalTransition, snapshotFromAnalysis, snapshotFromStoredPayload } from '../stock_signal_transition.mjs';
+import { describeSignalTransition, snapshotFromAnalysis, snapshotFromStoredPayload } from '../src/stock_signal_transition.mjs';
 
 let failures = 0;
 function check(condition, label) {

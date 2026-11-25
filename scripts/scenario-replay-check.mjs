@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { evaluateScenarioPath, splitScenarioEventsBySymbolTime } from '../scenario_outcome_contract.mjs';
+import { evaluateScenarioPath, splitScenarioEventsBySymbolTime } from '../src/scenario_outcome_contract.mjs';
 
 const failures = [];
 function check(condition, label) {

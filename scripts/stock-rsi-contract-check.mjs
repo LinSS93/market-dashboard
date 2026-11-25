@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
-import { RSI_PERIODS, rsiWilder, rsiWilderAt } from '../indicators.mjs';
+import { RSI_PERIODS, rsiWilder, rsiWilderAt } from '../src/indicators.mjs';
 
 const failures = [];
 function check(condition, message) {
@@ -28,9 +28,9 @@ check(rsiWilder(next, 24) === null, 'RSI24 remains unavailable until 24 changes 
 check(rsiWilder([10, 11, 12, 13, 14, 15, 16], 6) === 100,
   'RSI6 returns 100 for an all-gain sequence');
 
-const engine = readFileSync(new URL('../stock_engine.mjs', import.meta.url), 'utf8');
-const profiles = readFileSync(new URL('../stock_signal_profiles.mjs', import.meta.url), 'utf8');
-const strategies = readFileSync(new URL('../stock_profile_strategy.mjs', import.meta.url), 'utf8');
+const engine = readFileSync(new URL('../src/stock_engine.mjs', import.meta.url), 'utf8');
+const profiles = readFileSync(new URL('../src/stock_signal_profiles.mjs', import.meta.url), 'utf8');
+const strategies = readFileSync(new URL('../src/stock_profile_strategy.mjs', import.meta.url), 'utf8');
 const stockUi = readFileSync(new URL('../app/stock.js', import.meta.url), 'utf8');
 check(!engine.includes('rsi14') && !engine.includes('RSI14'),
   'stock signal engine must not retain an RSI14 input or label');

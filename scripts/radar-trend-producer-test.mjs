@@ -19,9 +19,9 @@ import {
   getTrendJobsNeedingAction,
   acquireTrendLease, releaseTrendLease,
   insertDossier, getDossierByChangeKey, markDossierLegacyVersion,
-} from '../radar_schema.mjs';
-import { lastCompletedTradingDate } from '../market_calendar.mjs';
-import { enqueueBackgroundTask } from '../background_tasks.mjs';
+} from '../src/radar_schema.mjs';
+import { lastCompletedTradingDate } from '../src/market_calendar.mjs';
+import { enqueueBackgroundTask } from '../src/background_tasks.mjs';
 import {
   validateBarsForTrend,
   processTrendForSymbol,
@@ -36,7 +36,7 @@ import {
   fullTrendReconcile,
   runTrendJobAsync,
   produceTrendStatesForRunAsync,
-} from '../radar_trend_producer.mjs';
+} from '../src/radar_trend_producer.mjs';
 
 let pass = 0, fail = 0;
 function assert(cond, msg) {
@@ -1433,7 +1433,7 @@ console.log('=== G.37 旧 dossier（无条件 JSON）标记 legacy_unknown，不
   assert(oldDossier.verification_version === null, '旧 dossier verification_version = null');
 
   // P1: 无条件 JSON 的旧 dossier 标记为 legacy_unknown（不虚构"已知的 v1 无窗口规则"）
-  const { TREND_LEGACY_UNKNOWN_VERSION } = await import('../radar_dossier_enrichment.mjs');
+  const { TREND_LEGACY_UNKNOWN_VERSION } = await import('../src/radar_dossier_enrichment.mjs');
   markDossierLegacyVersion.run({
     id: oldDossier.id,
     verification_version: TREND_LEGACY_UNKNOWN_VERSION,
@@ -1485,7 +1485,7 @@ console.log('=== G.38 半残缺 dossier 标记 legacy，不补 next_review_at ==
   assert(halfDossier.next_review_at === null, '半残缺 dossier next_review_at = null');
 
   // P1-B：半残缺 dossier 也标记 legacy，不补 next_review_at / 不改写 JSON
-  const { TREND_LEGACY_VERSION } = await import('../radar_dossier_enrichment.mjs');
+  const { TREND_LEGACY_VERSION } = await import('../src/radar_dossier_enrichment.mjs');
   markDossierLegacyVersion.run({
     id: halfDossier.id,
     verification_version: TREND_LEGACY_VERSION,
@@ -1510,7 +1510,7 @@ console.log('=== G.39 已标记 legacy dossier 不再被重复标记（幂等）
   const now = Date.now();
   const completedAt = 1700000000000;
   const changeKey = 'trend:US:IDEM2:2026-01-17:trend_breakout';
-  const { TREND_LEGACY_UNKNOWN_VERSION } = await import('../radar_dossier_enrichment.mjs');
+  const { TREND_LEGACY_UNKNOWN_VERSION } = await import('../src/radar_dossier_enrichment.mjs');
 
   // 创建已标记 legacy_unknown 的 dossier（无条件 JSON）
   insertDossier.run({

@@ -5,10 +5,10 @@ import { readFileSync, writeFileSync, appendFileSync, mkdirSync, statSync } from
 import { resolve, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { membershipAt } from '../stock_watchlist_history.mjs';
-import { isTradingDate, nextMarketOpenAt, getMarketStatus } from '../market_calendar.mjs';
-import { buildSameStockPairs, loadEntryAlphaInput, expectedTradingSessions } from '../stock_entry_alpha.mjs';
-import { summarizeEntryAlpha, walkForwardMonthly } from '../stock_entry_alpha_statistics.mjs';
+import { membershipAt } from '../src/stock_watchlist_history.mjs';
+import { isTradingDate, nextMarketOpenAt, getMarketStatus } from '../src/market_calendar.mjs';
+import { buildSameStockPairs, loadEntryAlphaInput, expectedTradingSessions } from '../src/stock_entry_alpha.mjs';
+import { summarizeEntryAlpha, walkForwardMonthly } from '../src/stock_entry_alpha_statistics.mjs';
 
 const option=name=>{ const value=process.argv.find(arg=>arg.startsWith(`--${name}=`));return value?.slice(name.length+3)||null; };
 const required=['db','protocol','engine','profile','profile-version','strategy','config-hash','cutoff','out-dir'];

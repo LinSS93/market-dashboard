@@ -5,8 +5,8 @@ import Database from 'better-sqlite3';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setRadarDbForTest, clearRadarDbForTest } from '../radar_schema.mjs';
-import { buildWeeklyQualityReport, buildWeeklyMessage, runWeeklyReportIfDue, lastCompletedWeek } from '../radar_weekly_report.mjs';
+import { setRadarDbForTest, clearRadarDbForTest } from '../src/radar_schema.mjs';
+import { buildWeeklyQualityReport, buildWeeklyMessage, runWeeklyReportIfDue, lastCompletedWeek } from '../src/radar_weekly_report.mjs';
 
 let passed = 0;
 function ok(cond, name) { assert.ok(cond, name); passed += 1; console.log(`  PASS ${name}`); }

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { buildScenarioReplayDashboard } from '../scenario_backtest.mjs';
+import { buildScenarioReplayDashboard } from '../src/scenario_backtest.mjs';
 
 function argValue(name) {
   const prefix = `--${name}=`;

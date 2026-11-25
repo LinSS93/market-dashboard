@@ -13,7 +13,7 @@ try {
 if (response?.ok) {
   console.log(JSON.stringify({ ...(await response.json()), note:'已交由运行中的看板后台任务重建，避免 SQLite 多进程锁竞争。' }, null, 2));
 } else {
-  const { rebuildHistoricalSignalReplay } = await import('../stock_engine.mjs');
+  const { rebuildHistoricalSignalReplay } = await import('../src/stock_engine.mjs');
   const result = await rebuildHistoricalSignalReplay({ days, markets });
   console.log(JSON.stringify(result, null, 2));
 }

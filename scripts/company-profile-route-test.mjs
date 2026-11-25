@@ -1,8 +1,8 @@
 // 离线验证 POST /radar/company-profile 的 HTTP 失败语义。
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
-import { setRadarDbForTest, clearRadarDbForTest } from '../radar_schema.mjs';
-import { handleCompanyProfilePost } from '../server_route_handlers.mjs';
+import { setRadarDbForTest, clearRadarDbForTest } from '../src/radar_schema.mjs';
+import { handleCompanyProfilePost } from '../src/server_route_handlers.mjs';
 
 let assertions = 0;
 function check(condition, message) { assert.ok(condition, message); assertions += 1; }

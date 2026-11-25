@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { STOCK_PERSONA_VERDICT_SCHEMA_VERSION, buildStockPersonaVerdicts } from '../stock_persona_verdicts.mjs';
+import { STOCK_PERSONA_VERDICT_SCHEMA_VERSION, buildStockPersonaVerdicts } from '../src/stock_persona_verdicts.mjs';
 
 let passed = 0;
 function equal(actual, expected, message) { assert.equal(actual, expected, message); passed += 1; }
@@ -38,10 +38,10 @@ equal(verdicts.profiles.confirmed.technicalScore, -0.28, 'technical score remain
 const missing = buildStockPersonaVerdicts({ signalProfiles, profileDecisions:{}, activeProfileId:'balanced' });
 equal(missing.profiles.responsive.actionLabel, '暂缓判断', 'missing full decision never falls back to a naked direction');
 
-const stockEngineSource = readFileSync(resolve('stock_engine.mjs'), 'utf8');
-const stockProfileStateSource = readFileSync(resolve('stock_profile_state.mjs'), 'utf8');
+const stockEngineSource = readFileSync(resolve('src/stock_engine.mjs'), 'utf8');
+const stockProfileStateSource = readFileSync(resolve('src/stock_profile_state.mjs'), 'utf8');
 const stockUiSource = readFileSync(resolve('app/stock.js'), 'utf8');
-const verdictSource = readFileSync(resolve('stock_persona_verdicts.mjs'), 'utf8');
+const verdictSource = readFileSync(resolve('src/stock_persona_verdicts.mjs'), 'utf8');
 equal(stockEngineSource.includes('profileDecisions'), true, 'stock analysis DTO computes three full decisions');
 equal(stockEngineSource.includes('stockProfileState.resolveForPosition'), true, 'formal selection delegates to the profile state boundary');
 equal(stockProfileStateSource.includes('stock_position_profile_bindings'), true, 'position personality binding is persisted and auditable');

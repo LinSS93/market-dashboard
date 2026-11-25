@@ -19,7 +19,7 @@ import {
 import { advanceAlertState } from './alert_logic.mjs';
 
 const require = createRequire(import.meta.url);
-const DashboardActions = require('./app/action-taxonomy.cjs');
+const DashboardActions = require('../app/action-taxonomy.cjs');
 
 // 与 server.mjs 保持一致：APP_DIR = path.join(process.cwd(), 'app')
 const APP_DIR = join(process.cwd(), 'app');

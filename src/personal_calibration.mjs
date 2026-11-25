@@ -1,14 +1,13 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
+import { MARKET_DB_PATH } from './project_paths.mjs';
 import Database from 'better-sqlite3';
 import { parse } from 'csv-parse/sync';
 import { selectedStockStrategy } from './stock_signal_contract.mjs';
 import { computePositionFromEventRows, validateTradeDate } from './stock_trade_ledger.mjs';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DB_PATH = join(__dirname, 'data', 'market_data.db');
+const DB_PATH = MARKET_DB_PATH;
 fs.mkdirSync(dirname(DB_PATH), { recursive: true });
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');

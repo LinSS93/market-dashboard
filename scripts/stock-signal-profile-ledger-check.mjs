@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { db, recordSignalProfileSnapshots, SIGNAL_ENGINE_VERSION } from '../stock_engine.mjs';
-import { getSignalProfile, STOCK_SIGNAL_PROFILE_SCHEMA_VERSION } from '../stock_signal_profiles.mjs';
-import { STOCK_PROFILE_STRATEGY_VERSION } from '../stock_profile_strategy.mjs';
+import { db, recordSignalProfileSnapshots, SIGNAL_ENGINE_VERSION } from '../src/stock_engine.mjs';
+import { getSignalProfile, STOCK_SIGNAL_PROFILE_SCHEMA_VERSION } from '../src/stock_signal_profiles.mjs';
+import { STOCK_PROFILE_STRATEGY_VERSION } from '../src/stock_profile_strategy.mjs';
 
 const tables = db.prepare(`SELECT name FROM sqlite_master WHERE type='table'
   AND name IN ('stock_signal_profile_shadows','stock_signal_profile_shadow_outcomes')`).all().map(row => row.name);

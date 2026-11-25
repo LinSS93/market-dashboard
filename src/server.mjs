@@ -10,14 +10,14 @@ import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { fileURLToPath } from 'node:url';
+import { MARKET_DB_PATH } from './project_paths.mjs';
 import { RadarQueryProcess } from './radar_query_process.mjs';
 import { getRadarDb as initializeRadarDb } from './radar_schema.mjs';
 import { exec, execSync } from 'child_process';
 import { Worker } from 'node:worker_threads';
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
-const DashboardActions = require('./app/action-taxonomy.cjs');
+const DashboardActions = require('../app/action-taxonomy.cjs');
 
 // 异步 exec（非阻塞），用于空头数据等慢速抓取场景，避免 execSync 冻结 Node 事件循环
 function execAsync(cmd, opts = {}) {
@@ -111,7 +111,7 @@ function isSameOriginRequest(req) {
 
 // Apply schema changes once in the owner process before the read-only child opens it.
 initializeRadarDb();
-const radarReadOptions={dbPath:fileURLToPath(new URL('./data/market_data.db',import.meta.url))};
+const radarReadOptions={dbPath:MARKET_DB_PATH};
 const radarQueries = new RadarQueryProcess(radarReadOptions);
 // Status must not wait behind a cold queue query; two bounded processes at most.
 const radarStatusQueries = new RadarQueryProcess(radarReadOptions);
@@ -1415,7 +1415,7 @@ function saveQuotesHistory() {
 // 3456 反向代理与 reconcile 已移除：股票监控看板完全本地化（./stock_engine.mjs）。
 
 // ---------- 主服务 ----------
-import { startRsi6, serveRsi6 } from './rsi6/scanner.mjs';
+import { startRsi6, serveRsi6 } from '../rsi6/scanner.mjs';
 
 const server = http.createServer(async (req, res) => {
   const requestStartedAt = Date.now();

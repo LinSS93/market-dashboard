@@ -8,9 +8,9 @@ import {
   setRadarDbForTest,
   clearRadarDbForTest,
   advanceJobProgress,
-} from '../radar_schema.mjs';
-import { SCORING_PROFILE_VERSION } from '../radar_scoring.mjs';
-import { getCandidateDetail, getTopCandidates, listOpportunities } from '../radar_query_api.mjs';
+} from '../src/radar_schema.mjs';
+import { SCORING_PROFILE_VERSION } from '../src/radar_scoring.mjs';
+import { getCandidateDetail, getTopCandidates, listOpportunities } from '../src/radar_query_api.mjs';
 
 let passed = 0;
 let failed = 0;

@@ -17,7 +17,7 @@
 // 运行：node scripts/radar-queue-api-test.mjs
 
 import Database from 'better-sqlite3';
-import { setRadarDbForTest, clearRadarDbForTest } from '../radar_schema.mjs';
+import { setRadarDbForTest, clearRadarDbForTest } from '../src/radar_schema.mjs';
 import {
   listResearchQueue,
   listSymbolsAcrossChannels,
@@ -27,9 +27,9 @@ import {
   setAssetAudit,
   getDossiersBySymbol,
   autoAuditProvisionalAssets,
-} from '../radar_query_api.mjs';
-import { SCORING_PROFILE_VERSION } from '../radar_scoring.mjs';
-import { lastCompletedTradingDate } from '../market_calendar.mjs';
+} from '../src/radar_query_api.mjs';
+import { SCORING_PROFILE_VERSION } from '../src/radar_scoring.mjs';
+import { lastCompletedTradingDate } from '../src/market_calendar.mjs';
 
 let pass = 0, fail = 0;
 function assert(cond, msg) {

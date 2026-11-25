@@ -1,6 +1,6 @@
 // 离线验证机会雷达飞书摘要的信息层级与文案边界。
 import assert from 'node:assert/strict';
-import { buildRadarDigestMessage } from '../alert_engine.mjs';
+import { buildRadarDigestMessage } from '../src/alert_engine.mjs';
 
 let assertions = 0;
 function check(condition, message) { assert.ok(condition, message); assertions += 1; }
